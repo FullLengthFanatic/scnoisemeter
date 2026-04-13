@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scnoisemeter"
+version = "0.1.12"
+description = "Platform-agnostic quantification of technical noise in single-cell RNA-seq data"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "scNoiseMeter contributors" }]
+
+dependencies = [
+    "pysam>=0.22",
+    "pyranges>=0.0.129",
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "click>=8.1",
+    "plotly>=5.18",
+    "scipy>=1.11",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "pytest-cov", "black", "ruff"]
+
+[project.scripts]
+scnoisemeter = "scnoisemeter.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["scnoisemeter*"]
+
+[tool.setuptools.package-data]
+"scnoisemeter.data" = ["whitelists/*.txt.gz", "references/*.bed.gz"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
