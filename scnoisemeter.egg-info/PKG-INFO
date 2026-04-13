@@ -1,0 +1,21 @@
+Metadata-Version: 2.4
+Name: scnoisemeter
+Version: 0.1.11
+Summary: Platform-agnostic quantification of technical noise in single-cell RNA-seq data
+Author: scNoiseMeter contributors
+License: MIT
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: pysam>=0.22
+Requires-Dist: pyranges>=0.0.129
+Requires-Dist: pandas>=2.0
+Requires-Dist: numpy>=1.24
+Requires-Dist: click>=8.1
+Requires-Dist: plotly>=5.18
+Requires-Dist: scipy>=1.11
+Requires-Dist: tqdm>=4.66
+Provides-Extra: dev
+Requires-Dist: pytest>=7; extra == "dev"
+Requires-Dist: pytest-cov; extra == "dev"
+Requires-Dist: black; extra == "dev"
+Requires-Dist: ruff; extra == "dev"
