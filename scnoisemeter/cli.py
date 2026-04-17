@@ -66,7 +66,10 @@ from scnoisemeter.modules.pipeline import run_pipeline
 from scnoisemeter.utils.bam_inspector import inspect_bam, BamMetadata
 from scnoisemeter.utils.annotation_fetcher import (
     fetch_latest_gencode_gtf,
+    fetch_gencode_gtf_version,
     fetch_latest_polyasite_atlas,
+    fetch_polyadb4_atlas,
+    fetch_fantom5_cage_peaks,
     extract_gencode_version_from_filename,
     extract_polyasite_version_from_filename,
 )
@@ -83,7 +86,12 @@ def _shared_options(func):
     decorators = [
         click.option("--gtf",               required=False, default=None, type=click.Path(exists=True),
                      help="GENCODE GTF (plain or .gz).  If omitted, the latest GENCODE human annotation "
-                          "is downloaded automatically to ~/.cache/scnoisemeter/."),
+                          "is downloaded automatically to ~/.cache/scnoisemeter/. "
+                          "Takes precedence over --gtf-version."),
+        click.option("--gtf-version",       default=None,   type=int,
+                     help="GENCODE release number to auto-download (e.g. 42). "
+                          "Ignored when --gtf is supplied. "
+                          "Use --gtf-version 42 to match PolyASite 3.0 and avoid version mismatch warnings."),
         click.option("--barcode-whitelist",  default=None,   type=click.Path(exists=True), help="File of valid corrected barcodes, one per line."),
         click.option("--barcode-tag",        default="CB",   show_default=True, help="BAM tag for corrected cell barcode."),
         click.option("--umi-tag",            default="UB",   show_default=True, help="BAM tag for corrected UMI."),
@@ -115,14 +123,27 @@ def _shared_options(func):
         click.option("--polya-sites",        multiple=True,  type=click.Path(exists=True),
                      help="PolyA site BED file(s) for the 3\'-anchored full-length fraction. "
                           "Accepts plain .bed or .bed.gz. Repeat the flag to merge multiple "
-                          "databases (e.g. --polya-sites polyasite.bed.gz --polya-sites apadb.bed.gz). "
-                          "If omitted, the latest PolyASite 3.0 atlas is downloaded automatically "
-                          "to ~/.cache/scnoisemeter/.  Without either, a minimum read length proxy "
-                          "is used."),
+                          "databases. When supplied, --polya-db is ignored."),
+        click.option("--polya-db",
+                     default="polyasite3",
+                     show_default=True,
+                     type=click.Choice(["polyasite3", "polyadb4", "both"], case_sensitive=False),
+                     help="polyA database to auto-download when --polya-sites is not supplied. "
+                          "polyasite3: PolyASite 3.0 (scRNA-seq atlas, GENCODE v42, ~569 k sites); "
+                          "polyadb4: PolyA_DB v4 main collection (bulk + long-read validated, "
+                          "hg38, ~281 k sites); "
+                          "both: merge both databases for maximum site coverage."),
         click.option("--tss-sites",          multiple=True,  type=click.Path(exists=True),
                      help="CAGE peak / TSS BED file(s) for the 5\'-anchored full-length metric. "
-                          "Accepts plain .bed or .bed.gz. Repeat for multiple databases "
-                          "(e.g. FANTOM5 + ENCODE RAMPAGE)."),
+                          "Accepts plain .bed or .bed.gz. Repeat for multiple databases. "
+                          "When supplied, --tss-db is ignored."),
+        click.option("--tss-db",
+                     default="fantom5",
+                     show_default=True,
+                     type=click.Choice(["fantom5", "none"], case_sensitive=False),
+                     help="TSS database to auto-download when --tss-sites is not supplied. "
+                          "fantom5: FANTOM5 phase 1+2 CAGE peaks, hg38 (~180 k peaks); "
+                          "none: disable TSS metric entirely."),
         click.option("--numt-bed",           default=None,   type=click.Path(exists=True),
                      help="NUMT BED file (nuclear mitochondrial DNA segments, hg38 coordinates). "
                           "When provided, mitochondrial reads are cross-checked against NUMT "
@@ -157,45 +178,70 @@ def cli():
 # Annotation resolution helpers (GTF + polyA atlas auto-download)
 # ---------------------------------------------------------------------------
 
-def _resolve_gtf(gtf_arg: Optional[str], offline: bool = False):
+def _resolve_gtf(
+    gtf_arg: Optional[str],
+    gtf_version: Optional[int] = None,
+    offline: bool = False,
+):
     """
     Resolve the GTF path.
 
-    If *gtf_arg* is None, use the cached GENCODE GTF (or download it if the
-    cache is empty and *offline* is False).  No network call is made when
-    *gtf_arg* is explicitly supplied.
+    Priority: --gtf > --gtf-version > auto-download latest.
 
     Returns (path_str, version_int_or_None, source_str).
     """
-    if gtf_arg is None:
-        path, version = fetch_latest_gencode_gtf(offline=offline)
+    if gtf_arg is not None:
+        version = extract_gencode_version_from_filename(gtf_arg)
+        return gtf_arg, version, "user-supplied"
+
+    if gtf_version is not None:
+        path, version = fetch_gencode_gtf_version(gtf_version, offline=offline)
         return str(path), version, "auto-downloaded"
 
-    # User-supplied path — read version from filename only; no network call.
-    version = extract_gencode_version_from_filename(gtf_arg)
-    return gtf_arg, version, "user-supplied"
+    path, version = fetch_latest_gencode_gtf(offline=offline)
+    return str(path), version, "auto-downloaded"
 
 
 def _resolve_polya_sites(
     polya_sites_arg,
+    polya_db: str = "polyasite3",
     hint_gencode_version: Optional[int] = None,
     offline: bool = False,
 ):
     """
     Resolve polyA site file paths.
 
-    If *polya_sites_arg* is empty, use the cached PolyASite 3.0 atlas (or
-    download it if the cache is empty and *offline* is False).  No network
-    call is made when *polya_sites_arg* is explicitly supplied.
+    If *polya_sites_arg* is non-empty, those paths are used directly and
+    *polya_db* is ignored.  Otherwise, the database(s) selected by *polya_db*
+    are auto-downloaded (or read from cache).
+
+    *polya_db* choices:
+      polyasite3  PolyASite 3.0 (scRNA-seq, GENCODE v42)
+      polyadb4    PolyA_DB v4 main collection (bulk + long-read, hg38)
+      both        merge both databases
 
     Returns (paths_list, version_int_or_None, source_str).
+    Version is the GENCODE version embedded in the atlas filename (PolyASite
+    convention); PolyA_DB v4 returns None since it uses NCBI/RefSeq.
     """
     if not polya_sites_arg:
-        path, version = fetch_latest_polyasite_atlas(
-            hint_max_gencode_version=hint_gencode_version,
-            offline=offline,
-        )
-        return [str(path)], version, "auto-downloaded"
+        polya_db = polya_db.lower()
+        if polya_db == "polyadb4":
+            path = fetch_polyadb4_atlas(offline=offline)
+            return [str(path)], None, "auto-downloaded"
+        elif polya_db == "both":
+            pa_path, pa_version = fetch_latest_polyasite_atlas(
+                hint_max_gencode_version=hint_gencode_version,
+                offline=offline,
+            )
+            db4_path = fetch_polyadb4_atlas(offline=offline)
+            return [str(pa_path), str(db4_path)], pa_version, "auto-downloaded"
+        else:  # polyasite3 (default)
+            path, version = fetch_latest_polyasite_atlas(
+                hint_max_gencode_version=hint_gencode_version,
+                offline=offline,
+            )
+            return [str(path)], version, "auto-downloaded"
 
     paths = list(polya_sites_arg)
     # Detect version from first recognisable filename (PolyASite 3.0 naming convention)
@@ -205,6 +251,30 @@ def _resolve_polya_sites(
         if version is not None:
             break
     return paths, version, "user-supplied"
+
+
+def _resolve_tss_sites(
+    tss_sites_arg,
+    tss_db: str = "fantom5",
+    offline: bool = False,
+) -> list:
+    """
+    Resolve TSS site file paths.
+
+    If *tss_sites_arg* is non-empty, those paths are used directly and
+    *tss_db* is ignored.  Otherwise, *tss_db* controls auto-download:
+      fantom5  FANTOM5 phase 1+2 CAGE peaks (hg38)
+      none     Return empty list; TSS metric is disabled.
+
+    Returns a list of resolved path strings (may be empty).
+    """
+    if tss_sites_arg:
+        return list(tss_sites_arg)
+    if tss_db.lower() == "none":
+        return []
+    # fantom5 (default)
+    path = fetch_fantom5_cage_peaks(offline=offline)
+    return [str(path)]
 
 
 def _check_version_consistency(gtf_version: Optional[int], polya_version: Optional[int]) -> Optional[str]:
@@ -224,8 +294,8 @@ def _check_version_consistency(gtf_version: Optional[int], polya_version: Option
             f"Genes with 3\u2032 UTRs annotated between "
             f"v{min(gtf_version, polya_version)} and v{max(gtf_version, polya_version)} "
             f"may have reduced polyA anchoring scores. "
-            f"For best results, use matching versions or omit both --gtf and "
-            f"--polya-sites to auto-download a matched pair."
+            f"To resolve: pass --gtf-version {polya_version} to pin the GTF to match "
+            f"the atlas, or --polya-db polyadb4 to use a database without GENCODE versioning."
         )
         click.echo(msg, err=True)
         return msg
@@ -437,11 +507,11 @@ def _is_illumina_platform(platform) -> bool:
 @_shared_options
 def run_cmd(
     bam, sample_name, cell_barcodes,
-    gtf, barcode_whitelist, barcode_tag, umi_tag,
+    gtf, gtf_version, barcode_whitelist, barcode_tag, umi_tag,
     chemistry, platform, pipeline_stage, chimeric_distance,
     repeats, reference, threads, no_umi_dedup, no_cache,
-    exclude_biotypes, output_dir, obs_metadata, polya_sites,
-    tss_sites, numt_bed, offline, verbose,
+    exclude_biotypes, output_dir, obs_metadata, polya_sites, polya_db,
+    tss_sites, tss_db, numt_bed, offline, verbose,
 ):
     """
     Classify reads in a single BAM and produce QC metrics.
@@ -568,7 +638,7 @@ def run_cmd(
         raise SystemExit(0)
 
     # Resolve GTF: use cache or auto-download if --gtf was not supplied
-    gtf, gtf_version, gtf_source = _resolve_gtf(gtf, offline=offline)
+    gtf, gtf_version, gtf_source = _resolve_gtf(gtf, gtf_version=gtf_version, offline=offline)
 
     # Validate chromosome naming vs GTF (fatal if mismatch)
     _validate_chromosome_naming(meta, gtf)
@@ -579,6 +649,7 @@ def run_cmd(
     # Resolve polyA sites: use cache or auto-download if --polya-sites omitted
     polya_paths, polya_version, polya_source = _resolve_polya_sites(
         polya_sites,
+        polya_db=polya_db,
         hint_gencode_version=gtf_version if gtf_source == "auto-downloaded" else None,
         offline=offline,
     )
@@ -640,11 +711,9 @@ def run_cmd(
     # Attach polyA site dict (merged from resolved polya-site files)
     result._polya_site_dict = _load_polya_sites(polya_paths)
 
-    # Attach TSS site dict (merged from all --tss-sites files)
-    if tss_sites:
-        result._tss_site_dict = _load_tss_sites(list(tss_sites))
-    else:
-        result._tss_site_dict = None
+    # Attach TSS site dict (resolved: auto-download or user-supplied)
+    tss_paths = _resolve_tss_sites(tss_sites, tss_db=tss_db, offline=offline)
+    result._tss_site_dict = _load_tss_sites(tss_paths) if tss_paths else None
 
     # Attach NUMT intervals
     if numt_bed:
@@ -662,7 +731,13 @@ def run_cmd(
         "version": polya_version,
         "source": polya_source,
         "path": polya_paths[0] if polya_paths else None,
+        "db": polya_db,
     }
+    sm._tss_info = {
+        "db": tss_db,
+        "source": "user-supplied" if tss_sites else "auto-downloaded",
+        "path": tss_paths[0] if tss_paths else None,
+    } if tss_paths else None
     if version_warning:
         sm.warnings.append(version_warning)
 
@@ -746,11 +821,11 @@ def run_cmd(
 @_shared_options
 def compare_cmd(
     bam_a, bam_b, label_a, label_b,
-    gtf, barcode_whitelist, barcode_tag, umi_tag,
+    gtf, gtf_version, barcode_whitelist, barcode_tag, umi_tag,
     chemistry, platform, pipeline_stage, chimeric_distance,
     repeats, reference, threads, no_umi_dedup, no_cache,
-    exclude_biotypes, output_dir, obs_metadata, polya_sites,
-    tss_sites, numt_bed, offline, verbose,
+    exclude_biotypes, output_dir, obs_metadata, polya_sites, polya_db,
+    tss_sites, tss_db, numt_bed, offline, verbose,
 ):
     """
     Compare noise profiles between two BAMs (e.g. pre- vs post-filter).
@@ -772,14 +847,18 @@ def compare_cmd(
     stage = None if pipeline_stage == "auto" else PipelineStage(pipeline_stage)
 
     # Resolve GTF (use cache or auto-download if not supplied)
-    gtf, gtf_version, gtf_source = _resolve_gtf(gtf, offline=offline)
+    gtf, gtf_version, gtf_source = _resolve_gtf(gtf, gtf_version=gtf_version, offline=offline)
 
     # Resolve polyA sites (use cache or auto-download if not supplied)
     polya_paths, polya_version, polya_source = _resolve_polya_sites(
         polya_sites,
+        polya_db=polya_db,
         hint_gencode_version=gtf_version if gtf_source == "auto-downloaded" else None,
         offline=offline,
     )
+
+    # Resolve TSS sites
+    tss_paths = _resolve_tss_sites(tss_sites, tss_db=tss_db, offline=offline)
 
     # Version consistency check
     version_warning = _check_version_consistency(gtf_version, polya_version)
@@ -806,13 +885,20 @@ def compare_cmd(
             reference_path=reference,
         )
         result._polya_site_dict = _load_polya_sites(polya_paths)
+        result._tss_site_dict = _load_tss_sites(tss_paths) if tss_paths else None
         sm, ct = compute_metrics(result, label, platform=meta.platform.value)
         sm._gtf_info = {"version": gtf_version, "source": gtf_source, "path": gtf}
         sm._polya_info = {
             "version": polya_version,
             "source": polya_source,
             "path": polya_paths[0] if polya_paths else None,
+            "db": polya_db,
         }
+        sm._tss_info = {
+            "db": tss_db,
+            "source": "user-supplied" if tss_sites else "auto-downloaded",
+            "path": tss_paths[0] if tss_paths else None,
+        } if tss_paths else None
         if version_warning:
             sm.warnings.append(version_warning)
         results[label] = (sm, ct, result)
@@ -843,9 +929,23 @@ def compare_cmd(
 @click.option("--output-dir",  required=True,  type=click.Path(),
               help="Root output directory; each BAM gets its own subdirectory.")
 @click.option("--gtf",         default=None,   type=click.Path(exists=True),
-              help="GENCODE GTF (plain or .gz). Auto-downloaded if omitted.")
+              help="GENCODE GTF (plain or .gz). Auto-downloaded if omitted. Takes precedence over --gtf-version.")
+@click.option("--gtf-version", default=None,   type=int,
+              help="GENCODE release number to auto-download (e.g. 42). Ignored when --gtf is supplied.")
 @click.option("--polya-sites", multiple=True,  type=click.Path(exists=True),
-              help="PolyA site BED file(s). Auto-downloaded if omitted.")
+              help="PolyA site BED file(s). Auto-downloaded if omitted; see --polya-db.")
+@click.option("--polya-db",
+              default="polyasite3", show_default=True,
+              type=click.Choice(["polyasite3", "polyadb4", "both"], case_sensitive=False),
+              help="polyA database to auto-download when --polya-sites is not supplied. "
+                   "polyasite3 / polyadb4 / both (merge).")
+@click.option("--tss-sites",   multiple=True,  type=click.Path(exists=True),
+              help="CAGE peak / TSS BED file(s). Auto-downloaded if omitted; see --tss-db.")
+@click.option("--tss-db",
+              default="fantom5", show_default=True,
+              type=click.Choice(["fantom5", "none"], case_sensitive=False),
+              help="TSS database to auto-download when --tss-sites is not supplied. "
+                   "fantom5 / none (disable TSS metric).")
 @click.option("--run-all",     is_flag=True,
               help="Non-interactive: auto-run all BAMs that can be fully inferred. "
                    "BAMs with blocking issues are skipped with a warning.")
@@ -855,8 +955,8 @@ def compare_cmd(
                    "Ignored when --gtf / --polya-sites are supplied explicitly.")
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug logging.")
 def discover_cmd(
-    bam_dir, reference, tss_sites, threads, output_dir,
-    gtf, polya_sites, run_all, offline, verbose,
+    bam_dir, reference, tss_sites, tss_db, threads, output_dir,
+    gtf, gtf_version, polya_sites, polya_db, run_all, offline, verbose,
 ):
     """
     Discover BAMs in a directory, infer their parameters, and run scNoiseMeter
@@ -881,12 +981,14 @@ def discover_cmd(
 
     # Resolve shared annotation references upfront (so we only download once)
     click.echo("\nResolving annotation references …")
-    gtf_path, gtf_version, gtf_source = _resolve_gtf(gtf, offline=offline)
+    gtf_path, gtf_version, gtf_source = _resolve_gtf(gtf, gtf_version=gtf_version, offline=offline)
     polya_paths, polya_version, polya_source = _resolve_polya_sites(
         polya_sites,
+        polya_db=polya_db,
         hint_gencode_version=gtf_version if gtf_source == "auto-downloaded" else None,
         offline=offline,
     )
+    tss_paths = _resolve_tss_sites(tss_sites, tss_db=tss_db, offline=offline)
     version_warning = _check_version_consistency(gtf_version, polya_version)
 
     # ------------------------------------------------------------------ #
@@ -978,7 +1080,7 @@ def discover_cmd(
         ]
         for p in polya_paths:
             cmd_parts += ["--polya-sites", p]
-        for ts in tss_sites:
+        for ts in tss_paths:
             cmd_parts += ["--tss-sites", ts]
         cmd_parts += [
             "--platform", platform_val,
@@ -1005,8 +1107,10 @@ def discover_cmd(
                 polya_paths=polya_paths,
                 polya_version=polya_version,
                 polya_source=polya_source,
+                polya_db=polya_db,
                 version_warning=version_warning,
-                tss_sites=list(tss_sites),
+                tss_paths=tss_paths,
+                tss_db=tss_db,
                 reference=reference,
                 threads=threads,
                 output_dir=bam_output_dir,
@@ -1038,8 +1142,10 @@ def _run_single_bam_for_discover(
     polya_paths: list,
     polya_version,
     polya_source: str,
+    polya_db: str,
     version_warning: Optional[str],
-    tss_sites: list,
+    tss_paths: list,
+    tss_db: str,
     reference: str,
     threads: int,
     output_dir: Path,
@@ -1082,10 +1188,7 @@ def _run_single_bam_for_discover(
 
     result._polya_site_dict = _load_polya_sites(polya_paths)
 
-    if tss_sites:
-        result._tss_site_dict = _load_tss_sites(tss_sites)
-    else:
-        result._tss_site_dict = None
+    result._tss_site_dict = _load_tss_sites(tss_paths) if tss_paths else None
 
     result._numt_intervals = None
 
@@ -1095,7 +1198,13 @@ def _run_single_bam_for_discover(
         "version": polya_version,
         "source": polya_source,
         "path": polya_paths[0] if polya_paths else None,
+        "db": polya_db,
     }
+    sm._tss_info = {
+        "db": tss_db,
+        "source": "auto-downloaded",
+        "path": tss_paths[0] if tss_paths else None,
+    } if tss_paths else None
     if version_warning:
         sm.warnings.append(version_warning)
 

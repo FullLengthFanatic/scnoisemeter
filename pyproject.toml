@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scnoisemeter"
-version = "0.1.12"
+version = "0.2.0"
 description = "Platform-agnostic quantification of technical noise in single-cell RNA-seq data"
 readme = "README.md"
 requires-python = ">=3.9"

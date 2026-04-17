@@ -68,7 +68,7 @@ from scnoisemeter.constants import MITO_CONTIG_NAMES
 logger = logging.getLogger(__name__)
 
 # Bump this when the interval build logic changes so stale caches are invalidated
-_CACHE_VERSION = "v6"
+_CACHE_VERSION = "v7"
 
 
 # ---------------------------------------------------------------------------
@@ -593,10 +593,21 @@ def _load_repeats(repeats_path: Path) -> pr.PyRanges:
 
 def _manual_complement(gene_bodies_df: pd.DataFrame) -> pr.PyRanges:
     """
-    Return the genomic complement of all gene bodies as a PyRanges.
+    Return the intergenic gaps between merged gene bodies as a PyRanges.
 
-    For each chromosome, finds the gaps between merged gene body intervals.
-    The result represents intergenic regions (strand-agnostic).
+    For each chromosome, identifies the gaps between merged gene body intervals,
+    including any region from position 0 to the first gene. The region after
+    the last gene on each chromosome is not included because chromosome lengths
+    are not available here; the read classifier handles post-last-gene reads
+    via its residual fallback (any bases not in exons or introns are assigned
+    INTERGENIC_SPARSE) so query correctness is unaffected.
+
+    This object is used only as the denominator in the Poisson background model
+    (compute_intergenic_bases). Excluding the post-last-gene tail introduces a
+    small systematic underestimate of intergenic bases, which makes the Poisson
+    test slightly conservative. The previous implementation added a sentinel
+    End=2_000_000_000 per chromosome, inflating the denominator by ~24× and
+    causing the test to flag almost every concentrated intergenic locus.
     """
     if gene_bodies_df.empty:
         return pr.PyRanges()
@@ -623,13 +634,9 @@ def _manual_complement(gene_bodies_df: pd.DataFrame) -> pr.PyRanges:
                     "Strand": ".",
                 })
             prev_end = max(prev_end, int(row["End"]))
-        # Gap after the last gene to chromosome end (large sentinel)
-        gaps.append({
-            "Chromosome": chrom,
-            "Start":  prev_end,
-            "End":    2_000_000_000,
-            "Strand": ".",
-        })
+        # Post-last-gene region omitted: chromosome lengths are unknown here.
+        # Reads mapping there are still classified as INTERGENIC_SPARSE by the
+        # classifier's residual fallback; only the Poisson denominator is affected.
 
     if not gaps:
         return pr.PyRanges()
