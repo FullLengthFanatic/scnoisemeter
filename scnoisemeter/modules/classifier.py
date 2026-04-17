@@ -264,22 +264,28 @@ class ReadClassifier:
                 read_length=read.query_alignment_length or 0,
             )
 
-        # --- Check flags ---
-        is_multimapper = self._is_multimapper(read)
+        # --- Multimapper (NH > 1) — highest priority per README hierarchy ---
+        if self._is_multimapper(read):
+            return self._make_result(
+                read, cb, umi,
+                ReadCategory.MULTIMAPPER,
+                {ReadCategory.MULTIMAPPER: read.query_alignment_length or 0},
+                True,
+            )
 
         # --- Mitochondrial ---
         contig = read.reference_name or ""
         if contig in MITO_CONTIG_NAMES:
             category = ReadCategory.MITOCHONDRIAL
             base_counts = {ReadCategory.MITOCHONDRIAL: read.query_alignment_length or 0}
-            return self._make_result(read, cb, umi, category, base_counts, is_multimapper)
+            return self._make_result(read, cb, umi, category, base_counts, False)
 
         # --- Chimeric ---
         is_chimeric, _ = self._check_chimeric(read)
         if is_chimeric:
             category = ReadCategory.CHIMERIC
             base_counts = {ReadCategory.CHIMERIC: read.query_alignment_length or 0}
-            return self._make_result(read, cb, umi, category, base_counts, is_multimapper)
+            return self._make_result(read, cb, umi, category, base_counts, False)
 
         # --- Artifact flags (TSO, polyA) ---
         is_tso   = self._check_tso_invasion(read)
@@ -288,7 +294,7 @@ class ReadClassifier:
         # --- Genomic classification ---
         category, base_counts, has_noncano = self._classify_by_intervals(read)
 
-        result = self._make_result(read, cb, umi, category, base_counts, is_multimapper)
+        result = self._make_result(read, cb, umi, category, base_counts, False)
         result.is_tso_invasion           = is_tso
         result.is_polya_priming          = is_polya
         result.has_noncanonical_junction = has_noncano

@@ -172,15 +172,15 @@ class TestFetchLatestPolyasiteAtlas:
         mock_dl.assert_not_called()
 
     def test_triggers_download_when_not_cached(self, tmp_path):
-        def fake_url_exists(url, **kwargs):
-            return "GENCODE_42" in url
+        def fake_probe(url, **kwargs):
+            return 200 if "GENCODE_42" in url else 404
 
         def fake_download(url, dest, **kwargs):
             dest.write_bytes(b"fake atlas content")
 
         with (
             patch("scnoisemeter.utils.annotation_fetcher.CACHE_DIR", tmp_path),
-            patch("scnoisemeter.utils.annotation_fetcher._url_exists", side_effect=fake_url_exists),
+            patch("scnoisemeter.utils.annotation_fetcher._url_probe_status", side_effect=fake_probe),
             patch("scnoisemeter.utils.annotation_fetcher._download", side_effect=fake_download),
         ):
             path, version = fetch_latest_polyasite_atlas(hint_max_gencode_version=49)
@@ -191,7 +191,8 @@ class TestFetchLatestPolyasiteAtlas:
     def test_raises_when_no_version_found(self, tmp_path):
         with (
             patch("scnoisemeter.utils.annotation_fetcher.CACHE_DIR", tmp_path),
-            patch("scnoisemeter.utils.annotation_fetcher._url_exists", return_value=False),
+            patch("scnoisemeter.utils.annotation_fetcher._url_probe_status", return_value=404),
+            patch("scnoisemeter.utils.annotation_fetcher._download"),
         ):
             with pytest.raises(RuntimeError, match="Could not find any PolyASite 3.0 atlas"):
                 fetch_latest_polyasite_atlas(hint_max_gencode_version=44)

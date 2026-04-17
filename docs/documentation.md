@@ -1,6 +1,6 @@
 # scNoiseMeter Documentation
 
-Version 0.1.12
+Version 0.2.0
 
 ---
 
@@ -217,7 +217,8 @@ scnoisemeter run [OPTIONS]
 | Flag | Default | Description |
 |---|---|---|
 | `--sample-name TEXT` | BAM filename stem | Label used in output filenames and HTML report. |
-| `--gtf PATH` | auto-downloaded | GENCODE GTF annotation (plain or `.gz`). If omitted, the latest GENCODE human GTF is downloaded to `~/.cache/scnoisemeter/`. |
+| `--gtf PATH` | auto-downloaded | GENCODE GTF annotation (plain or `.gz`). Takes precedence over `--gtf-version`. If omitted, the latest GENCODE human GTF is downloaded to `~/.cache/scnoisemeter/`. |
+| `--gtf-version INT` | none | GENCODE release to auto-download (e.g. `42`). Ignored when `--gtf` is set. Use `42` to match the PolyASite 3.0 atlas exactly. |
 | `--barcode-whitelist PATH` | none | File of valid corrected barcodes, one per line (plain text or `.gz`). Reads whose CB tag is not in this list are classified as UNASSIGNED. Distinct from `--cell-barcodes`. |
 | `--cell-barcodes PATH` | none | Called-cell barcode file (plain text or `.gz`, one per line). Reads whose CB tag is not in this list are skipped entirely and contribute to no metric. Trailing `-1` suffixes are stripped from both the file entries and the CB tags in the BAM. Compatible with Cell Ranger `filtered_feature_bc_matrix/barcodes.tsv.gz`. |
 | `--barcode-tag TEXT` | `CB` | BAM tag for the corrected cell barcode. |
@@ -227,8 +228,10 @@ scnoisemeter run [OPTIONS]
 | `--pipeline-stage [raw\|pre_filter\|post_filter\|custom]` | `auto` | Processing stage. `auto` detects from header. |
 | `--repeats PATH` | none | RepeatMasker BED file (hg38). Required to classify reads as INTERGENIC_REPEAT. |
 | `--reference PATH` | none | Reference FASTA (`.fa` or `.fa.gz`, with `.fai` index). Required for polyA context checks and non-canonical junction detection. |
-| `--polya-sites PATH` | auto-downloaded | PolyA site BED file(s). Repeatable. If omitted, the latest PolyASite 3.0 atlas is downloaded automatically. |
-| `--tss-sites PATH` | none | CAGE peak / TSS BED file(s). Repeatable. Required for the TSS-anchored full-length metric. |
+| `--polya-sites PATH` | auto-downloaded | PolyA site BED file(s). Repeatable. Takes precedence over `--polya-db`. If omitted, a database is auto-downloaded according to `--polya-db`. |
+| `--polya-db [polyasite3\|polyadb4\|both]` | `polyasite3` | PolyA site database to auto-download when `--polya-sites` is not set. `polyasite3`: PolyASite 3.0 atlas (GENCODE v42, ~569k sites). `polyadb4`: PolyA_DB v4 (not tied to a GENCODE version, works with any GTF release). `both`: load both databases simultaneously. |
+| `--tss-sites PATH` | auto-downloaded | CAGE peak / TSS BED file(s). Repeatable. Takes precedence over `--tss-db`. If omitted, a database is auto-downloaded according to `--tss-db`. |
+| `--tss-db [fantom5\|none]` | `fantom5` | TSS database to auto-download when `--tss-sites` is not set. `fantom5`: FANTOM5 robust CAGE peaks (hg38, ~184k peaks). `none`: skip TSS anchoring entirely. |
 | `--numt-bed PATH` | none | NUMT BED file (nuclear mitochondrial DNA segments, hg38 coordinates). |
 | `--obs-metadata PATH` | none | Per-cell metadata TSV with `cell_barcode` and `cluster` columns. Enables per-cluster noise profiles. |
 | `--exclude-biotypes TEXT` | none | Gene biotypes to exclude from annotation. Repeatable. |
@@ -316,7 +319,7 @@ scnoisemeter compare [OPTIONS]
 
 **Shared flags (same as `run`, excluding `--bam`, `--sample-name`, `--cell-barcodes`):**
 
-`--gtf`, `--barcode-whitelist`, `--barcode-tag`, `--umi-tag`, `--chemistry`, `--platform`, `--pipeline-stage`, `--chimeric-distance`, `--repeats`, `--reference`, `--threads`, `--no-umi-dedup`, `--no-cache`, `--exclude-biotypes`, `--obs-metadata`, `--polya-sites`, `--tss-sites`, `--numt-bed`, `--offline`, `--verbose`
+`--gtf`, `--gtf-version`, `--barcode-whitelist`, `--barcode-tag`, `--umi-tag`, `--chemistry`, `--platform`, `--pipeline-stage`, `--chimeric-distance`, `--repeats`, `--reference`, `--threads`, `--no-umi-dedup`, `--no-cache`, `--exclude-biotypes`, `--obs-metadata`, `--polya-sites`, `--polya-db`, `--tss-sites`, `--tss-db`, `--numt-bed`, `--offline`, `--verbose`
 
 A single annotation index is built once and shared between both BAM runs.
 
@@ -374,9 +377,12 @@ scnoisemeter discover [OPTIONS]
 
 | Flag | Default | Description |
 |---|---|---|
-| `--gtf PATH` | auto-downloaded | GENCODE GTF. Auto-downloaded if omitted. |
-| `--polya-sites PATH` | auto-downloaded | PolyA site BED file(s). Repeatable. Auto-downloaded if omitted. |
-| `--tss-sites PATH` | none | TSS / CAGE peak BED file(s). Repeatable. |
+| `--gtf PATH` | auto-downloaded | GENCODE GTF. Auto-downloaded if omitted. Takes precedence over `--gtf-version`. |
+| `--gtf-version INT` | none | GENCODE release to auto-download (e.g. `42`). Ignored when `--gtf` is set. |
+| `--polya-sites PATH` | auto-downloaded | PolyA site BED file(s). Repeatable. Takes precedence over `--polya-db`. |
+| `--polya-db [polyasite3\|polyadb4\|both]` | `polyasite3` | PolyA site database to auto-download when `--polya-sites` is not set. |
+| `--tss-sites PATH` | auto-downloaded | TSS / CAGE peak BED file(s). Repeatable. Takes precedence over `--tss-db`. |
+| `--tss-db [fantom5\|none]` | `fantom5` | TSS database to auto-download when `--tss-sites` is not set. |
 | `--threads INT` | `4` | Parallel worker processes per BAM. |
 | `--run-all` | off | Non-interactive mode. All BAMs with fully inferable parameters are run automatically. BAMs with blocking issues (no index, wrong sort order, unknown platform) are skipped with a warning. |
 | `--offline` | off | Use only cached annotation files. |
@@ -607,7 +613,60 @@ Interactive HTML comparison report. Contains:
 
 ---
 
-## 10. Platform-Specific Notes
+## 10. Annotation Caching and Auto-Download
+
+### Cache location
+
+All automatically downloaded annotation files are stored in `~/.cache/scnoisemeter/`. Subsequent runs reuse cached files without any network call. Pass `--offline` to enforce cache-only mode; the tool raises an error if a required file is absent from the cache.
+
+### GTF
+
+On first run with no `--gtf` or `--gtf-version`, the latest GENCODE human GTF is downloaded from the GENCODE FTP. The parsed annotation index (pyranges intervals, intron complement, intergenic regions) is cached alongside the GTF as a compressed pickle; rebuilding it from a large GTF takes roughly 60 seconds, so repeated runs benefit significantly from this cache. Pass `--no-cache` to force a rebuild.
+
+To pin a specific GENCODE release:
+
+```bash
+scnoisemeter run --bam sample.bam --gtf-version 42 --output-dir results/
+```
+
+To supply a local file (disables all auto-download for the GTF):
+
+```bash
+scnoisemeter run --bam sample.bam --gtf gencode.v45.annotation.gtf.gz --output-dir results/
+```
+
+### PolyA site databases
+
+Two databases are supported, selected with `--polya-db`:
+
+| Database | Flag value | Source | Genome | Notes |
+|---|---|---|---|---|
+| PolyASite 3.0 | `polyasite3` (default) | polyasite.unibas.ch | hg38 / GENCODE v42 | ~569k sites; tied to GENCODE v42 |
+| PolyA_DB v4 | `polyadb4` | exon.njms.rutgers.edu | hg38 | Not tied to a GENCODE version; works with any GTF release |
+
+Use `both` to load both databases simultaneously. When `--polya-sites` is provided explicitly, `--polya-db` is ignored.
+
+The PolyASite 3.0 atlas is distributed as a BED6 file. PolyA_DB v4 is distributed as a ZIP archive; scNoiseMeter downloads and converts it to BED3 format on first use and caches the result.
+
+**Version mismatch.** The current PolyASite 3.0 atlas is built on GENCODE v42. Auto-downloading the latest GTF (currently v49) produces a seven-version gap; the tool warns when the difference exceeds five major releases. Two ways to resolve this:
+
+- Pass `--gtf-version 42` to auto-download GENCODE v42, matching the PolyASite 3.0 atlas exactly.
+- Pass `--polya-db polyadb4` to switch to PolyA_DB v4, which is not tied to a GENCODE version and works with any GTF release.
+
+### TSS / CAGE peak databases
+
+Two options are supported, selected with `--tss-db`:
+
+| Database | Flag value | Source | Notes |
+|---|---|---|---|
+| FANTOM5 | `fantom5` (default) | fantom.gsc.riken.jp | hg38 robust CAGE peaks, ~184k peaks, BED6 format |
+| None | `none` | — | Disables TSS anchoring; `tss_anchored_frac` will not be reported |
+
+When `--tss-sites` is provided explicitly, `--tss-db` is ignored.
+
+---
+
+## 11. Platform-Specific Notes
 
 ### ONT
 
@@ -648,13 +707,13 @@ Activated when fewer than 50% of sampled reads (10,000 reads sampled from the BA
 
 ---
 
-## 11. Known Caveats and Limitations
+## 12. Known Caveats and Limitations
 
 **Genome / annotation:**
 
 - Only human GRCh38/hg38 is supported. The chromosome length validation uses hardcoded GRCh38 expected lengths. Other species will produce length mismatch warnings.
 - The GENCODE GTF and PolyASite 3.0 atlas must use the same chromosome naming convention (UCSC or Ensembl). Mismatches between BAM and GTF chromosome names cause a fatal error.
-- If the GTF and polyA atlas differ by more than 5 GENCODE major versions, a warning is issued. Genes with 3′ UTRs annotated between the two versions may have reduced polyA anchoring scores.
+- If the GTF and polyA atlas differ by more than 5 GENCODE major versions, a warning is issued. Genes with 3′ UTRs annotated between the two versions may have reduced polyA anchoring scores. To resolve: pass `--gtf-version 42` to match the PolyASite 3.0 atlas exactly, or pass `--polya-db polyadb4` to switch to PolyA_DB v4, which is version-agnostic.
 
 **Read classification:**
 

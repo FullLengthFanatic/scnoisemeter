@@ -6,5 +6,5 @@ Platform-agnostic quantification of technical noise in single-cell RNA-seq.
 Supports ONT, PacBio/Kinnex, and Illumina (10x Genomics, BD Rhapsody) BAM files.
 """
 
-__version__ = "0.1.12"
+__version__ = "0.2.0"
 __author__ = "scNoiseMeter contributors"
