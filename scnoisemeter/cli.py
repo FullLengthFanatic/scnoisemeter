@@ -1735,18 +1735,26 @@ def run_plate_cmd(
                 ),
             ) as executor:
                 futures = {executor.submit(_plate_well_task, t): t["well_id"] for t in _tasks}
-                for future in as_completed(futures):
-                    res = future.result()
-                    wid = res["well_id"]
-                    if res["ok"]:
-                        _well_results[wid] = res
-                        click.echo(
-                            f"  [{wid}] {res['well_sm'].n_reads_total:,} reads, "
-                            f"noise={res['well_sm'].noise_read_frac:.1%}"
-                        )
-                    else:
-                        click.echo(f"  [{wid}] FAILED: {res['error']}", err=True)
-                        n_failed += 1
+                try:
+                    for future in as_completed(futures):
+                        res = future.result()
+                        wid = res["well_id"]
+                        if res["ok"]:
+                            _well_results[wid] = res
+                            click.echo(
+                                f"  [{wid}] {res['well_sm'].n_reads_total:,} reads, "
+                                f"noise={res['well_sm'].noise_read_frac:.1%}"
+                            )
+                        else:
+                            click.echo(f"  [{wid}] FAILED: {res['error']}", err=True)
+                            n_failed += 1
+                except Exception as pool_exc:
+                    raise click.ClickException(
+                        f"Worker pool crashed during parallel well processing "
+                        f"(completed {len(_well_results)}/{len(indexed_wells)} wells before failure). "
+                        f"Try reducing --parallel-wells to lower peak memory usage. "
+                        f"Error: {pool_exc}"
+                    ) from pool_exc
 
             # Merge in original well order; reassign polya/tss after merge
             for well_id, bam_path in indexed_wells:
