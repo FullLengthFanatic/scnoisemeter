@@ -337,6 +337,10 @@ def _merge_exons_per_gene(exon_df: pd.DataFrame) -> pr.PyRanges:
     For each gene, merge all overlapping exon intervals into a non-redundant
     set.  Returns a PyRanges with columns:
       Chromosome, Start, End, Strand, gene_id, gene_name, gene_biotype
+
+    Implementation uses a single vectorized PyRanges merge grouped by gene
+    metadata columns, which is orders of magnitude faster than a per-gene
+    Python loop on large GTFs (e.g. Ensembl with ~60 k genes).
     """
     if exon_df.empty:
         return pr.PyRanges()
@@ -349,22 +353,12 @@ def _merge_exons_per_gene(exon_df: pd.DataFrame) -> pr.PyRanges:
 
     sub = exon_df[keep_cols].copy()
 
-    # Use pyranges merge within each gene_id group
-    merged_frames = []
-    for gene_id, group in sub.groupby("gene_id"):
-        g = pr.PyRanges(group[["Chromosome", "Start", "End", "Strand"]].copy())
-        g = g.merge()
-        gdf = g.df.copy()
-        gdf["gene_id"] = gene_id
-        for col in optional:
-            if col in group.columns:
-                gdf[col] = group[col].iloc[0]
-        merged_frames.append(gdf)
-
-    if not merged_frames:
-        return pr.PyRanges()
-
-    return pr.PyRanges(pd.concat(merged_frames, ignore_index=True))
+    # Vectorized merge: group by gene identity columns (gene_id + any optional
+    # metadata that is constant per gene).  Chromosome and Strand are handled
+    # by PyRanges internally (merging never crosses chromosome/strand boundaries).
+    by_cols = [c for c in ["gene_id"] + optional if c in sub.columns]
+    gr = pr.PyRanges(sub)
+    return gr.merge(by=by_cols)
 
 
 # ---------------------------------------------------------------------------

@@ -56,6 +56,7 @@ from scnoisemeter.constants import (
     LENGTH_SHORT_READ_THRESHOLD,
     NOISE_CATEGORIES,
     NOISE_CATEGORIES_STRICT,
+    NOISE_CATEGORIES_UNSTRANDED,
     ReadCategory,
 )
 
@@ -129,6 +130,11 @@ class SampleMetrics:
     # Multimapper rate
     multimapper_read_frac: float = 0.0
 
+    # True when the protocol is non-stranded (e.g. Smart-seq2 / FLASH-seq).
+    # When True, noise_read_frac excludes EXONIC_ANTISENSE — those reads are
+    # genuine cDNA signal from the reverse strand, not artifacts.
+    is_unstranded: bool = False
+
     # Soft-clip fraction (reported separately — see bam_inspector)
     # UMI complexity per category (mean across cells)
     umi_complexity:        dict = field(default_factory=dict)
@@ -177,6 +183,7 @@ def compute_metrics(
     *,
     platform: str = "default",
     min_reads_per_cell: int = MIN_READS_PER_CELL,
+    unstranded: bool = False,
 ) -> tuple[SampleMetrics, CellTable]:
     """
     Compute sample-wide and per-cell metrics from a :class:`SampleResult`.
@@ -194,6 +201,7 @@ def compute_metrics(
         pipeline_stage=meta.pipeline_stage.value,
         aligner=meta.aligner,
         warnings=list(meta.warnings),
+        is_unstranded=unstranded,
     )
 
     # ------------------------------------------------------------------
@@ -226,11 +234,12 @@ def compute_metrics(
                 n_umis_cat / n_reads_cat if n_reads_cat > 0 else float("nan")
             )
 
-        # Aggregate noise
-        noise_reads = sum(cat_read_counts.get(cat, 0) for cat in NOISE_CATEGORIES)
+        # Aggregate noise — use unstranded set for non-stranded protocols
+        _noise_cats = NOISE_CATEGORIES_UNSTRANDED if unstranded else NOISE_CATEGORIES
+        noise_reads = sum(cat_read_counts.get(cat, 0) for cat in _noise_cats)
         row["noise_read_frac"] = noise_reads / total_reads if total_reads else 0.0
 
-        noise_bases = sum(result.base_counts[cb].get(cat, 0) for cat in NOISE_CATEGORIES)
+        noise_bases = sum(result.base_counts[cb].get(cat, 0) for cat in _noise_cats)
         row["noise_base_frac"] = noise_bases / total_bases if total_bases else 0.0
 
         # Artifact flags
@@ -276,12 +285,13 @@ def compute_metrics(
         for cat in CATEGORY_ORDER
     }
 
-    # Aggregate noise fractions
+    # Aggregate noise fractions — use unstranded set for non-stranded protocols
+    _noise_cats = NOISE_CATEGORIES_UNSTRANDED if unstranded else NOISE_CATEGORIES
     sm.noise_read_frac = sum(
-        sm.read_fracs.get(cat.value, 0.0) for cat in NOISE_CATEGORIES
+        sm.read_fracs.get(cat.value, 0.0) for cat in _noise_cats
     )
     sm.noise_base_frac = sum(
-        sm.base_fracs.get(cat.value, 0.0) for cat in NOISE_CATEGORIES
+        sm.base_fracs.get(cat.value, 0.0) for cat in _noise_cats
     )
     sm.noise_read_frac_strict = sum(
         sm.read_fracs.get(cat.value, 0.0) for cat in NOISE_CATEGORIES_STRICT

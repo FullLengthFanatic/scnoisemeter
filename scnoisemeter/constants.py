@@ -121,6 +121,11 @@ NOISE_CATEGORIES_STRICT = {
     ReadCategory.CHIMERIC,
 }
 
+# Unstranded-protocol noise: excludes EXONIC_ANTISENSE, which is genuine
+# cDNA signal in non-stranded libraries (Smart-seq2, FLASH-seq, Smart-seq3).
+# Use this when platform == SMARTSEQ to avoid inflating the noise fraction.
+NOISE_CATEGORIES_UNSTRANDED = NOISE_CATEGORIES - {ReadCategory.EXONIC_ANTISENSE}
+
 # Categories whose interpretation is ambiguous and reported separately
 AMBIGUOUS_CATEGORIES = {
     ReadCategory.INTRONIC_JXNSPAN,
@@ -187,6 +192,7 @@ class Platform(str, Enum):
     ILLUMINA     = "illumina"      # generic Illumina (auto-selects detection path)
     ILLUMINA_10X = "illumina_10x"
     ILLUMINA_BD  = "illumina_bd"
+    SMARTSEQ     = "smartseq"      # Smart-seq2/FLASH-seq/Smart-seq3 (plate-based, no CB)
     UNKNOWN      = "unknown"
 
 

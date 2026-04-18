@@ -34,9 +34,11 @@ Usage examples
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
@@ -70,6 +72,7 @@ from scnoisemeter.utils.annotation_fetcher import (
     fetch_latest_polyasite_atlas,
     fetch_polyadb4_atlas,
     fetch_fantom5_cage_peaks,
+    fetch_10x_whitelist,
     extract_gencode_version_from_filename,
     extract_polyasite_version_from_filename,
 )
@@ -93,6 +96,14 @@ def _shared_options(func):
                           "Ignored when --gtf is supplied. "
                           "Use --gtf-version 42 to match PolyASite 3.0 and avoid version mismatch warnings."),
         click.option("--barcode-whitelist",  default=None,   type=click.Path(exists=True), help="File of valid corrected barcodes, one per line."),
+        click.option("--whitelist-db",
+                     default="none",
+                     show_default=True,
+                     type=click.Choice(["10x_v3", "10x_v4", "none"], case_sensitive=False),
+                     help="10x barcode whitelist to auto-download when --barcode-whitelist is not supplied. "
+                          "10x_v3: 3M Chromium v3 barcodes (2018); "
+                          "10x_v4: 3M Chromium v4 / 3' GEX barcodes (2023); "
+                          "none: no whitelist filter (default)."),
         click.option("--barcode-tag",        default="CB",   show_default=True, help="BAM tag for corrected cell barcode."),
         click.option("--umi-tag",            default="UB",   show_default=True, help="BAM tag for corrected UMI."),
         click.option("--chemistry",
@@ -100,11 +111,11 @@ def _shared_options(func):
                      default=Chemistry.TENX_V3.value, show_default=True,
                      help="Library chemistry (sets barcode length expectation)."),
         click.option("--platform",
-                     type=click.Choice([p.value for p in Platform], case_sensitive=False),
+                     type=click.Choice(["auto"] + [p.value for p in Platform], case_sensitive=False),
                      default="auto", show_default=True,
                      help="Sequencing platform.  'auto' detects from BAM header."),
         click.option("--pipeline-stage",
-                     type=click.Choice([s.value for s in PipelineStage], case_sensitive=False),
+                     type=click.Choice(["auto"] + [s.value for s in PipelineStage], case_sensitive=False),
                      default="auto", show_default=True,
                      help="Processing stage of the BAM.  'auto' detects from BAM header."),
         click.option("--chimeric-distance",  default=DEFAULT_CHIMERIC_DISTANCE, show_default=True,
@@ -275,6 +286,24 @@ def _resolve_tss_sites(
     # fantom5 (default)
     path = fetch_fantom5_cage_peaks(offline=offline)
     return [str(path)]
+
+
+def _resolve_whitelist(
+    barcode_whitelist_arg: Optional[str],
+    whitelist_db: str = "none",
+    offline: bool = False,
+) -> Optional[set]:
+    """
+    Resolve the barcode whitelist.
+
+    Priority: --barcode-whitelist > --whitelist-db > None.
+    """
+    if barcode_whitelist_arg is not None:
+        return _load_whitelist(barcode_whitelist_arg)
+    if whitelist_db.lower() == "none":
+        return None
+    path = fetch_10x_whitelist(whitelist_db.lower(), offline=offline)
+    return _load_whitelist(str(path))
 
 
 def _check_version_consistency(gtf_version: Optional[int], polya_version: Optional[int]) -> Optional[str]:
@@ -490,8 +519,8 @@ def _validate_sort_order(meta: BamMetadata) -> None:
 
 
 def _is_illumina_platform(platform) -> bool:
-    """Return True for any Illumina platform value."""
-    illumina_vals = {Platform.ILLUMINA, Platform.ILLUMINA_10X, Platform.ILLUMINA_BD}
+    """Return True for any Illumina-family platform (includes Smart-seq — paired-end)."""
+    illumina_vals = {Platform.ILLUMINA, Platform.ILLUMINA_10X, Platform.ILLUMINA_BD, Platform.SMARTSEQ}
     return platform in illumina_vals
 
 
@@ -507,7 +536,7 @@ def _is_illumina_platform(platform) -> bool:
 @_shared_options
 def run_cmd(
     bam, sample_name, cell_barcodes,
-    gtf, gtf_version, barcode_whitelist, barcode_tag, umi_tag,
+    gtf, gtf_version, barcode_whitelist, whitelist_db, barcode_tag, umi_tag,
     chemistry, platform, pipeline_stage, chimeric_distance,
     repeats, reference, threads, no_umi_dedup, no_cache,
     exclude_biotypes, output_dir, obs_metadata, polya_sites, polya_db,
@@ -560,8 +589,8 @@ def run_cmd(
             f"chromosome-level parallel processing."
         )
 
-    # Load whitelist
-    whitelist = _load_whitelist(barcode_whitelist)
+    # Load whitelist (explicit path takes priority over auto-download)
+    whitelist = _resolve_whitelist(barcode_whitelist, whitelist_db, offline)
 
     # Resolve platform / stage overrides
     plat  = None if platform == "auto"       else Platform(platform)
@@ -582,11 +611,13 @@ def run_cmd(
     # Validate that the BAM is aligned (has @SQ reference sequences)
     _validate_sq_lines(meta)
 
-    # Warn if post_filter stage is declared but no corrected barcodes are found
+    # Warn if post_filter stage is declared but no corrected barcodes are found.
+    # Smart-seq is excluded: one BAM per cell, no CB tags is expected.
     if (
         meta.pipeline_stage == PipelineStage.POST_FILTER
         and not meta.barcode_aware
         and stage == PipelineStage.POST_FILTER  # user explicitly requested post_filter
+        and meta.platform != Platform.SMARTSEQ
     ):
         _cb_msg = (
             f"CB tags are absent despite --pipeline-stage post_filter. "
@@ -708,12 +739,15 @@ def run_cmd(
         # Also store in meta.warnings so it surfaces in the HTML report
         meta.warnings.append(_low_count_msg)
 
+    # Detect BAM chromosome naming style for BED normalization
+    _bam_chrom_style = _detect_chrom_style(meta.reference_names)
+
     # Attach polyA site dict (merged from resolved polya-site files)
-    result._polya_site_dict = _load_polya_sites(polya_paths)
+    result._polya_site_dict = _load_polya_sites(polya_paths, chrom_style=_bam_chrom_style)
 
     # Attach TSS site dict (resolved: auto-download or user-supplied)
     tss_paths = _resolve_tss_sites(tss_sites, tss_db=tss_db, offline=offline)
-    result._tss_site_dict = _load_tss_sites(tss_paths) if tss_paths else None
+    result._tss_site_dict = _load_tss_sites(tss_paths, chrom_style=_bam_chrom_style) if tss_paths else None
 
     # Attach NUMT intervals
     if numt_bed:
@@ -723,7 +757,11 @@ def run_cmd(
 
     # Compute metrics
     platform_str = meta.platform.value
-    sm, ct = compute_metrics(result, sample_name, platform=platform_str)
+    sm, ct = compute_metrics(
+        result, sample_name,
+        platform=platform_str,
+        unstranded=(meta.platform == Platform.SMARTSEQ),
+    )
 
     # Attach annotation provenance for the HTML report
     sm._gtf_info = {"version": gtf_version, "source": gtf_source, "path": gtf}
@@ -821,7 +859,7 @@ def run_cmd(
 @_shared_options
 def compare_cmd(
     bam_a, bam_b, label_a, label_b,
-    gtf, gtf_version, barcode_whitelist, barcode_tag, umi_tag,
+    gtf, gtf_version, barcode_whitelist, whitelist_db, barcode_tag, umi_tag,
     chemistry, platform, pipeline_stage, chimeric_distance,
     repeats, reference, threads, no_umi_dedup, no_cache,
     exclude_biotypes, output_dir, obs_metadata, polya_sites, polya_db,
@@ -842,7 +880,7 @@ def compare_cmd(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    whitelist = _load_whitelist(barcode_whitelist)
+    whitelist = _resolve_whitelist(barcode_whitelist, whitelist_db, offline)
     plat  = None if platform == "auto"       else Platform(platform)
     stage = None if pipeline_stage == "auto" else PipelineStage(pipeline_stage)
 
@@ -884,9 +922,14 @@ def compare_cmd(
             store_umis=not no_umi_dedup,
             reference_path=reference,
         )
-        result._polya_site_dict = _load_polya_sites(polya_paths)
-        result._tss_site_dict = _load_tss_sites(tss_paths) if tss_paths else None
-        sm, ct = compute_metrics(result, label, platform=meta.platform.value)
+        _bam_cs = _detect_chrom_style(meta.reference_names)
+        result._polya_site_dict = _load_polya_sites(polya_paths, chrom_style=_bam_cs)
+        result._tss_site_dict = _load_tss_sites(tss_paths, chrom_style=_bam_cs) if tss_paths else None
+        sm, ct = compute_metrics(
+            result, label,
+            platform=meta.platform.value,
+            unstranded=(meta.platform == Platform.SMARTSEQ),
+        )
         sm._gtf_info = {"version": gtf_version, "source": gtf_source, "path": gtf}
         sm._polya_info = {
             "version": polya_version,
@@ -1186,13 +1229,18 @@ def _run_single_bam_for_discover(
         reference_path=reference,
     )
 
-    result._polya_site_dict = _load_polya_sites(polya_paths)
+    _bam_cs = _detect_chrom_style(meta.reference_names)
+    result._polya_site_dict = _load_polya_sites(polya_paths, chrom_style=_bam_cs)
 
-    result._tss_site_dict = _load_tss_sites(tss_paths) if tss_paths else None
+    result._tss_site_dict = _load_tss_sites(tss_paths, chrom_style=_bam_cs) if tss_paths else None
 
     result._numt_intervals = None
 
-    sm, ct = compute_metrics(result, sample_name, platform=meta.platform.value)
+    sm, ct = compute_metrics(
+        result, sample_name,
+        platform=meta.platform.value,
+        unstranded=(meta.platform == Platform.SMARTSEQ),
+    )
     sm._gtf_info = {"version": gtf_version, "source": gtf_source, "path": gtf_path}
     sm._polya_info = {
         "version": polya_version,
@@ -1272,6 +1320,625 @@ def _print_discover_summary(
 
 
 # ---------------------------------------------------------------------------
+# `run-plate` subcommand
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+_PLATE_WELL_RE = _re.compile(r"^(?P<plate>.+)_(?P<well>[A-Pa-p]\d{1,2})$")
+
+# ---------------------------------------------------------------------------
+# Parallel well processing — module-level so ProcessPoolExecutor can pickle
+# ---------------------------------------------------------------------------
+
+_worker_state: dict = {}
+
+
+def _plate_worker_init(gtf, repeats_path, exclude_biotypes,
+                       polya_paths, tss_paths, chrom_style):
+    """Initialiser for each worker process: loads shared read-only data once."""
+    import logging as _log
+    _log.disable(_log.WARNING)  # suppress per-well INFO/WARNING spam in workers
+
+    from scnoisemeter.modules.annotation import build_annotation_index
+    _worker_state["index"] = build_annotation_index(
+        gtf,
+        repeats_path=repeats_path,
+        exclude_biotypes=list(exclude_biotypes),
+        cache=True,
+    )
+    _worker_state["polya"] = (
+        _load_polya_sites(polya_paths, chrom_style=chrom_style) if polya_paths else {}
+    )
+    _worker_state["tss"] = (
+        _load_tss_sites(tss_paths, chrom_style=chrom_style) if tss_paths else None
+    )
+
+
+def _plate_well_task(task: dict) -> dict:
+    """Worker task: inspect BAM, run pipeline, compute per-well metrics."""
+    from scnoisemeter.constants import Platform
+    from scnoisemeter.modules.metrics import compute_metrics
+    from scnoisemeter.modules.pipeline import run_pipeline
+    from scnoisemeter.utils.bam_inspector import inspect_bam
+
+    bam_path = Path(task["bam_path"])
+    well_id  = task["well_id"]
+    plate_id = task["plate_id"]
+
+    try:
+        meta = inspect_bam(
+            bam_path,
+            barcode_tag=task["barcode_tag"],
+            umi_tag=task["umi_tag"],
+            platform=task["platform_override"],
+            pipeline_stage=task["stage_override"],
+        )
+        _validate_sort_order(meta)
+
+        well_result = run_pipeline(
+            bam_path, _worker_state["index"], meta,
+            whitelist=task["whitelist"],
+            chimeric_distance=task["chimeric_distance"],
+            paired_end_chimeric=_is_illumina_platform(meta.platform),
+            threads=task["threads"],
+            store_umis=task["store_umis"],
+            reference_path=task["reference"],
+        )
+
+        well_result._polya_site_dict = _worker_state["polya"]
+        well_result._tss_site_dict   = _worker_state["tss"]
+        well_result._numt_intervals  = None
+
+        well_sm, _ = compute_metrics(
+            well_result, f"{plate_id}_{well_id}",
+            platform=meta.platform.value,
+            unstranded=(meta.platform == Platform.SMARTSEQ),
+        )
+
+        # Clear large dicts before pickling result back to the main process
+        well_result._polya_site_dict = None
+        well_result._tss_site_dict   = None
+
+        return {
+            "ok": True,
+            "well_id":     well_id,
+            "well_result": well_result,
+            "well_sm":     well_sm,
+            "platform":    meta.platform,
+        }
+    except Exception as exc:
+        return {"ok": False, "well_id": well_id, "error": str(exc)}
+
+
+def _discover_plate_wells(plate_dir: Path) -> dict:
+    """
+    Scan *plate_dir* for subdirectories whose names match PlateID_WellID.
+
+    Returns
+    -------
+    dict mapping plate_id → list of (well_id, bam_path) tuples, sorted by
+    well_id.  Only subdirectories that contain exactly one BAM file are
+    included.  Subdirectories that do not match the pattern are reported as
+    warnings but do not cause an error.
+    """
+    plates: dict = {}
+    skipped: list = []
+
+    for subdir in sorted(plate_dir.iterdir()):
+        if not subdir.is_dir():
+            continue
+        m = _PLATE_WELL_RE.match(subdir.name)
+        if not m:
+            skipped.append(subdir.name)
+            continue
+
+        plate_id = m.group("plate")
+        well_id  = m.group("well").upper()
+
+        # Find the BAM — accept any *.bam inside the subdirectory
+        bams = sorted(subdir.glob("*.bam"))
+        if len(bams) == 0:
+            logger.warning("No BAM found in %s — skipping well.", subdir)
+            continue
+        if len(bams) > 1:
+            logger.warning(
+                "Multiple BAMs in %s — using the first: %s", subdir, bams[0].name
+            )
+        bam_path = bams[0]
+
+        plates.setdefault(plate_id, []).append((well_id, bam_path))
+
+    if skipped:
+        click.echo(
+            f"\nNote: {len(skipped)} subdirectories in the plate directory do not match "
+            f"the expected PlateID_WellID format (e.g. 881_A1) and were skipped:\n"
+            f"  {', '.join(skipped[:10])}"
+            + (" …" if len(skipped) > 10 else ""),
+            err=True,
+        )
+
+    for plate_id in plates:
+        plates[plate_id].sort(key=lambda t: t[0])
+
+    return plates
+
+
+@cli.command("run-plate")
+@click.option(
+    "--plate-dir", "plate_dir", required=True, type=click.Path(exists=True, file_okay=False),
+    help=(
+        "Directory containing per-well subdirectories named PlateID_WellID "
+        "(e.g. 881_A1, 881_B3, 882_H12). "
+        "Each subdirectory must contain exactly one BAM file with a .bai index. "
+        "Wells not matching this pattern are skipped with a warning."
+    ),
+)
+@click.option(
+    "--sample-sheet", "sample_sheet", default=None, type=click.Path(exists=True),
+    help=(
+        "CSV file with per-well barcode metadata. "
+        "Column detection is automatic: any header containing 'i7' or 'i5' is used as "
+        "the barcode column; the key column can be 'Sample_Name' (PlateID_WellID values) "
+        "or separate 'WellID'/'PlateID' columns. Headerless files are accepted — columns "
+        "are assigned as Sample_Name, i7_sequence, i5_reverse_complement by position. "
+        "Use --sequencer to control i7 RC orientation. "
+        "Extra columns are carried through to the per-well metrics TSV."
+    ),
+)
+@click.option(
+    "--sequencer",
+    type=click.Choice(["nextseq", "novaseq", "novaseqx", "aviti", "none"], case_sensitive=False),
+    default="none",
+    show_default=True,
+    help=(
+        "Sequencer platform, used to determine i7 orientation in the sample sheet. "
+        "NextSeq 500/550/1000/2000 and NovaSeq X report the i7 as its reverse complement "
+        "in FASTQ files. NovaSeq 6000 and Element AVITI report i7 in the designed orientation. "
+        "When nextseq or novaseqx is passed, the i7 sequence from --sample-sheet is "
+        "reverse-complemented before display. Has no effect without --sample-sheet."
+    ),
+)
+@click.option("--sample-name", default=None,
+              help="Override for the plate label in output filenames. Defaults to PlateID.")
+@click.option(
+    "--plate-id", "plate_ids", multiple=True,
+    help=(
+        "Process only this plate ID (repeatable). "
+        "When omitted all discovered plates are processed. "
+        "Example: --plate-id 881 --plate-id 882"
+    ),
+)
+@click.option(
+    "--parallel-wells", "parallel_wells", default=1, show_default=True, type=int,
+    help=(
+        "Number of wells to process in parallel using separate worker processes. "
+        "Each worker loads the annotation index from cache and runs independently. "
+        "Per-worker thread count is --threads // --parallel-wells (minimum 1). "
+        "Recommended: set to the number of available CPU cores divided by 4."
+    ),
+)
+@_shared_options
+def run_plate_cmd(
+    plate_dir, sample_sheet, sequencer, sample_name, plate_ids, parallel_wells,
+    gtf, gtf_version, barcode_whitelist, whitelist_db, barcode_tag, umi_tag,
+    chemistry, platform, pipeline_stage, chimeric_distance,
+    repeats, reference, threads, no_umi_dedup, no_cache,
+    exclude_biotypes, output_dir, obs_metadata, polya_sites, polya_db,
+    tss_sites, tss_db, numt_bed, offline, verbose,
+):
+    """
+    Classify reads from a plate of Smart-seq wells and produce per-plate metrics.
+
+    Expects a directory of per-well subdirectories named PlateID_WellID
+    (e.g. 881_A1). Reads from all wells on the same plate are pooled and
+    reported together. Per-well statistics are written when --sample-sheet
+    is supplied.
+
+    Output files written to --output-dir (one set per plate):
+      <PlateID>.read_metrics.tsv        Plate-wide aggregate metrics
+      <PlateID>.cell_metrics.tsv        Placeholder (one row = whole plate)
+      <PlateID>.per_well_metrics.tsv    Per-well summary table
+      <PlateID>.report.html             Interactive HTML report
+    """
+    from scnoisemeter.modules.annotation import build_annotation_index
+    from scnoisemeter.modules.intergenic_profiler import (
+        profile_intergenic_loci, extract_intergenic_records, compute_intergenic_bases,
+    )
+    from scnoisemeter.modules.metrics import compute_metrics, compute_length_stratification
+    from scnoisemeter.modules.pipeline import run_pipeline, merge_sample_results
+    from scnoisemeter.utils.sample_sheet import parse_sample_sheet, lookup_well
+
+    _setup_logging(verbose)
+
+    plate_dir_path = Path(plate_dir)
+    output_dir_path = Path(output_dir)
+    output_dir_path.mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------ #
+    # Discover wells
+    # ------------------------------------------------------------------ #
+    plates = _discover_plate_wells(plate_dir_path)
+    if not plates:
+        raise click.ClickException(
+            f"No PlateID_WellID subdirectories found in '{plate_dir}'.\n"
+            f"\n"
+            f"Expected folder names like '881_A1', '881_B3', '882_H12'.\n"
+            f"Each folder must contain one BAM file (.bam) and its index (.bam.bai)."
+        )
+
+    if plate_ids:
+        unknown = sorted(set(plate_ids) - set(plates))
+        if unknown:
+            click.echo(f"Warning: plate ID(s) not found and will be skipped: {unknown}", err=True)
+        plates = {k: v for k, v in plates.items() if k in plate_ids}
+        if not plates:
+            raise click.ClickException(
+                f"None of the requested plate IDs were found: {list(plate_ids)}"
+            )
+
+    total_wells = sum(len(v) for v in plates.values())
+    click.echo(
+        f"\nDiscovered {total_wells} wells across {len(plates)} plate(s): "
+        + ", ".join(sorted(plates.keys()))
+    )
+
+    # ------------------------------------------------------------------ #
+    # Load optional sample sheet
+    # ------------------------------------------------------------------ #
+    well_metadata: dict = {}
+    if sample_sheet:
+        well_metadata = parse_sample_sheet(sample_sheet, sequencer=sequencer)
+        click.echo(f"Sample sheet loaded: {len(well_metadata)} wells.")
+
+        # Cross-check BAMs vs sample sheet — warn on mismatches, never fail.
+        bams_without_sheet = [
+            f"{pid}_{wid}"
+            for pid, wlist in plates.items()
+            for wid, _ in wlist
+            if lookup_well(well_metadata, pid, wid) is None
+        ]
+        bam_wells_only = {wid.upper() for wlist in plates.values() for wid, _ in wlist}
+        bam_combined   = {
+            f"{pid.upper()}/{wid.upper()}"
+            for pid, wlist in plates.items()
+            for wid, _ in wlist
+        }
+        sheets_without_bam = []
+        for key in well_metadata:
+            if "/" in key:
+                found = key in bam_combined
+            else:
+                found = key in bam_wells_only
+            if not found:
+                sheets_without_bam.append(key)
+
+        if bams_without_sheet:
+            click.echo(
+                f"Warning: {len(bams_without_sheet)} BAM well(s) have no matching sample "
+                f"sheet entry — barcode metadata will be absent for these wells.",
+                err=True,
+            )
+        if sheets_without_bam:
+            click.echo(
+                f"Warning: {len(sheets_without_bam)} sample sheet entry/entries have no "
+                f"corresponding BAM and will be ignored.",
+                err=True,
+            )
+
+    # ------------------------------------------------------------------ #
+    # Resolve annotation, polyA, and TSS (shared across all plates/wells)
+    # ------------------------------------------------------------------ #
+
+    # Need at least one BAM to check chromosome naming before loading GTF
+    first_bam = next(iter(next(iter(plates.values()))))[1]
+
+    # Whitelist
+    whitelist = _resolve_whitelist(barcode_whitelist, whitelist_db, offline)
+
+    # Resolve platform/stage overrides
+    plat  = None if platform == "auto"       else Platform(platform)
+    stage = None if pipeline_stage == "auto" else PipelineStage(pipeline_stage)
+
+    # Resolve GTF
+    gtf, gtf_version, gtf_source = _resolve_gtf(gtf, gtf_version=gtf_version, offline=offline)
+
+    # Quick chromosome naming check against the first BAM
+    _first_meta = inspect_bam(first_bam, barcode_tag=barcode_tag, umi_tag=umi_tag,
+                               platform=plat, pipeline_stage=stage)
+    _validate_chromosome_naming(_first_meta, gtf)
+
+    # Resolve polyA + TSS
+    polya_paths, polya_version, polya_source = _resolve_polya_sites(
+        polya_sites, polya_db=polya_db,
+        hint_gencode_version=gtf_version if gtf_source == "auto-downloaded" else None,
+        offline=offline,
+    )
+    version_warning = _check_version_consistency(gtf_version, polya_version)
+    tss_paths = _resolve_tss_sites(tss_sites, tss_db=tss_db, offline=offline)
+
+    # Build annotation index ONCE for all wells
+    index = build_annotation_index(
+        gtf,
+        repeats_path=repeats,
+        exclude_biotypes=list(exclude_biotypes),
+        cache=not no_cache,
+    )
+
+    # Pre-load polyA and TSS site dicts ONCE — reused for every well.
+    # Loading from the compressed BED takes ~35 s; doing it per-well would
+    # multiply that cost by the number of wells (thousands for a full plate run).
+    _shared_bam_cs    = _detect_chrom_style(_first_meta.reference_names)
+    _shared_polya     = _load_polya_sites(polya_paths, chrom_style=_shared_bam_cs)
+    _shared_tss       = _load_tss_sites(tss_paths, chrom_style=_shared_bam_cs) if tss_paths else None
+
+    # ------------------------------------------------------------------ #
+    # Process plates
+    # ------------------------------------------------------------------ #
+    for plate_id, well_list in sorted(plates.items()):
+        plate_label = sample_name or plate_id
+        click.echo(f"\n{'='*60}")
+        click.echo(f"Plate: {plate_id}  ({len(well_list)} wells)")
+        click.echo("=" * 60)
+
+        plate_output_dir = output_dir_path / plate_id
+        plate_output_dir.mkdir(parents=True, exist_ok=True)
+
+        plate_result: "SampleResult | None" = None
+        per_well_rows: list = []
+        n_failed = 0
+
+        # Wells without a BAI index are skipped before dispatching
+        indexed_wells = []
+        for well_id, bam_path in well_list:
+            bai_path = Path(str(bam_path) + ".bai")
+            bai_path2 = bam_path.with_suffix(".bai")
+            if not bai_path.exists() and not bai_path2.exists():
+                click.echo(f"  [{well_id}] skipping — no .bai index for {bam_path.name}", err=True)
+                n_failed += 1
+            else:
+                indexed_wells.append((well_id, bam_path))
+
+        if parallel_wells > 1 and indexed_wells:
+            # ---------------------------------------------------------------- #
+            # Parallel path — one worker process per well (up to parallel_wells)
+            # ---------------------------------------------------------------- #
+            _threads_per_well = max(1, threads // parallel_wells)
+            click.echo(
+                f"  Running {len(indexed_wells)} wells with {parallel_wells} parallel workers "
+                f"({_threads_per_well} thread(s) each) …"
+            )
+            _tasks = [
+                {
+                    "bam_path":         str(bam_path),
+                    "well_id":          well_id,
+                    "plate_id":         plate_id,
+                    "barcode_tag":      barcode_tag,
+                    "umi_tag":          umi_tag,
+                    "platform_override": plat,
+                    "stage_override":   stage,
+                    "whitelist":        whitelist,
+                    "chimeric_distance": chimeric_distance,
+                    "threads":          _threads_per_well,
+                    "store_umis":       not no_umi_dedup,
+                    "reference":        reference,
+                }
+                for well_id, bam_path in indexed_wells
+            ]
+            _well_results: dict = {}
+            with ProcessPoolExecutor(
+                max_workers=parallel_wells,
+                initializer=_plate_worker_init,
+                initargs=(
+                    gtf, repeats, list(exclude_biotypes),
+                    polya_paths, tss_paths, _shared_bam_cs,
+                ),
+            ) as executor:
+                futures = {executor.submit(_plate_well_task, t): t["well_id"] for t in _tasks}
+                for future in as_completed(futures):
+                    res = future.result()
+                    wid = res["well_id"]
+                    if res["ok"]:
+                        _well_results[wid] = res
+                        click.echo(
+                            f"  [{wid}] {res['well_sm'].n_reads_total:,} reads, "
+                            f"noise={res['well_sm'].noise_read_frac:.1%}"
+                        )
+                    else:
+                        click.echo(f"  [{wid}] FAILED: {res['error']}", err=True)
+                        n_failed += 1
+
+            # Merge in original well order; reassign polya/tss after merge
+            for well_id, bam_path in indexed_wells:
+                if well_id not in _well_results:
+                    continue
+                res = _well_results[well_id]
+                well_sm     = res["well_sm"]
+                well_result = res["well_result"]
+                well_meta_from_sheet = lookup_well(well_metadata, plate_id, well_id)
+                row: dict = {
+                    "plate_id":              plate_id,
+                    "well_id":               well_id,
+                    "n_reads_total":         well_sm.n_reads_total,
+                    "n_reads_classified":    well_sm.n_reads_classified,
+                    "noise_read_frac":       f"{well_sm.noise_read_frac:.4f}",
+                    "noise_base_frac":       f"{well_sm.noise_base_frac:.4f}",
+                    "strand_concordance":    f"{well_sm.strand_concordance:.4f}",
+                    "chimeric_read_frac":    f"{well_sm.chimeric_read_frac:.4f}",
+                    "multimapper_read_frac": f"{well_sm.multimapper_read_frac:.4f}",
+                    "full_length_read_frac": (
+                        f"{well_sm.full_length_read_frac:.4f}"
+                        if well_sm.full_length_read_frac is not None else ""
+                    ),
+                    "n_tso_invasion":        well_sm.n_tso_invasion,
+                    "n_polya_priming":       well_sm.n_polya_priming,
+                    "bam_path":              str(bam_path),
+                }
+                if well_meta_from_sheet:
+                    row.update({
+                        "i5_name": well_meta_from_sheet.get("i5_name", ""),
+                        "i7_name": well_meta_from_sheet.get("i7_name", ""),
+                        "i5_seq":  well_meta_from_sheet.get("i5_seq",  ""),
+                        "i7_seq":  well_meta_from_sheet.get("i7_seq",  ""),
+                    })
+                    for k, v in well_meta_from_sheet.items():
+                        if k not in {"well_id", "plate_id", "i5_name", "i7_name",
+                                     "i5_seq", "i7_seq"} and k not in row:
+                            row[k] = v
+                per_well_rows.append(row)
+                if plate_result is None:
+                    plate_result = well_result
+                else:
+                    merge_sample_results(plate_result, well_result)
+
+            if plate_result is not None:
+                plate_result._polya_site_dict = _shared_polya
+                plate_result._tss_site_dict   = _shared_tss
+
+        else:
+            # ---------------------------------------------------------------- #
+            # Serial path
+            # ---------------------------------------------------------------- #
+            for well_id, bam_path in indexed_wells:
+                try:
+                    meta = inspect_bam(
+                        bam_path, barcode_tag=barcode_tag, umi_tag=umi_tag,
+                        platform=plat, pipeline_stage=stage,
+                    )
+                    _validate_sort_order(meta)
+
+                    well_result = run_pipeline(
+                        bam_path, index, meta,
+                        whitelist=whitelist,
+                        chimeric_distance=chimeric_distance,
+                        paired_end_chimeric=_is_illumina_platform(meta.platform),
+                        threads=threads,
+                        store_umis=not no_umi_dedup,
+                        reference_path=reference,
+                    )
+
+                    well_result._polya_site_dict = _shared_polya
+                    well_result._tss_site_dict   = _shared_tss
+                    well_result._numt_intervals  = None
+
+                    well_sm, _ = compute_metrics(
+                        well_result, f"{plate_id}_{well_id}",
+                        platform=meta.platform.value,
+                        unstranded=(meta.platform == Platform.SMARTSEQ),
+                    )
+
+                    well_meta_from_sheet = lookup_well(well_metadata, plate_id, well_id)
+                    row = {
+                        "plate_id":              plate_id,
+                        "well_id":               well_id,
+                        "n_reads_total":         well_sm.n_reads_total,
+                        "n_reads_classified":    well_sm.n_reads_classified,
+                        "noise_read_frac":       f"{well_sm.noise_read_frac:.4f}",
+                        "noise_base_frac":       f"{well_sm.noise_base_frac:.4f}",
+                        "strand_concordance":    f"{well_sm.strand_concordance:.4f}",
+                        "chimeric_read_frac":    f"{well_sm.chimeric_read_frac:.4f}",
+                        "multimapper_read_frac": f"{well_sm.multimapper_read_frac:.4f}",
+                        "full_length_read_frac": (
+                            f"{well_sm.full_length_read_frac:.4f}"
+                            if well_sm.full_length_read_frac is not None else ""
+                        ),
+                        "n_tso_invasion":        well_sm.n_tso_invasion,
+                        "n_polya_priming":       well_sm.n_polya_priming,
+                        "bam_path":              str(bam_path),
+                    }
+                    if well_meta_from_sheet:
+                        row.update({
+                            "i5_name": well_meta_from_sheet.get("i5_name", ""),
+                            "i7_name": well_meta_from_sheet.get("i7_name", ""),
+                            "i5_seq":  well_meta_from_sheet.get("i5_seq",  ""),
+                            "i7_seq":  well_meta_from_sheet.get("i7_seq",  ""),
+                        })
+                        for k, v in well_meta_from_sheet.items():
+                            if k not in {"well_id", "plate_id", "i5_name", "i7_name",
+                                         "i5_seq", "i7_seq"} and k not in row:
+                                row[k] = v
+
+                    per_well_rows.append(row)
+                    click.echo(
+                        f"  [{well_id}] {well_sm.n_reads_total:,} reads, "
+                        f"noise={well_sm.noise_read_frac:.1%}"
+                    )
+
+                    if plate_result is None:
+                        plate_result = well_result
+                    else:
+                        merge_sample_results(plate_result, well_result)
+
+                except Exception as exc:
+                    logger.error("Well %s failed: %s", well_id, exc, exc_info=verbose)
+                    click.echo(f"  [{well_id}] FAILED: {exc}", err=True)
+                    n_failed += 1
+
+        if plate_result is None:
+            click.echo(f"  All wells failed for plate {plate_id} — skipping.", err=True)
+            continue
+
+        # ------------------------------------------------------------------ #
+        # Plate-level metrics + outputs
+        # ------------------------------------------------------------------ #
+        plate_meta = plate_result.meta  # use last well's meta (platform is the same)
+        plate_meta.warnings = []        # clear per-well warnings; plate report stays clean
+
+        plate_sm, plate_ct = compute_metrics(
+            plate_result, plate_label,
+            platform=plate_meta.platform.value,
+            unstranded=(plate_meta.platform == Platform.SMARTSEQ),
+        )
+        plate_sm._gtf_info   = {"version": gtf_version, "source": gtf_source, "path": gtf}
+        plate_sm._polya_info = {
+            "version": polya_version, "source": polya_source,
+            "path": polya_paths[0] if polya_paths else None, "db": polya_db,
+        }
+        plate_sm._tss_info = {
+            "db": tss_db, "source": "auto-downloaded",
+            "path": tss_paths[0] if tss_paths else None,
+        } if tss_paths else None
+        plate_sm._cell_barcodes_info = None
+        if version_warning:
+            plate_sm.warnings.append(version_warning)
+
+        # Intergenic profiler at plate level
+        intergenic_records = extract_intergenic_records(plate_result)
+        intergenic_loci = []
+        if intergenic_records:
+            total_ig_bases = compute_intergenic_bases(index)
+            ig_loci, _ = profile_intergenic_loci(
+                intergenic_records,
+                total_intergenic_bases=total_ig_bases,
+                total_barcodes=len(plate_result.read_counts),
+                polya_sites=getattr(plate_result, "_polya_site_dict", None) or {},
+            )
+            intergenic_loci = ig_loci
+
+        _write_run_outputs(
+            plate_sm, plate_ct, plate_result, plate_output_dir, plate_label,
+            cluster_df=None, intergenic_loci=intergenic_loci,
+            platform=plate_meta.platform,
+        )
+
+        # Per-well metrics TSV
+        if per_well_rows:
+            import pandas as _pd
+            pw_path = plate_output_dir / f"{plate_label}.per_well_metrics.tsv"
+            _pd.DataFrame(per_well_rows).to_csv(pw_path, sep="\t", index=False)
+            logger.info("Wrote %s", pw_path)
+
+        n_wells_ok = len(well_list) - n_failed
+        click.echo(
+            f"\n  Plate {plate_id} complete: {n_wells_ok}/{len(well_list)} wells processed."
+        )
+        click.echo(f"  Noise fraction (reads) : {plate_sm.noise_read_frac:.2%}")
+        click.echo(f"  Strand concordance     : {plate_sm.strand_concordance:.2%}")
+        click.echo(f"  Chimeric rate          : {plate_sm.chimeric_read_frac:.2%}")
+        click.echo(f"  Results in             : {plate_output_dir}")
+
+
+# ---------------------------------------------------------------------------
 # Output writers
 # ---------------------------------------------------------------------------
 
@@ -1283,7 +1950,50 @@ def _open_bed(path: str):
     return open(path, "rt", encoding="utf-8")
 
 
-def _load_polya_sites(paths) -> dict:
+def _strip_chr_if_needed(sites: dict, chrom_style: str) -> dict:
+    """
+    If the BAM uses Ensembl-style chromosome names (no chr prefix) but the BED
+    uses UCSC-style (chr prefix), strip the chr prefix so lookups succeed.
+    No-op when styles already match or when style is unknown.
+    """
+    if chrom_style != "ensembl":
+        return sites
+    # Check if the keys actually have the chr prefix before stripping
+    has_chr = any(k.startswith("chr") for k in sites)
+    if not has_chr:
+        return sites
+    stripped = {}
+    for k, v in sites.items():
+        stripped[k.removeprefix("chr")] = v
+    logger.debug("Stripped 'chr' prefix from BED chromosome names to match Ensembl BAM naming.")
+    return stripped
+
+
+def _site_cache_path(paths, chrom_style: str, prefix: str) -> Optional[Path]:
+    """
+    Return a pickle cache path for a loaded BED site dict, keyed on source
+    file mtimes + sizes + chrom_style.  Returns None when caching is not
+    applicable (no paths, or stat fails).
+    """
+    if isinstance(paths, str):
+        paths = [paths]
+    if not paths:
+        return None
+    path_objs = [Path(p) for p in paths]
+    try:
+        parts = [
+            f"{p}:{p.stat().st_mtime_ns}:{p.stat().st_size}"
+            for p in path_objs
+        ]
+        parts.append(chrom_style)
+        h = hashlib.md5("|".join(parts).encode()).hexdigest()[:10]
+    except OSError:
+        return None
+    cache_dir = Path.home() / ".cache" / "scnoisemeter"
+    return cache_dir / f".scnoisemeter_{prefix}_{h}.pkl.gz"
+
+
+def _load_polya_sites(paths, chrom_style: str = "ucsc") -> dict:
     """
     Load one or more polyA site BED files into a merged dict of
     contig → sorted list of midpoint positions.
@@ -1292,11 +2002,26 @@ def _load_polya_sites(paths) -> dict:
     databases (e.g. PolyASite 2.0 + APADB) are merged transparently —
     duplicate positions are collapsed after sorting.
 
+    *chrom_style* is the style detected from the BAM header ('ucsc' or
+    'ensembl').  When 'ensembl', the chr prefix is stripped from BED keys
+    so lookups against Ensembl-aligned BAM reads succeed.
+
     Supported databases:
       - PolyASite 2.0  (atlas.clusters.3.0.GRCh38.GENCODE_42.bed.gz)
       - APADB 3.0      (APADB_3.0.hg38.bed.gz)
       - Any BED3+ file with chrom / start / end in the first three columns
     """
+    import gzip as _gz, pickle as _pkl
+    _cache = _site_cache_path(paths, chrom_style, "polya")
+    if _cache and _cache.exists():
+        try:
+            with _gz.open(_cache, "rb") as fh:
+                sites = _pkl.load(fh)
+            logger.info("Loaded polyA site dict from cache: %s", _cache.name)
+            return sites
+        except Exception:
+            _cache.unlink(missing_ok=True)
+
     if isinstance(paths, str):
         paths = [paths]
     sites: dict = {}
@@ -1319,14 +2044,24 @@ def _load_polya_sites(paths) -> dict:
         logger.info("Loaded polyA sites from %s", path)
     for chrom in sites:
         sites[chrom] = sorted(set(sites[chrom]))
+    sites = _strip_chr_if_needed(sites, chrom_style)
     logger.info(
         "Total polyA site positions: %d across %d contigs",
         sum(len(v) for v in sites.values()), len(sites),
     )
+
+    if _cache:
+        try:
+            _cache.parent.mkdir(parents=True, exist_ok=True)
+            with _gz.open(_cache, "wb") as fh:
+                _pkl.dump(sites, fh, protocol=5)
+        except Exception:
+            pass
+
     return sites
 
 
-def _load_tss_sites(paths) -> dict:
+def _load_tss_sites(paths, chrom_style: str = "ucsc") -> dict:
     """
     Load one or more CAGE peak / TSS BED files for the 5'-anchored
     full-length metric.
@@ -1334,11 +2069,26 @@ def _load_tss_sites(paths) -> dict:
     Accepts a single path or list of paths. Format: BED3+ (chrom, start, end).
     Midpoint of each peak is used as the reference TSS position.
 
+    *chrom_style* is the style detected from the BAM header ('ucsc' or
+    'ensembl').  When 'ensembl', the chr prefix is stripped from BED keys
+    so lookups against Ensembl-aligned BAM reads succeed.
+
     Compatible databases:
       - FANTOM5 CAGE peaks (hg38.cage_peak_phase1and2combined_ann.bed.gz)
       - ENCODE RAMPAGE peaks
       - Any BED3+ file
     """
+    import gzip as _gz, pickle as _pkl
+    _cache = _site_cache_path(paths, chrom_style, "tss")
+    if _cache and _cache.exists():
+        try:
+            with _gz.open(_cache, "rb") as fh:
+                sites = _pkl.load(fh)
+            logger.info("Loaded TSS site dict from cache: %s", _cache.name)
+            return sites
+        except Exception:
+            _cache.unlink(missing_ok=True)
+
     if isinstance(paths, str):
         paths = [paths]
     sites: dict = {}
@@ -1359,10 +2109,20 @@ def _load_tss_sites(paths) -> dict:
         logger.info("Loaded TSS sites from %s", path)
     for chrom in sites:
         sites[chrom] = sorted(set(sites[chrom]))
+    sites = _strip_chr_if_needed(sites, chrom_style)
     logger.info(
         "Total TSS positions: %d across %d contigs",
         sum(len(v) for v in sites.values()), len(sites),
     )
+
+    if _cache:
+        try:
+            _cache.parent.mkdir(parents=True, exist_ok=True)
+            with _gz.open(_cache, "wb") as fh:
+                _pkl.dump(sites, fh, protocol=5)
+        except Exception:
+            pass
+
     return sites
 
 
@@ -1505,7 +2265,7 @@ def _write_run_outputs(sm, ct, result, output_dir: Path, sample_name: str,
         result.length_bin_counts,
         result.length_samples,
     )
-    _illumina_platform_vals = {"illumina", "illumina_10x", "illumina_bd"}
+    _illumina_platform_vals = {"illumina", "illumina_10x", "illumina_bd", "smartseq"}
     is_illumina = (
         platform is not None
         and platform.value in _illumina_platform_vals

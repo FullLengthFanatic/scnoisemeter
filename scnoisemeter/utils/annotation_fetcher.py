@@ -83,6 +83,26 @@ _FANTOM5_CAGE_URL = (
 )
 _FANTOM5_CACHE_NAME = "fantom5.hg38.CAGE_peaks.bed.gz"
 
+# 10x Genomics barcode whitelists from Cell Ranger GitHub repository.
+# v3: 3M barcodes used in Chromium v3 chemistry (2018).
+# v4: 3M barcodes used in Chromium v4 / 3' GEX chemistry (2023).
+_TENX_WHITELIST_V3_URL = (
+    "https://github.com/10XGenomics/cellranger/raw/master/lib/python/cellranger/"
+    "barcodes/3M-february-2018.txt.gz"
+)
+_TENX_WHITELIST_V4_URL = (
+    "https://github.com/10XGenomics/cellranger/raw/master/lib/python/cellranger/"
+    "barcodes/3M-3pgex-may-2023.txt.gz"
+)
+_TENX_WHITELIST_CACHE_NAMES: dict = {
+    "10x_v3": "10x_whitelist_v3.txt.gz",
+    "10x_v4": "10x_whitelist_v4.txt.gz",
+}
+_TENX_WHITELIST_URLS: dict = {
+    "10x_v3": _TENX_WHITELIST_V3_URL,
+    "10x_v4": _TENX_WHITELIST_V4_URL,
+}
+
 _USER_AGENT = f"scnoisemeter/{__version__} (https://github.com/scnoisemeter)"
 
 
@@ -383,6 +403,55 @@ def fetch_fantom5_cage_peaks(offline: bool = False) -> Path:
     _download(_FANTOM5_CAGE_URL, dest)
     print("Using FANTOM5 CAGE peak atlas (downloaded to ~/.cache/scnoisemeter/)")
     return dest
+
+
+def fetch_10x_whitelist(chemistry: str, offline: bool = False) -> Path:
+    """
+    Return the path to a 10x Genomics barcode whitelist.
+
+    Cache-first: if the whitelist is already in the cache directory,
+    it is returned immediately — no network call is made.
+
+    Parameters
+    ----------
+    chemistry : str
+        '10x_v3' or '10x_v4'.
+    offline : bool
+        If True, raise RuntimeError when the cache is empty.
+
+    Returns
+    -------
+    path : Path
+        Path to the cached whitelist file (.txt.gz).
+    """
+    chemistry = chemistry.lower()
+    if chemistry not in _TENX_WHITELIST_CACHE_NAMES:
+        raise ValueError(
+            f"Unknown chemistry {chemistry!r}. "
+            f"Supported values: {sorted(_TENX_WHITELIST_CACHE_NAMES)}"
+        )
+
+    cache_dir = _ensure_cache_dir()
+    cache_name = _TENX_WHITELIST_CACHE_NAMES[chemistry]
+    cached_path = cache_dir / cache_name
+
+    if cached_path.exists() and cached_path.stat().st_size > 0:
+        logger.info("Using cached 10x whitelist (%s): %s", chemistry, cached_path)
+        print(f"Using 10x {chemistry} barcode whitelist (from ~/.cache/scnoisemeter/)")
+        return cached_path
+
+    if offline:
+        raise RuntimeError(
+            f"No cached 10x {chemistry} whitelist found and --offline mode is active. "
+            f"Run once with network access to populate the cache, "
+            f"or supply --barcode-whitelist explicitly."
+        )
+
+    url = _TENX_WHITELIST_URLS[chemistry]
+    print(f"Downloading 10x {chemistry} barcode whitelist (~100 MB) …")
+    _download(url, cached_path)
+    print(f"Using 10x {chemistry} barcode whitelist (downloaded to ~/.cache/scnoisemeter/)")
+    return cached_path
 
 
 def extract_gencode_version_from_filename(filename: str) -> Optional[int]:

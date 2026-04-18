@@ -466,7 +466,72 @@ def run_pipeline(
 
 
 # ---------------------------------------------------------------------------
-# Merge helper
+# Public merge helper — combine two SampleResults into one (in-place)
+# ---------------------------------------------------------------------------
+
+def merge_sample_results(base: SampleResult, other: SampleResult) -> None:
+    """
+    Merge *other* into *base* in-place.
+
+    Used by run-plate to aggregate per-well SampleResults into a single
+    plate-level result before computing metrics.  Read counts, base counts,
+    UMI sets, artifact flags, and length samples are all combined.
+
+    *base.bam_path* and *base.meta* are unchanged; callers should set
+    these to a meaningful plate-level value before calling compute_metrics.
+    """
+    base.n_reads_total      += other.n_reads_total
+    base.n_reads_processed  += other.n_reads_processed
+    base.n_reads_skipped    += other.n_reads_skipped
+    base.n_reads_skipped_not_called_cell += other.n_reads_skipped_not_called_cell
+
+    for cb, cat_counts in other.read_counts.items():
+        for cat, n in cat_counts.items():
+            base.read_counts[cb][cat] += n
+
+    for cb, cat_counts in other.base_counts.items():
+        for cat, n in cat_counts.items():
+            base.base_counts[cb][cat] += n
+
+    for cb, cat_umis in other.umi_sets.items():
+        for cat, umi_set in cat_umis.items():
+            base.umi_sets[cb][cat].update(umi_set)
+
+    for cb, flags in other.artifact_flags.items():
+        for flag_name, n in flags.items():
+            base.artifact_flags[cb][flag_name] += n
+
+    for cat, lengths in other.length_samples.items():
+        existing = base.length_samples[cat]
+        for L in lengths:
+            _reservoir_add(existing, L, MAX_LENGTH_SAMPLE)
+
+    for cat, bin_counts in other.length_bin_counts.items():
+        for bin_idx, n in bin_counts.items():
+            base.length_bin_counts[cat][bin_idx] += n
+
+    for rec in other.intergenic_reads:
+        _reservoir_add(base.intergenic_reads, rec, 500_000)
+
+    for ins in other.insert_size_signal:
+        _reservoir_add(base.insert_size_signal, ins, 500_000)
+    for ins in other.insert_size_noise:
+        _reservoir_add(base.insert_size_noise, ins, 500_000)
+
+    for pos in other.exonic_sense_three_prime:
+        _reservoir_add(base.exonic_sense_three_prime, pos, MAX_LENGTH_SAMPLE)
+    for pos in other.exonic_sense_five_prime:
+        _reservoir_add(base.exonic_sense_five_prime, pos, MAX_LENGTH_SAMPLE)
+
+    # Propagate polyA / TSS site dicts if base doesn't have them yet
+    if not getattr(base, "_polya_site_dict", None) and getattr(other, "_polya_site_dict", None):
+        base._polya_site_dict = other._polya_site_dict
+    if not getattr(base, "_tss_site_dict", None) and getattr(other, "_tss_site_dict", None):
+        base._tss_site_dict = other._tss_site_dict
+
+
+# ---------------------------------------------------------------------------
+# Internal merge helper
 # ---------------------------------------------------------------------------
 
 def _merge_contig(sample: SampleResult, cr: ContigResult) -> None:
