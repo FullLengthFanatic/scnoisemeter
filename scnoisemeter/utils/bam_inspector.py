@@ -261,22 +261,31 @@ def _refine_platform_from_pipeline_hints(meta: BamMetadata) -> None:
             meta.platform_confidence = "header"
             return
 
-    for signal in illumina_signals:
-        if any(signal in h for h in hints_lower):
-            # Distinguish 10x vs BD by checking for BD-specific keywords
-            bd_signals = {"rhapsody", "bd", "seven-bridges"}
-            if any(s in h for h in hints_lower for s in bd_signals):
-                meta.platform = Platform.ILLUMINA_BD
-            else:
-                meta.platform = Platform.ILLUMINA_10X
-            meta.platform_confidence = "header"
-            # If aligner was not identified from @PG ID/PN fields (e.g. Cell Ranger
-            # leaves no own @PG record but its name appears in downstream CL paths),
-            # use the matched signal as the aligner name so the report says
-            # "cellranger" rather than "unknown".
-            if not meta.aligner:
-                meta.aligner = signal
-            return
+    # Illuminate SC (10x/BD) signals are distinct from bare STAR.
+    # cellranger/starsolo/spaceranger → 10x-family; bare STAR only → Smart-seq.
+    illumina_sc_signals = {"cellranger", "starsolo", "spaceranger"}
+    has_sc = any(any(s in h for h in hints_lower) for s in illumina_sc_signals)
+    has_star = any("star" in h for h in hints_lower)
+
+    if has_sc:
+        bd_signals = {"rhapsody", "bd", "seven-bridges"}
+        if any(s in h for h in hints_lower for s in bd_signals):
+            meta.platform = Platform.ILLUMINA_BD
+        else:
+            meta.platform = Platform.ILLUMINA_10X
+        meta.platform_confidence = "header"
+        if not meta.aligner:
+            for s in illumina_sc_signals:
+                if any(s in h for h in hints_lower):
+                    meta.aligner = s
+                    break
+        return
+
+    if has_star:
+        # STAR without any 10x-specific tools → Smart-seq (plate-based, no CB tags)
+        meta.platform = Platform.SMARTSEQ
+        meta.platform_confidence = "header"
+        return
 
 
 def _infer_pipeline_stage(meta: BamMetadata) -> None:
@@ -361,7 +370,7 @@ def _detect_barcode_tags(
             f"Per-cell noise metrics will be unavailable."
         )
 
-    if not meta.barcode_tag_present:
+    if not meta.barcode_tag_present and meta.platform != Platform.SMARTSEQ:
         meta.warnings.append(
             f"Corrected barcode tag '{meta.barcode_tag}' found in only "
             f"{meta.barcode_fraction:.1%} of sampled reads "
@@ -369,7 +378,8 @@ def _detect_barcode_tags(
             f"Running in barcode-agnostic mode: all reads will be classified "
             f"genomically and aggregated as a single sample. "
             f"Per-cell metrics will not be available.  "
-            f"This is expected for PacBio FLTNC BAMs without barcode demultiplexing, "
+            f"This is expected for Smart-seq BAMs (one BAM per cell, no CB tags), "
+            f"for PacBio FLTNC BAMs without barcode demultiplexing, "
             f"or for any BAM produced before the barcode assignment step."
         )
 

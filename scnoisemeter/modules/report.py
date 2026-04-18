@@ -105,8 +105,10 @@ def write_run_report(
     offline : bool
         If True, embed Plotly JS in the HTML (no internet required).
     """
-    _illumina_platforms = {"illumina", "illumina_10x", "illumina_bd"}
-    is_illumina = bool(platform and platform.lower() in _illumina_platforms)
+    _illumina_sc_platforms = {"illumina", "illumina_10x", "illumina_bd"}
+    is_illumina_sc = bool(platform and platform.lower() in _illumina_sc_platforms)
+    is_smartseq = bool(platform and platform.lower() == "smartseq")
+    is_illumina = is_illumina_sc or is_smartseq
 
     figures = []
 
@@ -130,7 +132,7 @@ def write_run_report(
 
     figures.append(_artifact_flags(sm))
 
-    # Insert size distribution for Illumina paired-end data
+    # Insert size distribution for paired-end data (Illumina SC and Smart-seq)
     report_warnings = list(sm.warnings)
     if is_illumina:
         has_signal = bool(insert_sizes and insert_sizes.get("signal"))
@@ -138,8 +140,9 @@ def write_run_report(
         if has_signal or has_noise:
             figures.append(_insert_size_distribution(insert_sizes))
         else:
+            platform_label = "Smart-seq" if is_smartseq else "Illumina"
             report_warnings.append(
-                "Illumina BAM: no properly paired reads found in the sample — "
+                f"{platform_label} BAM: no properly paired reads found in the sample — "
                 "insert size distribution plot was not generated."
             )
 
@@ -154,16 +157,37 @@ def write_run_report(
         figures.append(_cluster_noise_plot(cluster_df))
         figures.append(_cluster_heatmap(cluster_df))
 
-    # For Illumina short-read data, TSS and polyA anchoring metrics reflect
-    # read-end proximity only (reads rarely span full transcripts at 50–150 bp).
-    if is_illumina:
+    # Platform-specific TSS/polyA anchoring interpretation notes.
+    if is_illumina_sc:
         report_warnings.append(
             "Illumina short-read data: TSS-anchored and polyA-anchored "
             "full-length metrics reflect read-end proximity only.  Because "
-            "reads are 50–150 bp, they rarely span an entire transcript.  "
+            "reads are 50\u2013150 bp, they rarely span an entire transcript.  "
             "These values should NOT be compared directly with long-read "
             "TSS/polyA fractions; they indicate strand-correct 5\u2032 or 3\u2032 "
             "proximity, not full-length capture efficiency."
+        )
+    if is_smartseq:
+        # Check whether the metrics were computed in unstranded mode
+        _unstranded = getattr(sm, "is_unstranded", False)
+        if _unstranded:
+            report_warnings.append(
+                "Unstranded protocol (Smart-seq / FLASH-seq): "
+                "reads on both strands are sequenced, so ~30–35% of reads are expected "
+                "to map antisense to annotated genes. "
+                "The reported Noise fraction EXCLUDES these antisense exonic reads — "
+                "they are genuine cDNA signal, not artifacts. "
+                "Strand concordance (~50%) is expected for non-stranded libraries and "
+                "is not informative here."
+            )
+        report_warnings.append(
+            "Smart-seq data: TSS-anchored and polyA-anchored fractions are "
+            "computed per individual read.  In paired-end Smart-seq BAMs, R1 and "
+            "R2 of the same molecule sample both ends of the cDNA — R1 proximity "
+            "to a CAGE peak and R2 proximity to a polyA site are both informative "
+            "for full-length capture quality.  These fractions can be compared "
+            "across Smart-seq experiments but should not be compared directly with "
+            "long-read full-molecule fractions."
         )
 
     html = _assemble_html(
@@ -229,16 +253,20 @@ def write_compare_report(
 # ---------------------------------------------------------------------------
 
 def _metadata_table(sm: SampleMetrics) -> str:
+    _is_smartseq = sm.platform.lower() == "smartseq"
     rows = [
         ("Sample name",     sm.sample_name),
         ("BAM path",        sm.bam_path),
         ("Platform",        sm.platform),
-        ("Pipeline stage",  sm.pipeline_stage),
+        ("Pipeline stage",
+         "N/A (Smart-seq: one BAM per cell, no filtering stage)"
+         if _is_smartseq else sm.pipeline_stage),
         ("Aligner",         sm.aligner or "unknown"),
         ("Total reads",     f"{sm.n_reads_total:,}"),
         ("Classified reads", f"{sm.n_reads_classified:,}"),
         ("Cells detected",
-         f"{sm.n_cells:,}" if sm.n_cells > 1
+         "N/A (Smart-seq: 1 cell per BAM)" if _is_smartseq
+         else f"{sm.n_cells:,}" if sm.n_cells > 1
          else "N/A — barcode-agnostic mode (no CB tags in BAM)"),
         ("Noise — conservative (reads)",
          f"{sm.noise_read_frac:.2%}  "
@@ -247,7 +275,9 @@ def _metadata_table(sm: SampleMetrics) -> str:
          f"{sm.noise_read_frac_strict:.2%}  "
          "(unambiguous RT/PCR artifacts only — lower bound)"),
         ("Noise (bases)",   f"{sm.noise_base_frac:.2%}"),
-        ("Strand concordance", f"{sm.strand_concordance:.2%}"),
+        ("Strand concordance",
+         "~50% (expected — unstranded protocol)" if getattr(sm, "is_unstranded", False)
+         else f"{sm.strand_concordance:.2%}"),
         ("Chimeric rate",   f"{sm.chimeric_read_frac:.2%}"),
     ]
     if sm.full_length_read_frac is not None:

@@ -21,6 +21,7 @@ from scnoisemeter.utils.annotation_fetcher import (
     extract_polyasite_version_from_filename,
     fetch_latest_gencode_gtf,
     fetch_latest_polyasite_atlas,
+    fetch_10x_whitelist,
     _parse_gencode_gtf_filename,
     _url_exists,
 )
@@ -317,3 +318,48 @@ class TestVersionConsistency:
     def test_both_none_no_crash(self):
         result = _check_version_consistency(None, None)
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# fetch_10x_whitelist — cache-hit and download paths
+# ---------------------------------------------------------------------------
+
+class TestFetch10xWhitelist:
+    def test_skip_download_when_cached_v3(self, tmp_path):
+        """Auto-download is skipped when v3 whitelist is already cached."""
+        cached = tmp_path / "10x_whitelist_v3.txt.gz"
+        cached.write_bytes(b"ACGT\n")
+
+        with (
+            patch("scnoisemeter.utils.annotation_fetcher.CACHE_DIR", tmp_path),
+            patch("scnoisemeter.utils.annotation_fetcher._download") as mock_dl,
+        ):
+            path = fetch_10x_whitelist("10x_v3")
+
+        assert path == cached
+        mock_dl.assert_not_called()
+
+    def test_triggers_download_when_not_cached_v4(self, tmp_path):
+        """v4 whitelist is downloaded when not in cache."""
+        def fake_download(url, dest, **kwargs):
+            dest.write_bytes(b"fake whitelist")
+
+        with (
+            patch("scnoisemeter.utils.annotation_fetcher.CACHE_DIR", tmp_path),
+            patch("scnoisemeter.utils.annotation_fetcher._download", side_effect=fake_download),
+        ):
+            path = fetch_10x_whitelist("10x_v4")
+
+        assert path.exists()
+        assert path.name == "10x_whitelist_v4.txt.gz"
+
+    def test_raises_on_unknown_chemistry(self, tmp_path):
+        with pytest.raises(ValueError, match="Unknown chemistry"):
+            fetch_10x_whitelist("10x_v99")
+
+    def test_raises_when_offline_and_not_cached(self, tmp_path):
+        with (
+            patch("scnoisemeter.utils.annotation_fetcher.CACHE_DIR", tmp_path),
+        ):
+            with pytest.raises(RuntimeError, match="--offline"):
+                fetch_10x_whitelist("10x_v3", offline=True)

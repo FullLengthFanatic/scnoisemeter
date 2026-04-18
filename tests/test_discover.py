@@ -113,15 +113,25 @@ class TestPlatformDetection:
         info = self._run_discover(meta, tmp_path=tmp_path)
         assert info.platform == Platform.ONT
 
-    def test_star_pg_gives_illumina(self, tmp_path):
-        """STAR in @PG → illumina."""
+    def test_star_with_starsolo_gives_illumina(self, tmp_path):
+        """STAR + STARsolo in @PG → illumina_10x."""
         meta = _make_meta(
             platform=Platform.ILLUMINA_10X,
+            aligner="STAR",
+            pipeline_hints=["STAR", "STARsolo"],
+        )
+        info = self._run_discover(meta, tmp_path=tmp_path)
+        assert info.platform in (Platform.ILLUMINA, Platform.ILLUMINA_10X)
+
+    def test_star_alone_gives_smartseq(self, tmp_path):
+        """Bare STAR (no STARsolo/cellranger) → smartseq."""
+        meta = _make_meta(
+            platform=Platform.SMARTSEQ,
             aligner="STAR",
             pipeline_hints=["STAR"],
         )
         info = self._run_discover(meta, tmp_path=tmp_path)
-        assert info.platform in (Platform.ILLUMINA, Platform.ILLUMINA_10X)
+        assert info.platform == Platform.SMARTSEQ
 
     def test_cellranger_cl_path_gives_illumina(self, tmp_path):
         """cellranger in CL path → illumina."""
@@ -132,6 +142,50 @@ class TestPlatformDetection:
         )
         info = self._run_discover(meta, tmp_path=tmp_path)
         assert info.platform in (Platform.ILLUMINA, Platform.ILLUMINA_10X)
+
+
+# ---------------------------------------------------------------------------
+# _refine_platform_from_pipeline_hints — unit tests for Smart-seq detection
+# ---------------------------------------------------------------------------
+
+class TestRefinePlatformHints:
+    """Direct tests for the bam_inspector platform-refinement logic."""
+
+    def _make_meta_unknown(self, hints):
+        from scnoisemeter.utils.bam_inspector import BamMetadata, _refine_platform_from_pipeline_hints
+        meta = BamMetadata(path=Path("/fake.bam"))
+        meta.pipeline_hints = hints
+        meta.platform = Platform.UNKNOWN
+        _refine_platform_from_pipeline_hints(meta)
+        return meta
+
+    def test_star_alone_gives_smartseq(self):
+        meta = self._make_meta_unknown(["STAR"])
+        assert meta.platform == Platform.SMARTSEQ
+
+    def test_star_with_starsolo_gives_illumina_10x(self):
+        meta = self._make_meta_unknown(["STAR", "STARsolo"])
+        assert meta.platform == Platform.ILLUMINA_10X
+
+    def test_star_with_cellranger_gives_illumina_10x(self):
+        meta = self._make_meta_unknown(["cellranger", "STAR"])
+        assert meta.platform == Platform.ILLUMINA_10X
+
+    def test_cellranger_alone_gives_illumina_10x(self):
+        meta = self._make_meta_unknown(["cellranger"])
+        assert meta.platform == Platform.ILLUMINA_10X
+
+    def test_bd_signals_give_illumina_bd(self):
+        meta = self._make_meta_unknown(["STARsolo", "rhapsody"])
+        assert meta.platform == Platform.ILLUMINA_BD
+
+    def test_wf_single_cell_gives_ont(self):
+        meta = self._make_meta_unknown(["minimap2", "wf-single-cell"])
+        assert meta.platform == Platform.ONT
+
+    def test_pbmm2_gives_pacbio(self):
+        meta = self._make_meta_unknown(["pbmm2"])
+        assert meta.platform == Platform.PACBIO
 
 
 # ---------------------------------------------------------------------------
