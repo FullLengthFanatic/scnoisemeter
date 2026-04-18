@@ -156,12 +156,24 @@ def parse_sample_sheet(
         if not raw_headers:
             raise ValueError(f"Empty or header-less CSV: {path}")
 
-        # Detect headerless files: if no cell contains a recognisable column-name
-        # keyword, treat the first row as data and assign default positional names.
-        _header_markers = ("sample", "well", "plate", "i5", "i7",
-                           "name", "index", "sequence", "barcode")
+        # Detect headerless files: if no cell matches a recognised column-name
+        # token (exact match or hyphen/underscore-separated token), treat the
+        # first row as data and assign default positional names.  Using
+        # whole-token matching avoids false positives on data values that
+        # happen to contain a keyword as a substring (e.g. "sample_output_123").
+        _header_markers = {"sample", "well", "plate", "i5", "i7",
+                           "name", "index", "sequence", "barcode",
+                           "samplename", "sample_name", "wellid", "plateid"}
+
+        def _header_tokens(cell: str) -> set:
+            low = cell.strip().lower()
+            tokens = {low}
+            for sep in ("_", "-", " "):
+                tokens.update(low.split(sep))
+            return {t for t in tokens if t}
+
         _looks_like_header = any(
-            any(m in h.lower() for m in _header_markers)
+            _header_tokens(h) & _header_markers
             for h in raw_headers if h.strip()
         )
         if not _looks_like_header:

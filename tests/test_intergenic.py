@@ -239,30 +239,99 @@ class TestProfilerIntegration:
     def test_sparse_locus_stays_sparse(self):
         # Very few reads → should stay sparse regardless of anything else
         recs = self._make_records(2)
-        loci, remap = profile_intergenic_loci(
+        loci, record_cats = profile_intergenic_loci(
             recs,
             total_intergenic_bases=2_000_000_000,
             total_barcodes=10_000,
         )
         assert all(l.category == ReadCategory.INTERGENIC_SPARSE for l in loci)
+        assert len(record_cats) == len(recs)
+        assert all(c == ReadCategory.INTERGENIC_SPARSE for c in record_cats)
 
     def test_empty_input(self):
-        loci, remap = profile_intergenic_loci([], 1_000_000, 1000)
+        loci, record_cats = profile_intergenic_loci([], 1_000_000, 1000)
         assert loci == []
-        assert remap == {}
+        assert record_cats == []
 
     def test_repeat_flagged_correctly(self):
         # Reads overlapping a repeat should be flagged INTERGENIC_REPEAT
         # regardless of significance
         recs = self._make_records(50, start=100, end=150)
         repeat_intervals = {"chr1": [(50, 300)]}
-        loci, remap = profile_intergenic_loci(
+        loci, record_cats = profile_intergenic_loci(
             recs,
             total_intergenic_bases=10_000_000,
             total_barcodes=1_000,
             repeat_intervals=repeat_intervals,
         )
         assert any(l.category == ReadCategory.INTERGENIC_REPEAT for l in loci)
+        # Per-record assignment matches locus assignment for promoted loci
+        assert len(record_cats) == len(recs)
+        assert any(c == ReadCategory.INTERGENIC_REPEAT for c in record_cats)
+
+
+# ---------------------------------------------------------------------------
+# Per-barcode reclassification helper (bug fix: reads in promoted loci must
+# move out of INTERGENIC_SPARSE before compute_metrics)
+# ---------------------------------------------------------------------------
+
+class TestIntergenicReclassification:
+    def test_apply_moves_counts_from_sparse_to_novel(self):
+        from collections import defaultdict
+        from scnoisemeter.cli import _apply_intergenic_reclassification
+
+        records = [
+            IntergenicReadRecord(
+                contig="chr1", start=100 + i, end=200 + i, strand="+",
+                cell_barcode="CB1", has_junction=False, three_prime=200 + i,
+            )
+            for i in range(10)
+        ]
+        record_cats = [ReadCategory.INTERGENIC_NOVEL] * 5 + \
+                      [ReadCategory.INTERGENIC_SPARSE] * 5
+
+        class _Result:
+            pass
+        result = _Result()
+        result.read_counts = defaultdict(lambda: defaultdict(int))
+        result.base_counts = defaultdict(lambda: defaultdict(int))
+        result.read_counts["CB1"][ReadCategory.INTERGENIC_SPARSE] = 100
+        result.base_counts["CB1"][ReadCategory.INTERGENIC_SPARSE] = 10_000
+
+        _apply_intergenic_reclassification(result, records, record_cats)
+
+        # 5/10 records were NOVEL → expect ~50% of counts to move
+        moved_reads = result.read_counts["CB1"][ReadCategory.INTERGENIC_NOVEL]
+        kept_reads = result.read_counts["CB1"][ReadCategory.INTERGENIC_SPARSE]
+        assert moved_reads == 50
+        assert kept_reads == 50
+        assert result.base_counts["CB1"][ReadCategory.INTERGENIC_NOVEL] == 5_000
+        assert result.base_counts["CB1"][ReadCategory.INTERGENIC_SPARSE] == 5_000
+
+    def test_apply_noop_when_all_sparse(self):
+        from collections import defaultdict
+        from scnoisemeter.cli import _apply_intergenic_reclassification
+
+        records = [
+            IntergenicReadRecord(
+                contig="chr1", start=100, end=200, strand="+",
+                cell_barcode="CB1", has_junction=False, three_prime=200,
+            )
+        ]
+        record_cats = [ReadCategory.INTERGENIC_SPARSE]
+
+        class _Result:
+            pass
+        result = _Result()
+        result.read_counts = defaultdict(lambda: defaultdict(int))
+        result.base_counts = defaultdict(lambda: defaultdict(int))
+        result.read_counts["CB1"][ReadCategory.INTERGENIC_SPARSE] = 42
+        result.base_counts["CB1"][ReadCategory.INTERGENIC_SPARSE] = 4_200
+
+        _apply_intergenic_reclassification(result, records, record_cats)
+
+        assert result.read_counts["CB1"][ReadCategory.INTERGENIC_SPARSE] == 42
+        assert result.base_counts["CB1"][ReadCategory.INTERGENIC_SPARSE] == 4_200
 
 
 # ---------------------------------------------------------------------------

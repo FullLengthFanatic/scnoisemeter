@@ -150,7 +150,7 @@ def profile_intergenic_loci(
     polya_sites: Optional[dict] = None,  # contig → sorted list of positions
     repeat_intervals: Optional[dict] = None,  # contig → list of (start, end)
     alpha: float = ADAPTIVE_PVALUE_THRESHOLD,
-) -> tuple[list[IntergenicLocus], dict]:
+) -> tuple[list[IntergenicLocus], list]:
     """
     Profile intergenic reads and classify their loci.
 
@@ -178,17 +178,19 @@ def profile_intergenic_loci(
 
     Returns
     -------
-    (loci, reclassification_map)
+    (loci, record_categories)
 
     loci:
-        List of IntergenicLocus objects, one per significant locus.
-    reclassification_map:
-        Dict mapping (contig, start, end) → ReadCategory for reads that
-        should be re-labelled from INTERGENIC_SPARSE to a richer category.
-        The pipeline uses this to update the cell-level count tables.
+        List of IntergenicLocus objects, one per locus.
+    record_categories:
+        List of ReadCategory, aligned with ``records`` (same length and order).
+        Records in promoted loci carry the new category
+        (INTERGENIC_NOVEL / HOTSPOT / REPEAT); everything else stays
+        INTERGENIC_SPARSE.  The pipeline uses this to move per-cell counts
+        out of INTERGENIC_SPARSE before metrics are computed.
     """
     if not records:
-        return [], {}
+        return [], []
 
     # ------------------------------------------------------------------
     # 1. Group reads into loci by single-linkage clustering per contig/strand
@@ -221,9 +223,10 @@ def profile_intergenic_loci(
     )
 
     # ------------------------------------------------------------------
-    # 4. Score each locus
+    # 4. Score each locus and assign a category per record
     # ------------------------------------------------------------------
     loci: list[IntergenicLocus] = []
+    record_categories: list[ReadCategory] = [ReadCategory.INTERGENIC_SPARSE] * len(records)
     n_tests = n_loci  # Bonferroni denominator
 
     for locus_id, indices in locus_groups.items():
@@ -239,15 +242,9 @@ def profile_intergenic_loci(
             alpha=alpha,
         )
         loci.append(locus)
-
-    # ------------------------------------------------------------------
-    # 5. Build reclassification map for loci that are not INTERGENIC_SPARSE
-    # ------------------------------------------------------------------
-    reclassification_map: dict[tuple, ReadCategory] = {}
-    for locus in loci:
         if locus.category != ReadCategory.INTERGENIC_SPARSE:
-            key = (locus.contig, locus.start, locus.end)
-            reclassification_map[key] = locus.category
+            for i in indices:
+                record_categories[i] = locus.category
 
     n_novel   = sum(1 for l in loci if l.category == ReadCategory.INTERGENIC_NOVEL)
     n_hotspot = sum(1 for l in loci if l.category == ReadCategory.INTERGENIC_HOTSPOT)
@@ -257,7 +254,7 @@ def profile_intergenic_loci(
         n_novel, n_hotspot, n_repeat, n_loci - n_novel - n_hotspot - n_repeat,
     )
 
-    return loci, reclassification_map
+    return loci, record_categories
 
 
 # ---------------------------------------------------------------------------
