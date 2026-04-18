@@ -616,7 +616,7 @@ def _manual_complement(gene_bodies_df: pd.DataFrame) -> pr.PyRanges:
     )
 
     gaps = []
-    for chrom, grp in merged.groupby("Chromosome"):
+    for chrom, grp in merged.groupby("Chromosome", observed=False):
         grp = grp.sort_values("Start")
         prev_end = 0
         for _, row in grp.iterrows():

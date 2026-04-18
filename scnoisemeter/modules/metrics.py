@@ -539,7 +539,7 @@ def compute_cluster_metrics(
         return pd.DataFrame()
 
     rows = []
-    for cluster, grp in merged.groupby("_cluster"):
+    for cluster, grp in merged.groupby("_cluster", observed=False):
         row = {"cluster": cluster, "n_cells": len(grp)}
 
         for col, out_name in [

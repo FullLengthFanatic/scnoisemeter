@@ -2,7 +2,9 @@
 
 Platform-agnostic quantification of technical noise in single-cell RNA-seq BAM files.
 
-scNoiseMeter classifies every primary alignment into one of 19 mutually exclusive categories and reports per-sample and per-cell noise fractions, strand concordance, chimeric read rates, and artifact flag counts. It runs on ONT, PacBio/Kinnex, and Illumina (10x Genomics, BD Rhapsody) BAMs using the same classification logic, with platform-specific adjustments where the underlying biology differs.
+scNoiseMeter classifies every primary alignment into one of 19 mutually exclusive categories and reports per-sample and per-cell noise fractions, strand concordance, chimeric read rates, and artifact flag counts. It runs on ONT, PacBio/Kinnex, Illumina (10x Genomics, BD Rhapsody), and Smart-seq / FLASH-seq BAMs using the same classification logic, with platform-specific adjustments where the underlying biology differs.
+
+Current version: **0.3.1**.
 
 ---
 
@@ -68,6 +70,22 @@ scnoisemeter run \
   --output-dir results/
 ```
 
+### `run-plate` — Smart-seq / FLASH-seq plate
+
+Classify reads from a plate of one-cell-per-BAM Smart-seq wells and aggregate the results. Each well is processed independently and the per-well metrics are merged into a plate-level report. Works with 96-well (rows A-H) and 384-well (rows A-P) plates.
+
+```bash
+scnoisemeter run-plate \
+  --plate-dir /data/plate_881/ \
+  --sample-sheet plate_881.csv \
+  --platform smartseq \
+  --parallel-wells 8 \
+  --threads 16 \
+  --output-dir results/
+```
+
+`--plate-dir` is expected to contain one subdirectory per well named `<PlateID>_<WellID>` (e.g. `881_A1`, `881_H12`, `882_P24`). Each subdirectory must hold the well's sorted, indexed BAM. `--parallel-wells` runs multiple wells concurrently via a `ProcessPoolExecutor`; the annotation index and polyA/TSS site dictionaries are loaded once per worker and reused across all wells assigned to that worker. `--plate-id` restricts processing to a subset of plates without re-running the rest.
+
 ### `compare` — pre/post-filter
 
 Run classification on two BAMs and test each read category for statistically significant composition shifts (chi-squared, Bonferroni-corrected).
@@ -130,30 +148,33 @@ Every read receives exactly one category. The classification hierarchy is applie
 
 ### Noise definitions
 
-Two noise levels are reported:
+Two noise levels are reported.
 
 **Conservative** (`noise_read_frac`): exonic antisense + all intronic subtypes + intergenic sparse / repeat / hotspot + chimeric. Upper bound on true technical noise.
 
 **Strict** (`noise_read_frac_strict`): same, minus `intronic_pure` and `intronic_boundary`, which may reflect genuine pre-mRNA capture. Lower bound; unambiguous artifacts only.
 
+**Unstranded** (Smart-seq / FLASH-seq): `exonic_antisense` is excluded from both conservative and strict noise because unstranded libraries produce sense and antisense reads in roughly equal proportion by design. Activated automatically when `--platform smartseq` is set.
+
 The categories `intronic_jxnspan`, `intergenic_novel`, and the three `ambiguous` variants are in neither noise set.
 
 ### Intergenic locus scoring
 
-Intergenic reads are clustered into 500 bp windows and scored against a Poisson background model (expected rate from total intergenic base coverage). Loci must meet minimum thresholds (>= 5 reads, >= 3 distinct barcodes or >= 0.01% of total barcodes) and pass a Bonferroni-corrected p < 0.01 before being classified as `intergenic_hotspot` or `intergenic_novel`. Everything below threshold is `intergenic_sparse`.
+The classifier initially labels every intergenic read `intergenic_sparse`. A second pass clusters those reads into 500 bp windows and scores each locus against a Poisson background model (expected rate from total intergenic base coverage). Loci must meet minimum thresholds (>= 5 reads, >= 3 distinct barcodes or >= 0.01% of total barcodes) and pass a Bonferroni-corrected p < 0.01 before being promoted to `intergenic_hotspot`, `intergenic_novel`, or `intergenic_repeat`. Reads at promoted loci are moved out of the sparse bucket before any noise fraction is computed, so a locus promoted to `intergenic_novel` (ambiguous, not noise) reduces the reported noise fraction.
 
 ---
 
 ## Platform support
 
-| Platform | Auto-detected from | Chimeric logic | Length charts |
-|---|---|---|---|
-| ONT | `minimap2` @PG | SA tag, 10 kbp threshold | Yes |
-| PacBio / Kinnex | `pbmm2` @PG | SA tag, 10 kbp threshold | Yes |
-| Illumina 10x | `STAR` / `STARsolo` / `cellranger` @PG | Paired-end insert size | Suppressed |
-| Illumina BD Rhapsody | `STAR` @PG | Paired-end insert size | Suppressed |
+| Platform | Auto-detected from | Chimeric logic | Length charts | Strandedness |
+|---|---|---|---|---|
+| ONT | `minimap2` @PG | SA tag, 10 kbp threshold | Yes | Stranded |
+| PacBio / Kinnex | `pbmm2` @PG | SA tag, 10 kbp threshold | Yes | Stranded |
+| Illumina 10x | `STAR` / `STARsolo` / `cellranger` @PG | Paired-end insert size | Suppressed | Stranded |
+| Illumina BD Rhapsody | `STAR` @PG | Paired-end insert size | Suppressed | Stranded |
+| Smart-seq / FLASH-seq | set explicitly with `--platform smartseq` | Paired-end insert size | Yes (when long enough) | Unstranded |
 
-Pass `--platform` explicitly to override auto-detection.
+Pass `--platform` explicitly to override auto-detection. Smart-seq is not auto-detected from the header and must be set explicitly; doing so selects the unstranded noise definition and suppresses the "missing CB tag" warning that is expected for one-cell-per-BAM data.
 
 ---
 
@@ -161,7 +182,11 @@ Pass `--platform` explicitly to override auto-detection.
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--bam` | required | Coordinate-sorted, indexed BAM |
+| `--bam` | required | Coordinate-sorted, indexed BAM (ignored by `run-plate`) |
+| `--plate-dir` | required for `run-plate` | Directory with one `<PlateID>_<WellID>/` subfolder per well |
+| `--sample-sheet` | optional for `run-plate` | CSV mapping wells to metadata; headerless sheets are auto-detected |
+| `--plate-id` | none | Restrict `run-plate` to the listed plate IDs (repeatable) |
+| `--parallel-wells` | 1 | Number of wells to process concurrently in `run-plate` |
 | `--gtf` | auto-downloaded | GENCODE GTF (plain or .gz); takes precedence over `--gtf-version` |
 | `--gtf-version` | none | GENCODE release to auto-download, e.g. `42`; ignored when `--gtf` is set |
 | `--polya-sites` | auto-downloaded | PolyA site BED file(s); repeatable; overrides `--polya-db` |
@@ -173,9 +198,9 @@ Pass `--platform` explicitly to override auto-detection.
 | `--reference` | none | Reference FASTA; required for polyA context checks and non-canonical junction detection |
 | `--repeats` | none | RepeatMasker BED; required for `intergenic_repeat` classification |
 | `--obs-metadata` | none | Per-cell cluster metadata TSV; enables per-cluster noise profiles |
-| `--platform` | auto | `ont`, `pacbio`, `illumina`, `illumina_10x`, `illumina_bd`, `unknown` |
+| `--platform` | auto | `ont`, `pacbio`, `illumina`, `illumina_10x`, `illumina_bd`, `smartseq`, `unknown` |
 | `--pipeline-stage` | auto | `raw`, `pre_filter`, `post_filter`, `custom` |
-| `--threads` | 4 | One worker process per chromosome |
+| `--threads` | 4 | One worker process per chromosome within a single BAM |
 | `--chimeric-distance` | 10000 | SA-tag intra-chromosomal distance threshold (bp) |
 | `--no-umi-dedup` | off | Skip UMI tracking; reduces memory for large datasets |
 | `--offline` | off | Use only cached files; no network calls |
@@ -185,11 +210,15 @@ Pass `--platform` explicitly to override auto-detection.
 
 ## Caching
 
-On first run, scNoiseMeter downloads the latest GENCODE GTF and PolyASite 3.0 atlas to `~/.cache/scnoisemeter/`. Subsequent runs reuse those files without a network call. The parsed annotation index is cached alongside the GTF; rebuilding it from a large GENCODE GTF takes roughly 60 seconds, so this saves significant time on repeated runs. Pass `--no-cache` to force a rebuild.
+On first run, scNoiseMeter downloads the latest GENCODE GTF and PolyASite 3.0 atlas to `~/.cache/scnoisemeter/`. Subsequent runs reuse those files without a network call. Three independent caches live in that directory:
+
+- **Annotation index**: parsed GTF stored as a compressed pickle next to the source GTF. Rebuilding from a large GENCODE GTF takes roughly 60 seconds. Pass `--no-cache` to force a rebuild.
+- **PolyA site dict**: loaded once from BED and pickled. Keyed on file path, mtime, size, a hash of the first 64 KB, and chromosome style. First load is ~35 s on the 569k-site PolyASite 3.0 atlas; subsequent loads are under 1 s. In `run-plate` this cache is the reason per-well startup is fast.
+- **TSS / CAGE site dict**: same caching scheme as polyA.
 
 Supply `--gtf` and `--polya-sites` explicitly to use specific versions, or use `--gtf-version N` to auto-download a specific GENCODE release without needing the file locally. `--offline` raises an error if the cache is empty.
 
-**GTF vs PolyASite version mismatch.** The current PolyASite 3.0 atlas is built on GENCODE v42. Auto-downloading the latest GTF (currently v49) produces a seven-version gap, and scNoiseMeter will warn when the difference exceeds five major releases. In practice this means transcripts annotated in v43-v49 (a substantial number of novel lncRNAs were added in that window) will be classified correctly by the GTF but will not benefit from polyA anchoring. The `full_length_read_frac` metric and `intergenic_novel` calls are the most affected. Two ways to resolve this:
+**GTF vs PolyASite version mismatch.** The current PolyASite 3.0 atlas is built on GENCODE v42. Auto-downloading the latest GTF (currently v49) produces a seven-version gap, and scNoiseMeter warns when the difference exceeds five major releases. Transcripts annotated in v43-v49 (a substantial number of novel lncRNAs were added in that window) will be classified correctly by the GTF but will not benefit from polyA anchoring. The `full_length_read_frac` metric and `intergenic_novel` calls are the most affected. Two ways to resolve this:
 
 - Pass `--gtf-version 42` to auto-download GENCODE v42, matching the PolyASite 3.0 atlas exactly.
 - Pass `--polya-db polyadb4` to switch to PolyA_DB v4, which is not tied to a GENCODE version and works with any GTF release.
@@ -202,6 +231,8 @@ Supply `--gtf` and `--polya-sites` explicitly to use specific versions, or use `
 
 **Alignments.** Only primary alignments are classified. Secondary (flag 0x100) and supplementary (flag 0x800) records are skipped; supplementary records are read by the chimeric detector only.
 
+**`multimapper`.** NH > 1 reads currently receive their genomic category (e.g. `exonic_sense`) rather than the `multimapper` category. The `is_multimapper` flag is computed but not assigned — an intentional choice to keep multimappers in their biological context; the per-sample `multimapper_read_frac` metric is still reported. This is documented behavior, not a bug.
+
 **`intronic_pure` / `intronic_boundary`.** These categories cannot be distinguished from genuine pre-mRNA capture at the read level. They appear in conservative noise but not strict noise.
 
 **`compare` statistics.** The chi-squared test is not a paired test and does not account for BAM B being a subset of BAM A. Interpret p-values accordingly.
@@ -210,11 +241,13 @@ Supply `--gtf` and `--polya-sites` explicitly to use specific versions, or use `
 
 **`intergenic_repeat`.** Requires a RepeatMasker BED file (`--repeats`). Without it, repeat-overlapping intergenic reads fall into `intergenic_hotspot` or `intergenic_sparse`.
 
+**Smart-seq.** `--platform smartseq` must be set explicitly; it is not auto-detected. Per-cell metrics and `n_cells` report `N/A` for Smart-seq because one BAM corresponds to one cell; the plate-level report aggregates across wells. Strand concordance and TSS/polyA anchoring are interpreted differently in unstranded data and are annotated as such in the HTML report.
+
 ---
 
 ## Full documentation
 
-See [docs/documentation.md](docs/documentation.md) for complete flag descriptions, output column definitions, platform-specific notes, and statistical methodology.
+See [docs/documentation.md](docs/documentation.md) for complete flag descriptions, output column definitions, platform-specific notes, the plate workflow, and statistical methodology.
 
 ---
 

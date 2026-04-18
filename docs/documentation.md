@@ -1,6 +1,6 @@
 # scNoiseMeter Documentation
 
-Version 0.2.0
+Version 0.3.1
 
 ---
 
@@ -8,15 +8,26 @@ Version 0.2.0
 
 scNoiseMeter quantifies technical noise in single-cell RNA-seq BAM files. It classifies every primary alignment into one of 19 mutually exclusive read categories and reports per-sample and per-cell noise fractions, strand concordance, chimeric read rates, and artifact flag counts.
 
-The tool is platform-agnostic: it processes ONT, PacBio/Kinnex, and Illumina (10x Genomics, BD Rhapsody) BAM files using the same classification logic, with platform-specific adjustments where the underlying biology differs.
+The tool is platform-agnostic: it processes ONT, PacBio/Kinnex, Illumina (10x Genomics, BD Rhapsody), and Smart-seq / FLASH-seq BAM files using the same classification logic, with platform-specific adjustments where the underlying biology differs.
 
-Three subcommands are provided:
+Four subcommands are provided:
 
 - `run` — classify reads in a single BAM and produce QC metrics
+- `run-plate` — classify reads across a plate of Smart-seq / FLASH-seq wells and produce an aggregated plate report
 - `compare` — run on two BAMs (e.g. pre- and post-filter) and produce a side-by-side comparison
 - `discover` — scan a directory for BAM files, infer their parameters, and run `scnoisemeter run` on selected files
 
 The tool requires a coordinate-sorted, indexed BAM file aligned to human GRCh38/hg38, and a GENCODE GTF annotation. Both the GTF and a PolyASite 3.0 atlas are downloaded automatically on first use if not supplied explicitly.
+
+### What's new in 0.3
+
+- `run-plate` subcommand for Smart-seq / FLASH-seq plate data (96-well and 384-well).
+- Smart-seq platform support with unstranded noise definition (`exonic_antisense` excluded from noise) and platform-aware report messaging.
+- `--parallel-wells` for concurrent per-well processing; `--plate-id` to restrict processing to a subset of plates.
+- polyA and TSS site dictionaries cached to `~/.cache/scnoisemeter/` as compressed pickles, keyed on file metadata plus a hash of the first 64 KB. First load is ~35 s; subsequent loads are under 1 s.
+- Intergenic reclassification: reads at promoted `intergenic_hotspot` / `intergenic_novel` / `intergenic_repeat` loci now contribute to the correct category when computing per-cell and sample-level metrics. In 0.2.0 they were retained as `intergenic_sparse`, overstating the noise fraction by the share of reads in promoted `intergenic_novel` loci. Fixed in 0.3.1.
+- Sample-sheet handling: headerless CSVs are auto-detected using whole-token matching; BAM / sheet mismatches emit warnings instead of aborting.
+- Process-pool robustness: `BrokenProcessPool` (usually an OOM kill) is caught and reported with actionable guidance instead of causing a silent `exit 0`.
 
 ---
 
@@ -61,7 +72,7 @@ Every primary alignment receives exactly one category. The classification hierar
 | `UNMAPPED` | `unmapped` | Read did not align. Excluded from all fractions. |
 | `SECONDARY` | `secondary` | SAM flag 0x100. Record is skipped entirely. |
 | `SUPPLEMENTARY` | `supplementary` | SAM flag 0x800. Routed to chimeric detector only; not counted in fractions. |
-| `MULTIMAPPER` | `multimapper` | Primary alignment with NH tag > 1. |
+| `MULTIMAPPER` | `multimapper` | Primary alignment with NH tag > 1. **Note:** this category is not currently assigned to individual reads; NH > 1 reads keep their genomic category (e.g. `exonic_sense`) and the multimapper share is reported only in the aggregate `multimapper_read_frac` metric. Intentional: keeps multimappers in their biological context. |
 | `CHIMERIC` | `chimeric` | SA tag present AND the split is inter-chromosomal, strand-discordant, or the same-strand intra-chromosomal distance exceeds the chimeric distance threshold (default 10,000 bp). For Illumina paired-end BAMs, also triggered when the absolute template length exceeds 1,000,000 bp. |
 | `MITOCHONDRIAL` | `mitochondrial` | Maps to the mitochondrial contig (chrM, MT, chrMT, or mitochondrion). |
 | `EXONIC_SENSE` | `exonic_sense` | Overlaps at least one annotated exon base on the correct strand. |
@@ -102,12 +113,16 @@ The categories `INTRONIC_JXNSPAN`, `INTERGENIC_NOVEL`, `AMBIGUOUS`, `AMBIGUOUS_C
 
 **Adaptive intergenic threshold**
 
-Intergenic loci are evaluated using a Poisson significance test against the expected read rate across all intergenic bases. Parameters:
+Intergenic reads are initially classified as `INTERGENIC_SPARSE` by the first pass of the classifier. A second pass clusters them into loci and evaluates each locus with a Poisson significance test against the expected read rate across all intergenic bases. Loci that pass the threshold are promoted to `INTERGENIC_HOTSPOT`, `INTERGENIC_NOVEL`, or `INTERGENIC_REPEAT`, and their reads are moved out of `INTERGENIC_SPARSE` in each affected cell's counts before per-cell and sample-level metrics are computed. This ordering matters: `INTERGENIC_NOVEL` is counted as ambiguous (neither noise nor signal), while `INTERGENIC_SPARSE` is counted as noise, so promotion to novel reduces the reported noise fraction.
+
+Parameters:
 
 - Minimum distinct barcodes: max(3, 0.01% of total detected barcodes)
 - Minimum reads per locus: 5
 - Bonferroni-corrected p-value threshold: 0.01
 - Aggregation window: 500 bp
+
+The per-read side-table used for profiling is reservoir-sampled at 500,000 records per sample. For samples under that threshold the reclassification is exact; above it, reclassification is applied proportionally per barcode using the sampled records as an unbiased estimator of the true distribution.
 
 ---
 
@@ -224,7 +239,7 @@ scnoisemeter run [OPTIONS]
 | `--barcode-tag TEXT` | `CB` | BAM tag for the corrected cell barcode. |
 | `--umi-tag TEXT` | `UB` | BAM tag for the corrected UMI. |
 | `--chemistry [10x_v3\|10x_v4\|bd_rhapsody_wta\|custom]` | `10x_v3` | Library chemistry. Sets the expected barcode length. |
-| `--platform [ont\|pacbio\|illumina\|illumina_10x\|illumina_bd\|unknown]` | `auto` | Sequencing platform. `auto` detects from BAM header `@PG` records. |
+| `--platform [ont\|pacbio\|illumina\|illumina_10x\|illumina_bd\|smartseq\|unknown]` | `auto` | Sequencing platform. `auto` detects from BAM header `@PG` records. `smartseq` is not auto-detected and must be set explicitly. |
 | `--pipeline-stage [raw\|pre_filter\|post_filter\|custom]` | `auto` | Processing stage. `auto` detects from header. |
 | `--repeats PATH` | none | RepeatMasker BED file (hg38). Required to classify reads as INTERGENIC_REPEAT. |
 | `--reference PATH` | none | Reference FASTA (`.fa` or `.fa.gz`, with `.fai` index). Required for polyA context checks and non-canonical junction detection. |
@@ -350,6 +365,83 @@ scnoisemeter compare \
   --platform illumina_10x \
   --output-dir compare_results/
 ```
+
+---
+
+## 7a. The `run-plate` Subcommand
+
+Classifies reads across a plate of Smart-seq / FLASH-seq wells and produces an aggregated plate-level report. Each well is processed independently and the per-well classified counts are merged into one `SampleResult` that feeds the plate-level metrics, intergenic profiler, and HTML report.
+
+### Synopsis
+
+```
+scnoisemeter run-plate [OPTIONS]
+```
+
+### Flags
+
+**Required:**
+
+| Flag | Type | Description |
+|---|---|---|
+| `--plate-dir PATH` | directory | Directory containing one subdirectory per well. |
+| `--output-dir PATH` | path | Root output directory. Each plate gets its own subdirectory. |
+
+**Plate-specific:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--sample-sheet PATH` | none | CSV mapping wells to metadata. Headerless sheets are auto-detected; a warning is issued suggesting a header row. BAM ↔ sheet mismatches emit warnings but do not abort the run. |
+| `--sequencer [illumina\|ont\|pacbio]` | `illumina` | Informs whether the i7 sequence is stored in reverse-complement. |
+| `--plate-id TEXT` | none | Repeatable. Restrict the run to the listed plate IDs. Useful for re-running a single plate without reprocessing the rest. |
+| `--parallel-wells INT` | `1` | Number of wells to process concurrently. Each worker is initialised once (annotation index + polyA/TSS dictionaries loaded per worker) and reused across all wells assigned to it. When `--parallel-wells N` > 1, the per-BAM thread pool is implicitly `max(1, --threads // N)`. |
+| `--platform smartseq` | — | Must be set explicitly for Smart-seq / FLASH-seq data. Selects unstranded noise and suppresses the expected "missing CB tag" warning. |
+
+Plus the shared flags from `run` (`--gtf`, `--gtf-version`, `--repeats`, `--reference`, `--polya-sites`, `--polya-db`, `--tss-sites`, `--tss-db`, `--chimeric-distance`, `--threads`, `--no-umi-dedup`, `--offline`, `--no-cache`, `--verbose`, etc.).
+
+### Folder layout
+
+`--plate-dir` must contain one subdirectory per well, named `<PlateID>_<WellID>`. Supported well IDs:
+
+- 96-well: rows A–H, columns 1–12 (e.g. `881_A1`, `881_H12`).
+- 384-well: rows A–P, columns 1–24 (e.g. `882_A1`, `882_P24`).
+
+Each subdirectory must hold one BAM (`.bam`) and its index (`.bam.bai` or `.bai`). Wells whose BAM lacks an index are skipped with a stderr warning and counted in the per-plate failure tally. If no well in a plate has an index, the plate is skipped entirely with a clear error message (instead of producing a silent empty result).
+
+### Behaviour
+
+1. Wells are discovered from folder names matching the `<PlateID>_<WellID>` regex and grouped by plate.
+2. If `--plate-id` is supplied, the plate set is filtered; unknown plate IDs emit a warning.
+3. For each plate, wells without a BAI index are filtered out; the remaining wells are dispatched.
+4. If `--parallel-wells` > 1, a `ProcessPoolExecutor` runs wells concurrently. Each worker initialises once: annotation index, polyA sites, TSS sites, and BAM chromosome style are all prepared up-front and shared across every well assigned to that worker.
+5. If a worker is killed by the OS (usually OOM) the pool is marked broken. scNoiseMeter catches `BrokenProcessPool` and raises a `ClickException` that reports how many wells completed and suggests reducing `--parallel-wells`. Prior to 0.3.1 this failure was silently swallowed and the run exited 0 with no outputs.
+6. Wells merge into a per-plate `SampleResult`. The intergenic profiler runs at the plate level and the resulting per-record reclassification is applied before plate metrics are computed.
+7. Per-plate outputs are written to `<output-dir>/<PlateID>/`: `<PlateID>.read_metrics.tsv`, `<PlateID>.per_well_metrics.tsv`, `<PlateID>.report.html`, `<PlateID>.intergenic_loci.tsv` (when applicable), and the usual `.multiqc.json` / `.length_distributions/` outputs.
+
+### Examples
+
+```bash
+# Plate with 8 wells processed concurrently
+scnoisemeter run-plate \
+  --plate-dir /data/smartseq/plate_881/ \
+  --sample-sheet plate_881.csv \
+  --platform smartseq \
+  --parallel-wells 8 \
+  --threads 16 \
+  --reference GRCh38.fa \
+  --output-dir results/plate_881/
+
+# Re-run a single plate from a directory that holds many
+scnoisemeter run-plate \
+  --plate-dir /data/smartseq/batch3/ \
+  --plate-id 885 \
+  --platform smartseq \
+  --output-dir results/batch3/
+```
+
+### Per-well output: `<PlateID>.per_well_metrics.tsv`
+
+One row per well processed. Columns: `well_id`, `plate_id`, `n_reads_total`, `n_reads_classified`, `noise_read_frac`, `strand_concordance`, `chimeric_read_frac`, plus any metadata columns resolved from the sample sheet.
 
 ---
 
@@ -536,7 +628,7 @@ Tab-separated. One row per intergenic locus characterised by the intergenic prof
 | `polya_run_downstream` | Boolean. True if an A-run ≥ 6 bp was found downstream of the locus. |
 | `near_polya_site` | Boolean. True if the locus is within 50 bp of an annotated polyA site. |
 | `poisson_pvalue_adj` | Bonferroni-corrected Poisson p-value for read enrichment vs background intergenic rate. |
-| `category` | Category assigned to this locus: `intergenic_hotspot`, `intergenic_novel`, or `intergenic_sparse`. |
+| `category` | Category assigned to this locus: `intergenic_hotspot`, `intergenic_novel`, `intergenic_repeat`, or `intergenic_sparse`. |
 
 ---
 
@@ -617,7 +709,15 @@ Interactive HTML comparison report. Contains:
 
 ### Cache location
 
-All automatically downloaded annotation files are stored in `~/.cache/scnoisemeter/`. Subsequent runs reuse cached files without any network call. Pass `--offline` to enforce cache-only mode; the tool raises an error if a required file is absent from the cache.
+All automatically downloaded annotation files and parsed site dictionaries are stored in `~/.cache/scnoisemeter/`. Subsequent runs reuse cached files without any network call. Pass `--offline` to enforce cache-only mode; the tool raises an error if a required file is absent from the cache.
+
+Three independent caches live in that directory:
+
+1. **Annotation index** — parsed GTF stored as a compressed pickle next to the source GTF file.
+2. **polyA site dict** — `.scnoisemeter_polya_<hash>.pkl.gz`, one per unique set of polyA BED inputs.
+3. **TSS / CAGE site dict** — `.scnoisemeter_tss_<hash>.pkl.gz`, same scheme.
+
+The polyA and TSS caches are keyed on the source file path, mtime, size, a hash of the first 64 KB of each file, and the BAM chromosome-naming style (UCSC vs Ensembl). The head-bytes hash guards against in-place edits that preserve mtime. If any component of the key changes, a new cache entry is written. First load takes ~35 s for the 569k-site PolyASite 3.0 atlas; subsequent loads are under 1 s. In `run-plate` with `--parallel-wells` > 1, each worker loads the cache once in its initialiser and reuses it across every well assigned to that worker.
 
 ### GTF
 
@@ -693,6 +793,17 @@ When `--tss-sites` is provided explicitly, `--tss-db` is ignored.
 - Insert size distribution chart is shown when properly paired reads are present (collected by reservoir sampling from read1 of each proper pair, with `0 < abs(template_length) < 2000`).
 - The `_length_stratified.tsv` file contains a note that all reads fall in the `<150 bp` bin.
 - `illumina_10x` and `illumina_bd` are treated identically to `illumina` in all classification logic; the distinction affects only BAM header auto-detection.
+
+### Smart-seq / FLASH-seq / Smart-seq3
+
+- **Not auto-detected.** Must be set with `--platform smartseq` (or via `run-plate`, which requires it explicitly for plate workflows).
+- Paired-end chimeric detection (same logic as Illumina) is used when template_length is populated.
+- **Unstranded noise definition.** `exonic_antisense` is excluded from both conservative and strict noise sets because unstranded libraries produce sense and antisense reads in roughly equal proportion by design. Including antisense would inflate the noise fraction by a constant that depends only on library construction, not on actual noise.
+- **Missing CB tag is expected.** One BAM = one cell; the `CB` tag is typically absent. The usual "low CB tag fraction" warning is suppressed for Smart-seq.
+- **Per-cell metrics and `n_cells`** report `N/A` in single-well HTML reports; the plate-level report aggregates across wells.
+- **Strand concordance** is expected to be ~50 % in unstranded data. The HTML report annotates this rather than flagging it as poor quality.
+- **TSS / polyA anchoring** still computes, but the interpretation changes: unstranded reads near an annotated polyA site are informative of transcript ends on either strand. The report surfaces this caveat.
+- Read-length distribution and noise-by-length charts are shown when reads are long enough (Smart-seq3 produces mixed lengths; traditional Smart-seq2 is short-read).
 
 ### Barcode-agnostic mode
 

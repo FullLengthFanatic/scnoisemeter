@@ -39,6 +39,7 @@ import json
 import logging
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 from typing import Optional
 
@@ -52,6 +53,7 @@ from scnoisemeter.constants import (
     DEFAULT_THREADS,
     Platform,
     PipelineStage,
+    ReadCategory,
 )
 from scnoisemeter.modules.annotation import build_annotation_index
 from scnoisemeter.modules.metrics import (
@@ -524,6 +526,56 @@ def _is_illumina_platform(platform) -> bool:
     return platform in illumina_vals
 
 
+def _apply_intergenic_reclassification(result, intergenic_records, record_categories):
+    """
+    Move per-barcode read/base counts from INTERGENIC_SPARSE into the promoted
+    sub-categories (HOTSPOT/NOVEL/REPEAT) according to the profiler's per-record
+    classification.
+
+    ``result.intergenic_reads`` is a reservoir sample (cap 500_000) of the
+    classifier's SPARSE output, so per-record reclassification is only
+    exhaustive when the full sample fits in the reservoir.  For larger samples
+    the reservoir is a uniform sub-sample; the per-barcode proportions
+    computed from it are unbiased estimators of the true proportions, and we
+    scale each barcode's SPARSE counts accordingly.
+
+    Mutates ``result.read_counts`` and ``result.base_counts`` in place.
+    """
+    if not intergenic_records or not record_categories:
+        return
+
+    # Per-barcode counts of sampled records by promoted category
+    per_cb_by_cat: dict[str, dict] = {}
+    per_cb_total: dict[str, int] = {}
+    for rec, new_cat in zip(intergenic_records, record_categories):
+        cb = rec.cell_barcode
+        per_cb_total[cb] = per_cb_total.get(cb, 0) + 1
+        if new_cat != ReadCategory.INTERGENIC_SPARSE:
+            per_cb_by_cat.setdefault(cb, {})
+            per_cb_by_cat[cb][new_cat] = per_cb_by_cat[cb].get(new_cat, 0) + 1
+
+    for cb, cat_counts in per_cb_by_cat.items():
+        sparse_reads = result.read_counts[cb].get(ReadCategory.INTERGENIC_SPARSE, 0)
+        sparse_bases = result.base_counts[cb].get(ReadCategory.INTERGENIC_SPARSE, 0)
+        denom = per_cb_total[cb]
+        if denom == 0 or sparse_reads == 0:
+            continue
+        moved_reads = 0
+        moved_bases = 0
+        for new_cat, n in cat_counts.items():
+            frac = n / denom
+            r_move = min(int(round(sparse_reads * frac)), sparse_reads - moved_reads)
+            b_move = min(int(round(sparse_bases * frac)), sparse_bases - moved_bases)
+            if r_move <= 0 and b_move <= 0:
+                continue
+            result.read_counts[cb][new_cat] += r_move
+            result.base_counts[cb][new_cat] += b_move
+            moved_reads += r_move
+            moved_bases += b_move
+        result.read_counts[cb][ReadCategory.INTERGENIC_SPARSE] -= moved_reads
+        result.base_counts[cb][ReadCategory.INTERGENIC_SPARSE] -= moved_bases
+
+
 @cli.command("run")
 @click.option("--bam",           required=True, type=click.Path(exists=True), help="Input BAM (must have .bai index).")
 @click.option("--sample-name",   default=None, help="Sample label used in output files and reports.  Defaults to BAM filename stem.")
@@ -755,7 +807,39 @@ def run_cmd(
     else:
         result._numt_intervals = None
 
-    # Compute metrics
+    # --- Intergenic profiler (must run BEFORE compute_metrics so promoted
+    # loci contribute to the correct noise/ambiguous categories) ---
+    intergenic_records = extract_intergenic_records(result)
+    intergenic_loci    = []
+    if intergenic_records:
+        total_ig_bases  = compute_intergenic_bases(index)
+        total_barcodes  = len(result.read_counts)
+
+        polya_site_dict = result._polya_site_dict
+
+        repeat_dict = None
+        if index.repeats is not None and not index.repeats.df.empty:
+            repeat_dict = {}
+            for _, row in index.repeats.df.iterrows():
+                c = row["Chromosome"]
+                repeat_dict.setdefault(c, []).append(
+                    (int(row["Start"]), int(row["End"]))
+                )
+
+        ig_loci, record_categories = profile_intergenic_loci(
+            intergenic_records,
+            total_intergenic_bases=total_ig_bases,
+            total_barcodes=total_barcodes,
+            polya_sites=polya_site_dict,
+            repeat_intervals=repeat_dict,
+        )
+        intergenic_loci = ig_loci
+        _apply_intergenic_reclassification(result, intergenic_records, record_categories)
+        logger.info(
+            "Intergenic profiling complete: %d loci characterised.", len(ig_loci)
+        )
+
+    # Compute metrics (after intergenic reclassification)
     platform_str = meta.platform.value
     sm, ct = compute_metrics(
         result, sample_name,
@@ -788,38 +872,6 @@ def run_cmd(
         }
     else:
         sm._cell_barcodes_info = None
-
-    # --- Intergenic profiler ---
-    intergenic_records = extract_intergenic_records(result)
-    intergenic_loci    = []
-    if intergenic_records:
-        total_ig_bases  = compute_intergenic_bases(index)
-        total_barcodes  = len(result.read_counts)
-
-        # Reuse the already-loaded polyA site dict from result
-        polya_site_dict = result._polya_site_dict
-
-        # Repeat intervals: use from annotation index if loaded via --repeats
-        repeat_dict = None
-        if index.repeats is not None and not index.repeats.df.empty:
-            repeat_dict = {}
-            for _, row in index.repeats.df.iterrows():
-                c = row["Chromosome"]
-                repeat_dict.setdefault(c, []).append(
-                    (int(row["Start"]), int(row["End"]))
-                )
-
-        ig_loci, ig_remap = profile_intergenic_loci(
-            intergenic_records,
-            total_intergenic_bases=total_ig_bases,
-            total_barcodes=total_barcodes,
-            polya_sites=polya_site_dict,
-            repeat_intervals=repeat_dict,
-        )
-        intergenic_loci = ig_loci
-        logger.info(
-            "Intergenic profiling complete: %d loci characterised.", len(ig_loci)
-        )
 
     # --- Per-cluster metrics ---
     cluster_df = None
@@ -1236,6 +1288,21 @@ def _run_single_bam_for_discover(
 
     result._numt_intervals = None
 
+    # Intergenic profiler (runs before compute_metrics so promoted loci
+    # contribute to the correct categories)
+    intergenic_records = extract_intergenic_records(result)
+    intergenic_loci = []
+    if intergenic_records:
+        total_ig_bases = compute_intergenic_bases(index)
+        ig_loci, record_categories = profile_intergenic_loci(
+            intergenic_records,
+            total_intergenic_bases=total_ig_bases,
+            total_barcodes=len(result.read_counts),
+            polya_sites=result._polya_site_dict,
+        )
+        intergenic_loci = ig_loci
+        _apply_intergenic_reclassification(result, intergenic_records, record_categories)
+
     sm, ct = compute_metrics(
         result, sample_name,
         platform=meta.platform.value,
@@ -1255,19 +1322,6 @@ def _run_single_bam_for_discover(
     } if tss_paths else None
     if version_warning:
         sm.warnings.append(version_warning)
-
-    # Intergenic profiler
-    intergenic_records = extract_intergenic_records(result)
-    intergenic_loci = []
-    if intergenic_records:
-        total_ig_bases = compute_intergenic_bases(index)
-        ig_loci, _ = profile_intergenic_loci(
-            intergenic_records,
-            total_intergenic_bases=total_ig_bases,
-            total_barcodes=len(result.read_counts),
-            polya_sites=result._polya_site_dict,
-        )
-        intergenic_loci = ig_loci
 
     strat_df = compute_length_stratification(result.length_bin_counts, result.length_samples)
     _write_run_outputs(
@@ -1699,6 +1753,14 @@ def run_plate_cmd(
             else:
                 indexed_wells.append((well_id, bam_path))
 
+        if not indexed_wells:
+            click.echo(
+                f"  Plate {plate_id} has no indexed wells — skipping "
+                f"(index all BAMs with `samtools index` before running run-plate).",
+                err=True,
+            )
+            continue
+
         if parallel_wells > 1 and indexed_wells:
             # ---------------------------------------------------------------- #
             # Parallel path — one worker process per well (up to parallel_wells)
@@ -1748,11 +1810,18 @@ def run_plate_cmd(
                         else:
                             click.echo(f"  [{wid}] FAILED: {res['error']}", err=True)
                             n_failed += 1
+                except BrokenProcessPool as pool_exc:
+                    raise click.ClickException(
+                        f"Worker process died during parallel well processing "
+                        f"(completed {len(_well_results)}/{len(indexed_wells)} wells before failure). "
+                        f"This usually means a worker was killed by the OS (OOM) or crashed. "
+                        f"Try reducing --parallel-wells to lower peak memory usage. "
+                        f"Error: {pool_exc}"
+                    ) from pool_exc
                 except Exception as pool_exc:
                     raise click.ClickException(
-                        f"Worker pool crashed during parallel well processing "
+                        f"Worker pool failed during parallel well processing "
                         f"(completed {len(_well_results)}/{len(indexed_wells)} wells before failure). "
-                        f"Try reducing --parallel-wells to lower peak memory usage. "
                         f"Error: {pool_exc}"
                     ) from pool_exc
 
@@ -1892,6 +1961,20 @@ def run_plate_cmd(
         plate_meta = plate_result.meta  # use last well's meta (platform is the same)
         plate_meta.warnings = []        # clear per-well warnings; plate report stays clean
 
+        # Intergenic profiler at plate level (runs before compute_metrics)
+        intergenic_records = extract_intergenic_records(plate_result)
+        intergenic_loci = []
+        if intergenic_records:
+            total_ig_bases = compute_intergenic_bases(index)
+            ig_loci, record_categories = profile_intergenic_loci(
+                intergenic_records,
+                total_intergenic_bases=total_ig_bases,
+                total_barcodes=len(plate_result.read_counts),
+                polya_sites=getattr(plate_result, "_polya_site_dict", None) or {},
+            )
+            intergenic_loci = ig_loci
+            _apply_intergenic_reclassification(plate_result, intergenic_records, record_categories)
+
         plate_sm, plate_ct = compute_metrics(
             plate_result, plate_label,
             platform=plate_meta.platform.value,
@@ -1909,19 +1992,6 @@ def run_plate_cmd(
         plate_sm._cell_barcodes_info = None
         if version_warning:
             plate_sm.warnings.append(version_warning)
-
-        # Intergenic profiler at plate level
-        intergenic_records = extract_intergenic_records(plate_result)
-        intergenic_loci = []
-        if intergenic_records:
-            total_ig_bases = compute_intergenic_bases(index)
-            ig_loci, _ = profile_intergenic_loci(
-                intergenic_records,
-                total_intergenic_bases=total_ig_bases,
-                total_barcodes=len(plate_result.read_counts),
-                polya_sites=getattr(plate_result, "_polya_site_dict", None) or {},
-            )
-            intergenic_loci = ig_loci
 
         _write_run_outputs(
             plate_sm, plate_ct, plate_result, plate_output_dir, plate_label,
@@ -1980,8 +2050,10 @@ def _strip_chr_if_needed(sites: dict, chrom_style: str) -> dict:
 def _site_cache_path(paths, chrom_style: str, prefix: str) -> Optional[Path]:
     """
     Return a pickle cache path for a loaded BED site dict, keyed on source
-    file mtimes + sizes + chrom_style.  Returns None when caching is not
-    applicable (no paths, or stat fails).
+    file mtimes + sizes + a content hash of the first 64 KB + chrom_style.
+    The head-bytes hash guards against in-place edits that preserve mtime
+    (rare: ``touch -d``, some editor save modes, NFS quirks).
+    Returns None when caching is not applicable (no paths, or stat fails).
     """
     if isinstance(paths, str):
         paths = [paths]
@@ -1989,10 +2061,13 @@ def _site_cache_path(paths, chrom_style: str, prefix: str) -> Optional[Path]:
         return None
     path_objs = [Path(p) for p in paths]
     try:
-        parts = [
-            f"{p}:{p.stat().st_mtime_ns}:{p.stat().st_size}"
-            for p in path_objs
-        ]
+        parts = []
+        for p in path_objs:
+            st = p.stat()
+            with open(p, "rb") as fh:
+                head = fh.read(65536)
+            head_hash = hashlib.md5(head).hexdigest()[:10]
+            parts.append(f"{p}:{st.st_mtime_ns}:{st.st_size}:{head_hash}")
         parts.append(chrom_style)
         h = hashlib.md5("|".join(parts).encode()).hexdigest()[:10]
     except OSError:
@@ -2443,10 +2518,6 @@ def _setup_logging(verbose: bool) -> None:
         datefmt="%H:%M:%S",
         stream=sys.stderr,
     )
-
-
-# Import ReadCategory here to avoid circular import in _write_compare_outputs
-from scnoisemeter.constants import ReadCategory  # noqa: E402
 
 
 if __name__ == "__main__":
