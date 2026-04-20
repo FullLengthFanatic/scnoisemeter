@@ -23,6 +23,8 @@ from scnoisemeter.utils.annotation_fetcher import (
     fetch_latest_polyasite_atlas,
     fetch_10x_whitelist,
     _parse_gencode_gtf_filename,
+    _url,
+    _URL_DEFAULTS,
     _url_exists,
 )
 from scnoisemeter.cli import (
@@ -363,3 +365,76 @@ class TestFetch10xWhitelist:
         ):
             with pytest.raises(RuntimeError, match="--offline"):
                 fetch_10x_whitelist("10x_v3", offline=True)
+
+
+# ---------------------------------------------------------------------------
+# Environment-variable URL overrides
+# ---------------------------------------------------------------------------
+
+class TestUrlOverride:
+    """SCNM_*_URL env vars replace packaged defaults via _url()."""
+
+    def test_returns_default_when_unset(self, monkeypatch):
+        monkeypatch.delenv("SCNM_GENCODE_LATEST_URL", raising=False)
+        assert _url("gencode_latest") == _URL_DEFAULTS["gencode_latest"]
+
+    def test_empty_env_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("SCNM_GENCODE_LATEST_URL", "")
+        assert _url("gencode_latest") == _URL_DEFAULTS["gencode_latest"]
+
+    def test_override_wins_over_default(self, monkeypatch):
+        monkeypatch.setenv("SCNM_GENCODE_LATEST_URL", "https://mirror.example/gencode/")
+        assert _url("gencode_latest") == "https://mirror.example/gencode/"
+
+    def test_polyasite_template_override_drives_probe_urls(self, tmp_path, monkeypatch):
+        """fetch_latest_polyasite_atlas must probe URLs built from the env template."""
+        monkeypatch.setenv(
+            "SCNM_POLYASITE3_URL",
+            "https://mirror.example/pas/g{version}/pas_g{version}.bed.gz",
+        )
+
+        probed_urls: list[str] = []
+
+        def fake_probe(url, **kwargs):
+            probed_urls.append(url)
+            return 200 if "g42" in url else 404
+
+        def fake_download(url, dest, **kwargs):
+            dest.write_bytes(b"fake")
+
+        with (
+            patch("scnoisemeter.utils.annotation_fetcher.CACHE_DIR", tmp_path),
+            patch("scnoisemeter.utils.annotation_fetcher._url_probe_status",
+                  side_effect=fake_probe),
+            patch("scnoisemeter.utils.annotation_fetcher._download",
+                  side_effect=fake_download),
+        ):
+            path, version = fetch_latest_polyasite_atlas(hint_max_gencode_version=49)
+
+        assert version == 42
+        # Probed URLs must match the override template, not the default host.
+        assert probed_urls, "no probes made"
+        assert all(u.startswith("https://mirror.example/pas/") for u in probed_urls)
+        # Cached filename is derived from the resolved URL.
+        assert path.name == "pas_g42.bed.gz"
+
+    def test_tenx_whitelist_override(self, tmp_path, monkeypatch):
+        """fetch_10x_whitelist must download from the env override URL."""
+        monkeypatch.setenv(
+            "SCNM_TENX_WHITELIST_V3_URL",
+            "https://mirror.example/10x_v3.txt.gz",
+        )
+        captured: dict = {}
+
+        def fake_download(url, dest, **kwargs):
+            captured["url"] = url
+            dest.write_bytes(b"fake")
+
+        with (
+            patch("scnoisemeter.utils.annotation_fetcher.CACHE_DIR", tmp_path),
+            patch("scnoisemeter.utils.annotation_fetcher._download",
+                  side_effect=fake_download),
+        ):
+            fetch_10x_whitelist("10x_v3")
+
+        assert captured["url"] == "https://mirror.example/10x_v3.txt.gz"
