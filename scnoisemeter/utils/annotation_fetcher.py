@@ -26,12 +26,31 @@ so probing is the only option.
 Cache: ~/.cache/scnoisemeter/atlas.clusters.3.0.GRCh38.GENCODE_XX.bed.gz
 
 Network calls are only made when the cache is empty.
+
+Environment-variable overrides
+------------------------------
+Every external URL has a ``SCNM_*_URL`` environment-variable override. Use
+these when an upstream host or URL scheme changes before scnoisemeter has
+been updated, or when behind a corporate mirror:
+
+  SCNM_GENCODE_LATEST_URL     GENCODE FTP latest-release directory
+  SCNM_GENCODE_RELEASE_URL    GENCODE per-release GTF (``{version}`` placeholder)
+  SCNM_POLYASITE3_URL         PolyASite 3.0 atlas probe (``{version}`` placeholder)
+  SCNM_POLYADB4_ZIP_URL       PolyA_DB v4 zip download
+  SCNM_FANTOM5_CAGE_URL       FANTOM5 CAGE peak atlas
+  SCNM_TENX_WHITELIST_V3_URL  10x Genomics Chromium v3 barcode whitelist
+  SCNM_TENX_WHITELIST_V4_URL  10x Genomics Chromium v4 barcode whitelist
+
+When an override is set, a log line at INFO level records it so cache-miss
+behaviour is reproducible. Unset (or empty) overrides fall back to the
+packaged defaults.
 """
 
 from __future__ import annotations
 
 import io
 import logging
+import os
 import re
 import sys
 import urllib.error
@@ -50,60 +69,80 @@ logger = logging.getLogger(__name__)
 
 CACHE_DIR = Path.home() / ".cache" / "scnoisemeter"
 
-_GENCODE_LATEST_URL = (
-    "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/latest_release/"
-)
-# URL template for a specific GENCODE release, e.g. release_42 → v42
-_GENCODE_RELEASE_URL = (
-    "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/"
-    "release_{version}/gencode.v{version}.annotation.gtf.gz"
-)
-_POLYASITE3_BASE_URL = "https://polyasite.unibas.ch/download/atlas/3.0/"
+# External URLs. Every entry is overridable via the matching SCNM_*_URL
+# environment variable (see module docstring). Resolution happens per call
+# via _url(), not at import time, so tests can use monkeypatch.setenv.
+_URL_DEFAULTS: dict[str, str] = {
+    "gencode_latest": (
+        "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/latest_release/"
+    ),
+    # Per-release GENCODE GTF; {version} is the release number (e.g. 42 → v42).
+    "gencode_release": (
+        "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/"
+        "release_{version}/gencode.v{version}.annotation.gtf.gz"
+    ),
+    # PolyASite 3.0 atlas; {version} is the GENCODE release the atlas was
+    # built against. The probe loop iterates over candidate versions.
+    "polyasite3": (
+        "https://polyasite.unibas.ch/download/atlas/3.0/"
+        "GRCh38.GENCODE_{version}/atlas.clusters.3.0.GRCh38.GENCODE_{version}.bed.gz"
+    ),
+    # PolyA_DB v4 (Wistar Institute, 2026). Single-file zip containing
+    # HumanPas/hg38.PAS.main.tsv (long-read validated, ~281 k sites).
+    "polyadb4_zip": (
+        "https://exon.apps.wistar.org/polya_db/v4/download/4.1/HumanPas.zip"
+    ),
+    # FANTOM5 hg38 CAGE peak atlas (phase 1+2, RIKEN, 2017). BED6.
+    "fantom5_cage": (
+        "https://fantom.gsc.riken.jp/5/datafiles/reprocessed/hg38_latest/"
+        "extra/CAGE_peaks/hg38_fair+new_CAGE_peaks_phase1and2.bed.gz"
+    ),
+    # 10x Genomics Cell Ranger barcode whitelists (GitHub).
+    "tenx_whitelist_v3": (
+        "https://github.com/10XGenomics/cellranger/raw/master/lib/python/cellranger/"
+        "barcodes/3M-february-2018.txt.gz"
+    ),
+    "tenx_whitelist_v4": (
+        "https://github.com/10XGenomics/cellranger/raw/master/lib/python/cellranger/"
+        "barcodes/3M-3pgex-may-2023.txt.gz"
+    ),
+}
 
 # Earliest PolyASite 3.0 GRCh38 atlas we are aware of (GENCODE 42).
 # Probing never goes below this.
 _POLYASITE_MIN_GENCODE = 42
 
-# PolyA_DB v4 — bulk+long-read validated PAS atlas (Wistar Institute, 2026).
-# Contains two files: hg38.PAS.main.tsv (long-read validated, ~281 k sites)
-# and hg38.PAS.max.tsv (all identified sites, ~1.43 M).
-# We use main.tsv by default (higher confidence).
-_POLYADB4_ZIP_URL = (
-    "https://exon.apps.wistar.org/polya_db/v4/download/4.1/HumanPas.zip"
-)
+# Cache filenames (not URLs — these are not overridable).
 _POLYADB4_MAIN_ENTRY = "HumanPas/hg38.PAS.main.tsv"
 _POLYADB4_CACHE_NAME = "polyadb4.hg38.PAS.main.bed"
-
-# FANTOM5 — CAGE-based TSS atlas, phase 1+2, hg38 (RIKEN, 2017).
-# BED6 format: chrom, start, end, name, score, strand (0-based).
-# _load_tss_sites() uses columns 0-2 (midpoint), so BED6 works as-is.
-_FANTOM5_CAGE_URL = (
-    "https://fantom.gsc.riken.jp/5/datafiles/reprocessed/hg38_latest/"
-    "extra/CAGE_peaks/hg38_fair+new_CAGE_peaks_phase1and2.bed.gz"
-)
 _FANTOM5_CACHE_NAME = "fantom5.hg38.CAGE_peaks.bed.gz"
-
-# 10x Genomics barcode whitelists from Cell Ranger GitHub repository.
-# v3: 3M barcodes used in Chromium v3 chemistry (2018).
-# v4: 3M barcodes used in Chromium v4 / 3' GEX chemistry (2023).
-_TENX_WHITELIST_V3_URL = (
-    "https://github.com/10XGenomics/cellranger/raw/master/lib/python/cellranger/"
-    "barcodes/3M-february-2018.txt.gz"
-)
-_TENX_WHITELIST_V4_URL = (
-    "https://github.com/10XGenomics/cellranger/raw/master/lib/python/cellranger/"
-    "barcodes/3M-3pgex-may-2023.txt.gz"
-)
-_TENX_WHITELIST_CACHE_NAMES: dict = {
+_TENX_WHITELIST_CACHE_NAMES: dict[str, str] = {
     "10x_v3": "10x_whitelist_v3.txt.gz",
     "10x_v4": "10x_whitelist_v4.txt.gz",
 }
-_TENX_WHITELIST_URLS: dict = {
-    "10x_v3": _TENX_WHITELIST_V3_URL,
-    "10x_v4": _TENX_WHITELIST_V4_URL,
+_TENX_WHITELIST_URL_KEYS: dict[str, str] = {
+    "10x_v3": "tenx_whitelist_v3",
+    "10x_v4": "tenx_whitelist_v4",
 }
 
 _USER_AGENT = f"scnoisemeter/{__version__} (https://github.com/scnoisemeter)"
+
+
+def _url(key: str) -> str:
+    """
+    Return the URL (or URL template) for *key*.
+
+    Resolves the matching ``SCNM_<KEY>_URL`` environment variable if set and
+    non-empty; otherwise falls back to the packaged default from
+    ``_URL_DEFAULTS``. Overrides are logged at INFO level on first use so the
+    source of any network call is traceable.
+    """
+    env_var = f"SCNM_{key.upper()}_URL"
+    override = os.environ.get(env_var)
+    if override:
+        logger.info("Using %s override for %s: %s", env_var, key, override)
+        return override
+    return _URL_DEFAULTS[key]
 
 
 # ---------------------------------------------------------------------------
@@ -150,12 +189,13 @@ def fetch_latest_gencode_gtf(offline: bool = False) -> Tuple[Path, int]:
         )
 
     # Make network call only now (cache was empty)
-    html = _http_get(_GENCODE_LATEST_URL)
+    gencode_dir = _url("gencode_latest")
+    html = _http_get(gencode_dir)
     filename = _parse_gencode_gtf_filename(html)
     version = _extract_gencode_version_int(filename)
     cached_path = cache_dir / filename
 
-    url = _GENCODE_LATEST_URL + filename
+    url = gencode_dir + filename
     print(f"Downloading GENCODE v{version} annotation GTF …")
     _download(url, cached_path)
     print(f"Using GENCODE v{version} (downloaded to ~/.cache/scnoisemeter/)")
@@ -200,7 +240,7 @@ def fetch_gencode_gtf_version(version: int, offline: bool = False) -> Tuple[Path
             f"or supply --gtf explicitly."
         )
 
-    url = _GENCODE_RELEASE_URL.format(version=version)
+    url = _url("gencode_release").format(version=version)
     status = _url_probe_status(url)
     if status != 200:
         raise RuntimeError(
@@ -268,17 +308,18 @@ def fetch_latest_polyasite_atlas(
 
     # Make network call(s) only now (cache was empty)
     if hint_max_gencode_version is None:
-        html = _http_get(_GENCODE_LATEST_URL)
+        html = _http_get(_url("gencode_latest"))
         fname = _parse_gencode_gtf_filename(html)
         hint_max_gencode_version = _extract_gencode_version_int(fname)
 
+    url_template = _url("polyasite3")
+
     found_version: Optional[int] = None
-    found_filename: Optional[str] = None
+    found_url: Optional[str] = None
     all_network_errors: bool = True
 
     for v in range(hint_max_gencode_version, _POLYASITE_MIN_GENCODE - 1, -1):
-        filename = f"atlas.clusters.3.0.GRCh38.GENCODE_{v}.bed.gz"
-        url = f"{_POLYASITE3_BASE_URL}GRCh38.GENCODE_{v}/{filename}"
+        url = url_template.format(version=v)
         status = _url_probe_status(url)
         if status is None:
             # Network error on this probe; keep trying but track it
@@ -287,30 +328,32 @@ def fetch_latest_polyasite_atlas(
             all_network_errors = False
             if status == 200:
                 found_version = v
-                found_filename = filename
+                found_url = url
                 break
 
-    if found_version is None or found_filename is None:
+    if found_version is None or found_url is None:
         if all_network_errors:
             raise RuntimeError(
-                f"All PolyASite URL probes failed with network errors. "
-                f"The server at {_POLYASITE3_BASE_URL} may be unreachable or "
-                f"the URL scheme may have changed. "
-                f"Supply --polya-sites explicitly to bypass auto-discovery."
+                "All PolyASite URL probes failed with network errors. "
+                f"The probe template was: {url_template}. The host may be "
+                "unreachable or the URL scheme may have changed. "
+                "Set SCNM_POLYASITE3_URL to a corrected template "
+                "(with a {version} placeholder), or supply --polya-sites "
+                "explicitly to bypass auto-discovery."
             )
         raise RuntimeError(
             f"Could not find any PolyASite 3.0 atlas for GRCh38 at GENCODE "
             f"versions {_POLYASITE_MIN_GENCODE}–{hint_max_gencode_version}. "
             f"The server responded but no atlas file was found for these versions. "
-            f"Check {_POLYASITE3_BASE_URL} or supply --polya-sites explicitly."
+            f"Probe template: {url_template}. "
+            "Supply --polya-sites explicitly or set SCNM_POLYASITE3_URL to "
+            "a corrected template."
         )
 
+    found_filename = found_url.rsplit("/", 1)[-1]
     cached_path = cache_dir / found_filename
-    url = (
-        f"{_POLYASITE3_BASE_URL}GRCh38.GENCODE_{found_version}/{found_filename}"
-    )
     print(f"Downloading PolyASite atlas GENCODE v{found_version} …")
-    _download(url, cached_path)
+    _download(found_url, cached_path)
     print(
         f"Using PolyASite atlas v3.0 / GENCODE v{found_version} "
         f"(downloaded to ~/.cache/scnoisemeter/)"
@@ -400,7 +443,7 @@ def fetch_fantom5_cage_peaks(offline: bool = False) -> Path:
 
     dest = cache_dir / _FANTOM5_CACHE_NAME
     print("Downloading FANTOM5 hg38 CAGE peak atlas …")
-    _download(_FANTOM5_CAGE_URL, dest)
+    _download(_url("fantom5_cage"), dest)
     print("Using FANTOM5 CAGE peak atlas (downloaded to ~/.cache/scnoisemeter/)")
     return dest
 
@@ -447,7 +490,7 @@ def fetch_10x_whitelist(chemistry: str, offline: bool = False) -> Path:
             f"or supply --barcode-whitelist explicitly."
         )
 
-    url = _TENX_WHITELIST_URLS[chemistry]
+    url = _url(_TENX_WHITELIST_URL_KEYS[chemistry])
     print(f"Downloading 10x {chemistry} barcode whitelist (~100 MB) …")
     _download(url, cached_path)
     print(f"Using 10x {chemistry} barcode whitelist (downloaded to ~/.cache/scnoisemeter/)")
@@ -557,7 +600,8 @@ def _download_polyadb4_to_bed(dest: Path) -> None:
     .tmp file and renamed on success.
     """
     tmp = dest.with_suffix(dest.suffix + ".tmp")
-    req = urllib.request.Request(_POLYADB4_ZIP_URL, headers={"User-Agent": _USER_AGENT})
+    zip_url = _url("polyadb4_zip")
+    req = urllib.request.Request(zip_url, headers={"User-Agent": _USER_AGENT})
     try:
         with urllib.request.urlopen(req) as resp:
             total = int(resp.getheader("Content-Length", 0) or 0)
@@ -582,7 +626,7 @@ def _download_polyadb4_to_bed(dest: Path) -> None:
         if total and downloaded != total:
             raise RuntimeError(
                 f"Download truncated: expected {total} bytes, got {downloaded}. "
-                f"URL: {_POLYADB4_ZIP_URL}"
+                f"URL: {zip_url}"
             )
         buf.seek(0)
         n_written = 0
@@ -641,7 +685,7 @@ def _parse_gencode_gtf_filename(html: str) -> str:
             return match.group(1)
     raise RuntimeError(
         "Could not find gencode.vXX.annotation.gtf.gz in GENCODE directory listing. "
-        f"URL: {_GENCODE_LATEST_URL}"
+        f"URL: {_url('gencode_latest')}"
     )
 
 
