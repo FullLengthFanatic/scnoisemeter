@@ -826,13 +826,25 @@ def run_cmd(
                     (int(row["Start"]), int(row["End"]))
                 )
 
-        ig_loci, record_categories = profile_intergenic_loci(
-            intergenic_records,
-            total_intergenic_bases=total_ig_bases,
-            total_barcodes=total_barcodes,
-            polya_sites=polya_site_dict,
-            repeat_intervals=repeat_dict,
-        )
+        ref_handle = None
+        if reference:
+            try:
+                import pysam as _pysam
+                ref_handle = _pysam.FastaFile(reference)
+            except Exception as _exc:
+                logger.warning("Could not open reference FASTA for polyA context: %s", _exc)
+        try:
+            ig_loci, record_categories = profile_intergenic_loci(
+                intergenic_records,
+                total_intergenic_bases=total_ig_bases,
+                total_barcodes=total_barcodes,
+                reference=ref_handle,
+                polya_sites=polya_site_dict,
+                repeat_intervals=repeat_dict,
+            )
+        finally:
+            if ref_handle is not None:
+                ref_handle.close()
         intergenic_loci = ig_loci
         _apply_intergenic_reclassification(result, intergenic_records, record_categories)
         logger.info(
@@ -1294,12 +1306,24 @@ def _run_single_bam_for_discover(
     intergenic_loci = []
     if intergenic_records:
         total_ig_bases = compute_intergenic_bases(index)
-        ig_loci, record_categories = profile_intergenic_loci(
-            intergenic_records,
-            total_intergenic_bases=total_ig_bases,
-            total_barcodes=len(result.read_counts),
-            polya_sites=result._polya_site_dict,
-        )
+        ref_handle = None
+        if reference:
+            try:
+                import pysam as _pysam
+                ref_handle = _pysam.FastaFile(reference)
+            except Exception as _exc:
+                logger.warning("Could not open reference FASTA for polyA context: %s", _exc)
+        try:
+            ig_loci, record_categories = profile_intergenic_loci(
+                intergenic_records,
+                total_intergenic_bases=total_ig_bases,
+                total_barcodes=len(result.read_counts),
+                reference=ref_handle,
+                polya_sites=result._polya_site_dict,
+            )
+        finally:
+            if ref_handle is not None:
+                ref_handle.close()
         intergenic_loci = ig_loci
         _apply_intergenic_reclassification(result, intergenic_records, record_categories)
 
@@ -1966,12 +1990,24 @@ def run_plate_cmd(
         intergenic_loci = []
         if intergenic_records:
             total_ig_bases = compute_intergenic_bases(index)
-            ig_loci, record_categories = profile_intergenic_loci(
-                intergenic_records,
-                total_intergenic_bases=total_ig_bases,
-                total_barcodes=len(plate_result.read_counts),
-                polya_sites=getattr(plate_result, "_polya_site_dict", None) or {},
-            )
+            ref_handle = None
+            if reference:
+                try:
+                    import pysam as _pysam
+                    ref_handle = _pysam.FastaFile(reference)
+                except Exception as _exc:
+                    logger.warning("Could not open reference FASTA for polyA context: %s", _exc)
+            try:
+                ig_loci, record_categories = profile_intergenic_loci(
+                    intergenic_records,
+                    total_intergenic_bases=total_ig_bases,
+                    total_barcodes=len(plate_result.read_counts),
+                    reference=ref_handle,
+                    polya_sites=getattr(plate_result, "_polya_site_dict", None) or {},
+                )
+            finally:
+                if ref_handle is not None:
+                    ref_handle.close()
             intergenic_loci = ig_loci
             _apply_intergenic_reclassification(plate_result, intergenic_records, record_categories)
 

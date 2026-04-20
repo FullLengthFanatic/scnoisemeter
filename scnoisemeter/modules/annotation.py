@@ -155,7 +155,7 @@ def build_annotation_index(
     repeats_path = Path(repeats_path) if repeats_path else None
     exclude_biotypes = exclude_biotypes or []
 
-    cache_path = _cache_path(gtf_path, exclude_biotypes)
+    cache_path = _cache_path(gtf_path, exclude_biotypes, repeats_path)
 
     if cache and cache_path.exists():
         logger.info("Loading annotation index from cache: %s", cache_path)
@@ -641,9 +641,23 @@ def _manual_complement(gene_bodies_df: pd.DataFrame) -> pr.PyRanges:
 # Cache helpers
 # ---------------------------------------------------------------------------
 
-def _cache_path(gtf_path: Path, exclude_biotypes: list[str]) -> Path:
-    """Derive a versioned cache path next to the GTF."""
-    key = f"{_CACHE_VERSION}:{':'.join(sorted(exclude_biotypes))}"
+def _cache_path(
+    gtf_path: Path,
+    exclude_biotypes: list[str],
+    repeats_path: Optional[Path] = None,
+) -> Path:
+    """Derive a versioned cache path next to the GTF.
+
+    The key includes the repeats-BED path so that adding, changing, or removing
+    --repeats invalidates the cache; otherwise a prior run without repeats
+    would silently hide the repeats layer from a subsequent run.
+    """
+    repeats_key = str(repeats_path.resolve()) if repeats_path else ""
+    key = (
+        f"{_CACHE_VERSION}"
+        f":{':'.join(sorted(exclude_biotypes))}"
+        f":{repeats_key}"
+    )
     digest = hashlib.md5(key.encode()).hexdigest()[:8]
     stem = gtf_path.stem.replace(".gtf", "").replace(".gz", "")
     return gtf_path.parent / f".scnoisemeter_{stem}_{digest}.cache.pkl.gz"
