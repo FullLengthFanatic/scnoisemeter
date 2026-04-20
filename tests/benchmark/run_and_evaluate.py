@@ -22,8 +22,13 @@ Usage:
       --truth    /tmp/scnm_bench/ground_truth.tsv \\
       --gtf      ~/.cache/scnoisemeter/gencode.v49.annotation.gtf.gz \\
       --fasta    /data/scNoiseMeter/GRCh38.primary_assembly.genome.fa.gz \\
+      --repeats  /tmp/scnm_bench/repeats.bed \\
       --outdir   /tmp/scnm_bench/out \\
       [--skip-run]     # reuse an existing scnoisemeter output directory
+
+--repeats is the RepeatMasker BED emitted by synthesize_bam.py. Passing it
+lets scnoisemeter classify INTERGENIC_REPEAT reads; omit it to test the
+HOTSPOT/NOVEL path without REPEAT.
 """
 
 from __future__ import annotations
@@ -65,6 +70,10 @@ def parse_args():
     p.add_argument("--fasta", required=True)
     p.add_argument("--outdir", required=True)
     p.add_argument("--sample-name", default="synthetic")
+    p.add_argument("--repeats", default=None,
+                   help="RepeatMasker BED passed through to scnoisemeter. "
+                        "synthesize_bam.py emits outdir/repeats.bed; pass that here "
+                        "to enable INTERGENIC_REPEAT classification.")
     p.add_argument("--skip-run", action="store_true",
                    help="Skip the scnoisemeter invocation (use existing outputs in --outdir)")
     return p.parse_args()
@@ -81,6 +90,8 @@ def run_scnoisemeter(args):
         "--output-dir", args.outdir,
         "--sample-name", args.sample_name,
     ]
+    if args.repeats:
+        cmd.extend(["--repeats", args.repeats])
     print("running:", " ".join(cmd), file=sys.stderr)
     subprocess.run(cmd, check=True)
 
@@ -96,11 +107,14 @@ def load_ground_truth(path: Path) -> pd.DataFrame:
 
 
 def build_confusion_matrix(cell_metrics: pd.DataFrame, truth: pd.DataFrame) -> pd.DataFrame:
-    """Return a (true_category x assigned_category) count matrix for Exp 1 CBs."""
+    """Return a (true_category x assigned_category) count matrix for Exp 1 CBs.
+
+    Multiple CBs may share one true_category (HOTSPOT / NOVEL / REPEAT use
+    three CBs each to satisfy the >= 3 barcode threshold of the intergenic
+    profiler); this function sums across those CBs per true_category.
+    """
     exp1 = truth[truth["notes"] == "exp1"].copy()
-    # Map CB -> true_category (single category per CB in Exp 1)
     cb_to_true = dict(zip(exp1["cell_barcode"], exp1["true_category"]))
-    # Expected per-CB count = 200 (from synthesize_bam.py)
     counts: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
     for _, row in cell_metrics.iterrows():
         cb = row["cell_barcode"]
@@ -112,7 +126,7 @@ def build_confusion_matrix(cell_metrics: pd.DataFrame, truth: pd.DataFrame) -> p
             frac = row.get(f"read_frac_{col}", 0) or 0
             if pd.isna(frac):
                 frac = 0
-            counts[true_cat][col] = round(frac * n)
+            counts[true_cat][col] += round(frac * n)
     mat = pd.DataFrame(counts).T.fillna(0).astype(int)
     mat = mat.reindex(columns=CATEGORY_COLUMNS, fill_value=0)
     mat.index.name = "true_category"
