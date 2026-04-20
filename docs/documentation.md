@@ -8,7 +8,7 @@ Version 0.3.1
 
 scNoiseMeter quantifies technical noise in single-cell RNA-seq BAM files. It classifies every primary alignment into one of 19 mutually exclusive read categories and reports per-sample and per-cell noise fractions, strand concordance, chimeric read rates, and artifact flag counts.
 
-The tool is platform-agnostic: it processes ONT, PacBio/Kinnex, Illumina (10x Genomics, BD Rhapsody), and Smart-seq / FLASH-seq BAM files using the same classification logic, with platform-specific adjustments where the underlying biology differs.
+The tool is platform-agnostic: it processes ONT, PacBio/Kinnex, short-read (Illumina, ElemBio) BAMs from 10x Genomics or BD Rhapsody kits, and Smart-seq / FLASH-seq plates (96- and 384-well). The same classification logic is used throughout, with platform-specific adjustments where the underlying biology differs.
 
 Four subcommands are provided:
 
@@ -785,9 +785,9 @@ When `--tss-sites` is provided explicitly, `--tss-db` is ignored.
 - Read-length distribution and noise-by-length charts are included in the HTML report.
 - No insert size chart.
 
-### Illumina (10x Genomics, BD Rhapsody)
+### 10x Genomics and BD Rhapsody (short-read: Illumina, ElemBio)
 
-- Platform auto-detected from `STAR`, `STARsolo`, or `cellranger` `@PG` records.
+- Platform auto-detected from `STAR`, `STARsolo`, or `cellranger` `@PG` records. Short-read BAMs from Illumina or ElemBio (AVITI) sequencers are handled identically; the distinction is kit chemistry, not sequencer vendor.
 - Chimeric detection uses paired-end mode: a read pair is chimeric if it is inter-chromosomal, strand-discordant, or has `abs(template_length)` ≥ 1,000,000 bp.
 - Read-length distribution and noise-by-length charts are suppressed (all reads are the same short length).
 - Insert size distribution chart is shown when properly paired reads are present (collected by reservoir sampling from read1 of each proper pair, with `0 < abs(template_length) < 2000`).

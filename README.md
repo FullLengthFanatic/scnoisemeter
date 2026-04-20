@@ -2,7 +2,7 @@
 
 Platform-agnostic quantification of technical noise in single-cell RNA-seq BAM files.
 
-scNoiseMeter classifies every primary alignment into one of 19 mutually exclusive categories and reports per-sample and per-cell noise fractions, strand concordance, chimeric read rates, and artifact flag counts. It runs on ONT, PacBio/Kinnex, Illumina (10x Genomics, BD Rhapsody), and Smart-seq / FLASH-seq BAMs using the same classification logic, with platform-specific adjustments where the underlying biology differs.
+scNoiseMeter classifies every primary alignment into one of 19 mutually exclusive categories and reports per-sample and per-cell noise fractions, strand concordance, chimeric read rates, and artifact flag counts. It runs on ONT, PacBio/Kinnex, short-read (Illumina, ElemBio) BAMs from 10x Genomics or BD Rhapsody kits, and Smart-seq / FLASH-seq plates (96- and 384-well), using the same classification logic with platform-specific adjustments where the underlying biology differs.
 
 Current version: **0.3.1**.
 
@@ -170,11 +170,11 @@ The classifier initially labels every intergenic read `intergenic_sparse`. A sec
 |---|---|---|---|---|
 | ONT | `minimap2` @PG | SA tag, 10 kbp threshold | Yes | Stranded |
 | PacBio / Kinnex | `pbmm2` @PG | SA tag, 10 kbp threshold | Yes | Stranded |
-| Illumina 10x | `STAR` / `STARsolo` / `cellranger` @PG | Paired-end insert size | Suppressed | Stranded |
-| Illumina BD Rhapsody | `STAR` @PG | Paired-end insert size | Suppressed | Stranded |
-| Smart-seq / FLASH-seq | set explicitly with `--platform smartseq` | Paired-end insert size | Yes (when long enough) | Unstranded |
+| 10x Genomics (short-read) | `STAR` / `STARsolo` / `cellranger` @PG | Paired-end insert size | Suppressed | Stranded |
+| BD Rhapsody (short-read) | `STAR` @PG | Paired-end insert size | Suppressed | Stranded |
+| Smart-seq / FLASH-seq (96- and 384-well) | set explicitly with `--platform smartseq` | Paired-end insert size | Yes (when long enough) | Unstranded |
 
-Pass `--platform` explicitly to override auto-detection. Smart-seq is not auto-detected from the header and must be set explicitly; doing so selects the unstranded noise definition and suppresses the "missing CB tag" warning that is expected for one-cell-per-BAM data.
+Short-read BAMs from either Illumina or ElemBio (AVITI) sequencers are handled identically; the row label reflects the library kit, not the sequencer vendor. Pass `--platform` explicitly to override auto-detection. Smart-seq is not auto-detected from the header and must be set explicitly; doing so selects the unstranded noise definition and suppresses the "missing CB tag" warning that is expected for one-cell-per-BAM data.
 
 ---
 
