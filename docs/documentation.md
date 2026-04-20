@@ -1,6 +1,6 @@
 # scNoiseMeter Documentation
 
-Version 0.3.1
+Version 0.4.0
 
 ---
 
@@ -18,6 +18,13 @@ Four subcommands are provided:
 - `discover` — scan a directory for BAM files, infer their parameters, and run `scnoisemeter run` on selected files
 
 The tool requires a coordinate-sorted, indexed BAM file aligned to human GRCh38/hg38, and a GENCODE GTF annotation. Both the GTF and a PolyASite 3.0 atlas are downloaded automatically on first use if not supplied explicitly.
+
+### What's new in 0.4
+
+- Vendor-neutral platform naming in all user-facing prose: short-read BAMs come from Illumina or ElemBio (AVITI) sequencers; 10x Genomics and BD Rhapsody are kit chemistries on top of those sequencers. Platform-enum values are unchanged.
+- 384-well plate support is explicit in docs and covered by unit tests for the sample-sheet parser (96- and 384-well geometries, both Sample_Name and PlateID/WellID input formats).
+- Simulation-based benchmark (`tests/benchmark/`) validates the classifier and per-cell noise metric against ground-truth labels. Exp 1 reaches 99.2% mean per-category accuracy across 8 read categories; Exp 2 reports per-cell noise fractions within ±0.01 of truth at every mixture level from 0 to 55% noise. Runs in under a minute from a GENCODE GTF and GRCh38 FASTA.
+- Every external URL in `annotation_fetcher.py` (GENCODE, PolyASite 3.0, PolyA_DB v4, FANTOM5, 10x whitelists) now supports a `SCNM_*_URL` environment-variable override. Use these when an upstream host or URL scheme changes, or behind a corporate mirror. PolyASite error messages name the exact probe template and point to the override.
 
 ### What's new in 0.3
 
