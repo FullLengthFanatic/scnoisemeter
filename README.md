@@ -4,7 +4,7 @@ Platform-agnostic quantification of technical noise in single-cell RNA-seq BAM f
 
 scNoiseMeter classifies every primary alignment into one of 19 mutually exclusive categories and reports per-sample and per-cell noise fractions, strand concordance, chimeric read rates, and artifact flag counts. It runs on ONT, PacBio/Kinnex, short-read (Illumina, ElemBio) BAMs from 10x Genomics or BD Rhapsody kits, and Smart-seq / FLASH-seq plates (96- and 384-well), using the same classification logic with platform-specific adjustments where the underlying biology differs.
 
-Current version: **0.3.1**.
+Current version: **0.4.0**.
 
 ---
 
