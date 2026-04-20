@@ -1,33 +1,45 @@
-# scNoiseMeter — v1 validation benchmark
+# scNoiseMeter — validation benchmark (v1.1)
 
 Simulation-based validation of the scnoisemeter classifier and per-cell noise
-metric. Runs in under a minute. Outputs a confusion matrix and a noise-fraction
-dose-response table suitable as a methods-paper supplementary figure.
+metric. Runs in a couple of minutes. Outputs a confusion matrix and a
+noise-fraction dose-response table suitable as a methods-paper supplementary
+figure.
 
-## What this benchmark validates
+## Coverage
 
-**Exp 1 — per-read classifier accuracy.** For each of 8 read categories we
-place `N=200` reads of a single true category into a dedicated synthetic cell
-barcode. After running scnoisemeter, the per-cell category fractions directly
-reveal how the classifier assigned those reads. Reading the results back as a
-confusion matrix gives per-category accuracy.
+**Exp 1 — per-read classifier accuracy (14 of 19 ReadCategory values).**
 
-**Exp 2 — per-cell noise-fraction fidelity.** Five synthetic cells are built
-with known mixtures of signal (EXONIC_SENSE) and noise drawn from
-NOISE_CATEGORIES_CONSERVATIVE. True noise fraction sweeps 0 → 55 %. We compare
-the reported `noise_read_frac` to the true fraction.
+Simple categories (one CB, 200 reads each):
 
-## What it does NOT validate (v1 scope boundaries)
+- EXONIC_SENSE, EXONIC_ANTISENSE
+- INTRONIC_PURE, INTRONIC_BOUNDARY, INTRONIC_JXNSPAN
+- INTERGENIC_SPARSE
+- MITOCHONDRIAL, MULTIMAPPER, CHIMERIC
+- AMBIGUOUS_COD_COD, AMBIGUOUS_COD_NCOD
 
-- **Alignment-quality artifacts.** The BAM is synthesized directly with
-  `pysam`; no aligner is invoked. Sequencing-error profiles, soft-clips, and
-  mapQ distributions are stylized, not realistic.
-- **Intergenic profiler categories** (HOTSPOT, NOVEL, REPEAT). These require
-  locus-level read density patterns and a RepeatMasker annotation, planned for
-  v2.
-- **INTRONIC_JXNSPAN.** Requires CIGAR N constructs landing on known splice
-  sites; v2.
-- **AMBIGUOUS_COD_COD / COD_NCOD.** Require overlapping-gene regions; v2.
+Clustered intergenic categories (3 CBs, 10 loci, 21 reads per locus) — the
+intergenic profiler requires >= 3 distinct barcodes per locus to call
+significance, so each category ships three collaborating CBs:
+
+- INTERGENIC_HOTSPOT (mono-exonic clusters with an A-run downstream)
+- INTERGENIC_NOVEL (spliced clusters with a non-canonical donor dinucleotide)
+- INTERGENIC_REPEAT (clusters whose positions are covered by `repeats.bed`)
+
+**Exp 2 — per-cell noise-fraction fidelity.** Five synthetic cells with
+known signal (EXONIC_SENSE) + noise mixtures. True noise fraction sweeps
+0 → 55 %. Compared against the reported `noise_read_frac`.
+
+## What it does NOT validate
+
+- **Alignment-quality artifacts.** The BAM is synthesized directly with pysam;
+  no aligner is invoked. Sequencing-error profiles, soft-clips, and mapQ
+  distributions are stylized rather than realistic.
+- **UNASSIGNED**, polyA-priming / TSO-invasion flags, and NUMT-based
+  mitochondrial sub-classification — each needs additional inputs and is
+  deferred.
+- **Short-read coverage (Illumina, ElemBio) and 384-well `run-plate`** —
+  scope for a future pass; the classifier is platform-agnostic, so ONT-mode
+  correctness implies short-read correctness for read-level classification.
 
 ## Requirements
 
@@ -39,7 +51,7 @@ the reported `noise_read_frac` to the true fraction.
 ## Run
 
 ```bash
-# 1. Synthesize BAM + ground-truth table
+# 1. Synthesize BAM + ground-truth table + repeats.bed
 python3 tests/benchmark/synthesize_bam.py \
     --gtf   ~/.cache/scnoisemeter/gencode.v49.annotation.gtf.gz \
     --fasta /path/to/GRCh38.primary_assembly.genome.fa.gz \
@@ -47,19 +59,19 @@ python3 tests/benchmark/synthesize_bam.py \
 
 # 2. Run scnoisemeter + score against ground truth
 python3 tests/benchmark/run_and_evaluate.py \
-    --bam    /tmp/scnm_bench/synthetic.bam \
-    --truth  /tmp/scnm_bench/ground_truth.tsv \
-    --gtf    ~/.cache/scnoisemeter/gencode.v49.annotation.gtf.gz \
-    --fasta  /path/to/GRCh38.primary_assembly.genome.fa.gz \
-    --outdir /tmp/scnm_bench/out
+    --bam     /tmp/scnm_bench/synthetic.bam \
+    --truth   /tmp/scnm_bench/ground_truth.tsv \
+    --gtf     ~/.cache/scnoisemeter/gencode.v49.annotation.gtf.gz \
+    --fasta   /path/to/GRCh38.primary_assembly.genome.fa.gz \
+    --repeats /tmp/scnm_bench/repeats.bed \
+    --outdir  /tmp/scnm_bench/out
 ```
 
 Pass `--skip-run` to `run_and_evaluate.py` to reuse an existing scnoisemeter
-output directory (faster iteration on the evaluator).
+output directory (faster iteration on the evaluator). Omit `--repeats` to
+skip REPEAT classification and measure only HOTSPOT / NOVEL.
 
 ## Outputs
-
-After evaluation, `--outdir` contains:
 
 | File                                    | What it contains                                   |
 |-----------------------------------------|----------------------------------------------------|
@@ -71,21 +83,23 @@ After evaluation, `--outdir` contains:
 
 ## Interpretation
 
-- **Per-category accuracy** should be ≥ 0.95 for every category covered in v1.
+- **Per-category accuracy** should be >= 0.95 for simple categories and >= 0.90
+  for clustered intergenic categories (HOTSPOT/NOVEL/REPEAT depend on Poisson
+  significance thresholds that can reclassify borderline loci as SPARSE).
   Lower values indicate a classifier regression or an ambiguous synthetic
-  construction. Ties in base counts resolve by Python dict insertion order —
-  the synthesizer uses a 30/70 exon/intron split for INTRONIC_BOUNDARY reads
-  so argmax is unambiguous.
+  construction.
+- Ties in base counts resolve by Python dict insertion order — the synthesizer
+  uses a 30/70 exon/intron split for INTRONIC_BOUNDARY reads so argmax is
+  unambiguous.
 - **`delta_vs_true`** in the dose-response should be within ± 0.02 at every
   mixture level. Larger deltas at higher noise fractions usually trace back
   to a single category misclassification compounding across the mixture.
 
-## v2 plan (out of scope here)
+## Not yet covered
 
-- pbsim3 + minimap2 for realistic ONT/PacBio error profiles and alignment
+- **UNASSIGNED** (requires unmapped or no-CB reads and a whitelist/QC path).
+- **TSO-invasion / polyA-priming flags** on the EXONIC_SENSE axis.
+- **NUMT-derived MITOCHONDRIAL** sub-classification (needs a NUMT BED).
+- **pbsim3 + minimap2** for realistic ONT/PacBio error profiles and alignment
   artifacts.
-- INTERGENIC_HOTSPOT / NOVEL validation: spike N loci with varying read
-  counts, measure sensitivity/specificity of the Poisson profiler.
-- INTERGENIC_REPEAT validation: requires a RepeatMasker BED input.
-- Short-read coverage (Illumina, ElemBio) via synthesized 10x-style BAMs.
-- 384-well plate variant exercising `run-plate` and `--parallel-wells`.
+- **Short-read (Illumina, ElemBio) and 384-well plate mode** end-to-end.
