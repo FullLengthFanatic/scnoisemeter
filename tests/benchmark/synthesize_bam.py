@@ -1,35 +1,58 @@
 #!/usr/bin/env python3
 """
-synthesize_bam.py — controlled ground-truth BAM for the scNoiseMeter benchmark.
+synthesize_bam.py — controlled ground-truth BAMs for the scNoiseMeter benchmark.
 
-Two experiments share one BAM:
+Emits two BAMs and their ground-truth tables:
 
-  Exp 1 — per-read classifier accuracy (confusion matrix).
-          For the "simple" categories, one CB per true category, N reads per CB.
-          For the "clustered" intergenic categories (HOTSPOT, NOVEL, REPEAT),
-          multiple CBs per category because the intergenic profiler requires
-          >= 3 distinct barcodes per locus to declare significance.
+  synthetic.bam           — Exp 1 (classifier accuracy), Exp 2 (noise dose-
+                            response), Exp 4 (TSO / polyA artifact-flag cells).
+                            Use --platform ont to score.
 
-  Exp 2 — per-cell noise-fraction fidelity (dose-response).
-          Five CBs with known mixtures of signal (EXONIC_SENSE) and noise
-          drawn from NOISE_CATEGORIES_CONSERVATIVE.
+  synthetic_illumina.bam  — Exp 5: paired-end CHIMERIC validation. Use
+                            --platform illumina_10x to exercise the
+                            paired-end chimeric branch (FLAG + RNEXT/PNEXT
+                            + TLEN); long-read SA-tag chimeric is already
+                            covered by the CHIMERIC cell in synthetic.bam.
 
-Categories covered (14 of 19):
+Exp 1 (per-read classifier accuracy, confusion matrix):
+  - "Simple" categories: one CB per true category, N reads per CB.
+  - "Clustered" intergenic (HOTSPOT, NOVEL, REPEAT): multiple CBs per
+    category because the intergenic profiler requires >= 3 distinct
+    barcodes per locus to declare significance.
+
+Exp 2 (per-cell noise-fraction fidelity, dose-response):
+  Five CBs with known mixtures of signal (EXONIC_SENSE) and noise drawn
+  from NOISE_COMPOSITION.
+
+Exp 4 (per-cell artifact-flag counters, TSO / polyA):
+  Two CBs whose reads are EXONIC_SENSE but carry a TSO 5' soft-clip or
+  sit at a position with a downstream A-run. Validated against per-cell
+  n_tso / n_polya in cell_metrics.tsv.
+
+Categories covered (16 of 19):
 
   Simple (1 CB each):
     EXONIC_SENSE, EXONIC_ANTISENSE,
     INTRONIC_PURE, INTRONIC_BOUNDARY, INTRONIC_JXNSPAN,
     INTERGENIC_SPARSE,
     MITOCHONDRIAL, MULTIMAPPER, CHIMERIC,
-    AMBIGUOUS_COD_COD, AMBIGUOUS_COD_NCOD
+    AMBIGUOUS, AMBIGUOUS_COD_COD, AMBIGUOUS_COD_NCOD,
+    UNASSIGNED
 
   Clustered (3 CBs each, multi-locus):
     INTERGENIC_HOTSPOT, INTERGENIC_NOVEL, INTERGENIC_REPEAT
 
-Not yet covered (requires more machinery):
-  UNASSIGNED (requires unmapped / no-CB reads),
-  TSO-invasion / polyA-priming flags,
-  NUMT-derived MITOCHONDRIAL sub-classification.
+Artifact-flag cells (per-cell counter validation, layered on EXONIC_SENSE):
+  TSO_INVASION (n_tso), POLYA_PRIMING (n_polya)
+
+Side outputs:
+  whitelist.txt — every legitimate CB. The runner must pass this with
+  --barcode-whitelist; the UNASSIGNED CB is deliberately excluded so
+  its reads trip the not-on-whitelist branch in the classifier.
+
+Not yet covered (requires upstream feature work):
+  NUMT-derived MITOCHONDRIAL sub-classification (per-read NUMT
+  disambiguation is not yet implemented in scnoisemeter).
 
 Key correctness invariants:
   * Strand-safe + exons: + strand exons with no base overlap to any - strand
@@ -90,9 +113,26 @@ EXP1_SIMPLE_CATEGORIES = [
     "MITOCHONDRIAL",
     "MULTIMAPPER",
     "CHIMERIC",
+    "AMBIGUOUS",
     "AMBIGUOUS_COD_COD",
     "AMBIGUOUS_COD_NCOD",
+    "UNASSIGNED",
 ]
+
+# Artifact-flag cells (per-cell n_tso / n_polya counter validation).
+# These do NOT change the read-level ReadCategory; the underlying read
+# is EXONIC_SENSE, the TSO/polyA flag is layered on top.
+EXP4_FLAG_CATEGORIES = [
+    "TSO_INVASION",
+    "POLYA_PRIMING",
+]
+
+# Whitelist-failed CB used by UNASSIGNED. Excluded from whitelist.txt.
+UNASSIGNED_CB = "CELL_EXP1_UNASSIGNED"
+
+# 5' soft-clip seed for TSO_INVASION reads (must be a >=12bp substring
+# of a known TSO; we use the canonical 10x TSO prefix).
+TSO_SOFTCLIP_SEED = "AAGCAGTGGTAT"   # TSO_10X[:12]
 
 EXP1_CLUSTERED_CATEGORIES = [
     "INTERGENIC_HOTSPOT",
@@ -360,6 +400,28 @@ def build_all_pickers(genes, exons, chrom_size, fa, buffer=10_000):
         print(f"WARNING: only {len(repeat_seeds)} REPEAT loci found "
               f"(wanted {CLUSTERED_N_LOCI})", file=sys.stderr)
 
+    # --- POLYA_PRIMING seeds: positions inside safe + exons whose 20 bp
+    # downstream of the read 3' end carries an A-run >= 6, matching the
+    # classifier's POLYA_RUN_MIN_LENGTH / POLYA_CONTEXT_WINDOW thresholds.
+    polya_positions: list[int] = []
+    for s, e in safe_plus_exons:
+        for try_pos in range(s + 10, e - READ_LEN - 10, 50):
+            try:
+                ctx = fa.fetch(WORK_CHROM, try_pos + READ_LEN,
+                               try_pos + READ_LEN + 20).upper()
+            except (ValueError, KeyError):
+                continue
+            if a_run_re.search(ctx):
+                polya_positions.append(try_pos)
+                if len(polya_positions) >= N_PER_CATEGORY_EXP1:
+                    break
+        if len(polya_positions) >= N_PER_CATEGORY_EXP1:
+            break
+    if len(polya_positions) < N_PER_CATEGORY_EXP1:
+        print(f"WARNING: only {len(polya_positions)} POLYA_PRIMING positions found "
+              f"(wanted {N_PER_CATEGORY_EXP1}); reads will recycle positions",
+              file=sys.stderr)
+
     return {
         "safe_plus_exons": safe_plus_exons,
         "plus_introns": plus_introns,
@@ -371,6 +433,7 @@ def build_all_pickers(genes, exons, chrom_size, fa, buffer=10_000):
         "hotspot_seeds": hotspot_seeds,
         "novel_seeds": novel_seeds,
         "repeat_seeds": repeat_seeds,
+        "polya_positions": polya_positions,
         "all_exon_union": all_exon_union,
     }
 
@@ -469,6 +532,155 @@ def _cigar_query_length(cigar: str) -> int:
     return total
 
 
+def make_paired_read(
+    name: str,
+    ref_id_self: int,
+    pos_self: int,
+    strand_self: str,
+    ref_id_mate: int,
+    pos_mate: int,
+    mate_unmapped: bool,
+    is_read1: bool,
+    tlen: int,
+    cb: str,
+    umi: str,
+    cigar: str = "100M",
+) -> pysam.AlignedSegment:
+    """Build one mapped half of a paired-end alignment.
+
+    We emit a single record per pair (always the mapped half). The
+    paired-end chimeric check evaluates one record at a time by
+    inspecting FLAG bits + RNEXT/PNEXT + TLEN, so a single mapped record
+    is enough to trigger the branch.
+    """
+    a = pysam.AlignedSegment()
+    a.query_name = name
+    a.reference_id = ref_id_self
+    a.reference_start = pos_self
+    a.mapping_quality = 60
+
+    flag = 1   # PAIRED
+    if strand_self == "-":
+        flag |= 16   # REVERSE
+    if mate_unmapped:
+        flag |= 8    # MATE_UNMAPPED
+    flag |= 64 if is_read1 else 128
+    a.flag = flag
+
+    a.cigarstring = cigar
+    qlen = _cigar_query_length(cigar)
+    a.query_sequence = "N" * qlen
+    a.query_qualities = pysam.qualitystring_to_array("I" * qlen)
+
+    a.next_reference_id = ref_id_mate
+    a.next_reference_start = pos_mate
+    a.template_length = tlen
+    a.tags = [("CB", cb), ("UB", umi), ("NH", 1)]
+    return a
+
+
+# ---------------------------------------------------------------------------
+# Illumina paired-end CHIMERIC BAM (Exp 5)
+# ---------------------------------------------------------------------------
+
+ILLUMINA_N_PER_CATEGORY = 100
+ILLUMINA_TLEN_LARGE = 2_000_000   # > ILLUMINA_CHIMERIC_INSERT_SIZE (1 Mb)
+ILLUMINA_TLEN_NORMAL = 350         # representative library insert
+ILLUMINA_CATEGORIES = [
+    "ILLUMINA_CONCORDANT",          # negative control: should NOT be chimeric
+    "ILLUMINA_CHIMERIC_INTERCHROM", # mate on a different chromosome
+    "ILLUMINA_DISCORDANT",          # mate flagged unmapped
+    "ILLUMINA_LARGETLEN",           # same chrom but |TLEN| > 1 Mb
+]
+# Chromosome used for the "other" mate in inter-chromosomal pairs.
+ILLUMINA_OTHER_CHROM = "chr1"
+
+
+def synthesize_illumina_bam(outdir, header, ref_id, picks, refs):
+    """Emit synthetic_illumina.bam (Exp 5) and ground truth.
+
+    Validates the paired-end chimeric branch reached when --platform
+    illumina_10x is passed (no SA tag; classifier consults FLAG +
+    RNEXT/PNEXT + TLEN). Also writes the rows for the same CBs into
+    the main ground truth, and the same CBs to whitelist.txt -- caller
+    handles the latter via cbs_seen aggregation.
+    """
+    if ILLUMINA_OTHER_CHROM not in ref_id:
+        print(f"WARNING: {ILLUMINA_OTHER_CHROM} not in reference; "
+              f"skipping Illumina paired-end BAM", file=sys.stderr)
+        return [], []
+
+    reads: list[pysam.AlignedSegment] = []
+    ground_truth: list[tuple[str, str, str, str]] = []
+    umi_counter = 0
+
+    def umi() -> str:
+        nonlocal umi_counter
+        u = f"UMI{umi_counter:08d}"
+        umi_counter += 1
+        return u
+
+    for cat in ILLUMINA_CATEGORIES:
+        cb = f"CELL_EXP5_{cat}"
+        for i in range(ILLUMINA_N_PER_CATEGORY):
+            s, e = random.choice(picks["safe_plus_exons"])
+            pos = random.randint(s + 10, e - READ_LEN - 10)
+            name = f"{cat}_{cb}_{i:06d}"
+
+            if cat == "ILLUMINA_CONCORDANT":
+                # Both mates on chr22, normal insert, mate mapped → not chimeric.
+                # The mate would sit ~ILLUMINA_TLEN_NORMAL bp downstream.
+                r = make_paired_read(
+                    name, ref_id[WORK_CHROM], pos, "+",
+                    ref_id[WORK_CHROM], pos + ILLUMINA_TLEN_NORMAL - READ_LEN,
+                    mate_unmapped=False, is_read1=True,
+                    tlen=ILLUMINA_TLEN_NORMAL, cb=cb, umi=umi(),
+                )
+            elif cat == "ILLUMINA_CHIMERIC_INTERCHROM":
+                r = make_paired_read(
+                    name, ref_id[WORK_CHROM], pos, "+",
+                    ref_id[ILLUMINA_OTHER_CHROM], 1_000_000 + i * 1000,
+                    mate_unmapped=False, is_read1=True,
+                    tlen=0, cb=cb, umi=umi(),
+                )
+            elif cat == "ILLUMINA_DISCORDANT":
+                r = make_paired_read(
+                    name, ref_id[WORK_CHROM], pos, "+",
+                    ref_id[WORK_CHROM], pos,   # SAM convention: unmapped mate
+                    mate_unmapped=True, is_read1=True,
+                    tlen=0, cb=cb, umi=umi(),
+                )
+            elif cat == "ILLUMINA_LARGETLEN":
+                # Far mate on same chrom (no inter-chrom signal); TLEN > 1 Mb.
+                mate_pos = pos + ILLUMINA_TLEN_LARGE
+                r = make_paired_read(
+                    name, ref_id[WORK_CHROM], pos, "+",
+                    ref_id[WORK_CHROM], mate_pos,
+                    mate_unmapped=False, is_read1=True,
+                    tlen=ILLUMINA_TLEN_LARGE, cb=cb, umi=umi(),
+                )
+            else:
+                raise ValueError(f"unknown Illumina category: {cat}")
+
+            reads.append(r)
+            true_cat = "EXONIC_SENSE" if cat == "ILLUMINA_CONCORDANT" else "CHIMERIC"
+            ground_truth.append((name, cb, true_cat, f"exp5;variant={cat.lower()}"))
+
+    reads.sort(key=lambda r: (r.reference_id, r.reference_start))
+    bam_path = outdir / "synthetic_illumina.bam"
+    tmp_path = outdir / "synthetic_illumina.unsorted.bam"
+    with pysam.AlignmentFile(str(tmp_path), "wb", header=header) as bam_out:
+        for r in reads:
+            bam_out.write(r)
+    pysam.sort("-o", str(bam_path), str(tmp_path))
+    pysam.index(str(bam_path))
+    os.remove(tmp_path)
+
+    print(f"      -> {bam_path} ({len(reads)} reads, "
+          f"{len(ILLUMINA_CATEGORIES)} cells)", file=sys.stderr)
+    return reads, ground_truth
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -479,11 +691,11 @@ def main():
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[1/6] Parsing GTF for {WORK_CHROM}...", file=sys.stderr)
+    print(f"[1/8] Parsing GTF for {WORK_CHROM}...", file=sys.stderr)
     genes, exons = parse_gtf(args.gtf, WORK_CHROM)
     print(f"      {len(genes)} genes, {len(exons)} exon entries", file=sys.stderr)
 
-    print(f"[2/6] Opening FASTA...", file=sys.stderr)
+    print(f"[2/8] Opening FASTA...", file=sys.stderr)
     fa = pysam.FastaFile(args.fasta)
     refs = list(fa.references)
     lens = [fa.get_reference_length(r) for r in refs]
@@ -501,6 +713,7 @@ def main():
           f"hotspot_seeds={len(picks['hotspot_seeds'])}, "
           f"novel_seeds={len(picks['novel_seeds'])}, "
           f"repeat_seeds={len(picks['repeat_seeds'])}, "
+          f"polya_positions={len(picks['polya_positions'])}, "
           f"intergenic_leftover={len(picks['intergenic_positions'])}", file=sys.stderr)
 
     header = {
@@ -584,8 +797,44 @@ def main():
             s, e, st = random.choice(pool)
             pos = random.randint(s + 10, e - READ_LEN - 10)
             r = make_read(name, ref_id[WORK_CHROM], pos, st, cb, u)
+        elif cat == "AMBIGUOUS":
+            # Plain AMBIGUOUS: classifier returns AMBIGUOUS when read.get_blocks()
+            # is empty (no aligned bases). A pure soft-clip CIGAR satisfies this
+            # while keeping the read mapped (reference_start set).
+            s, e = random.choice(picks["safe_plus_exons"])
+            pos = random.randint(s + 10, e - READ_LEN - 10)
+            r = make_read(name, ref_id[WORK_CHROM], pos, "+", cb, u, cigar="100S")
+        elif cat == "UNASSIGNED":
+            # Read with a CB that is intentionally absent from whitelist.txt;
+            # the classifier short-circuits to UNASSIGNED before any
+            # interval-based classification runs. Genomic position is irrelevant.
+            s, e = random.choice(picks["safe_plus_exons"])
+            pos = random.randint(s + 10, e - READ_LEN - 10)
+            r = make_read(name, ref_id[WORK_CHROM], pos, "+", cb, u)
         else:
             raise ValueError(f"unknown simple category: {cat}")
+        reads.append(r)
+        ground_truth.append((name, cb, cat, notes))
+
+    def emit_flag(cat: str, cb: str, read_idx: int, notes: str = ""):
+        """Emit one EXONIC_SENSE read carrying a TSO or polyA artifact flag."""
+        name = f"{cat}_{cb}_{read_idx:06d}"
+        u = next_umi()
+        if cat == "TSO_INVASION":
+            s, e = random.choice(picks["safe_plus_exons"])
+            pos = random.randint(s + 10, e - READ_LEN - 10)
+            # 12 bp 5' soft-clip = TSO_10X[:12], followed by READ_LEN aligned bases.
+            seq = TSO_SOFTCLIP_SEED + ("N" * READ_LEN)
+            r = make_read(name, ref_id[WORK_CHROM], pos, "+", cb, u,
+                          cigar=f"12S{READ_LEN}M", seq=seq)
+        elif cat == "POLYA_PRIMING":
+            pool = picks["polya_positions"]
+            if not pool:
+                raise RuntimeError("no POLYA_PRIMING positions found on this chromosome")
+            pos = pool[read_idx % len(pool)]
+            r = make_read(name, ref_id[WORK_CHROM], pos, "+", cb, u)
+        else:
+            raise ValueError(f"unknown flag category: {cat}")
         reads.append(r)
         ground_truth.append((name, cb, cat, notes))
 
@@ -616,7 +865,7 @@ def main():
         ground_truth.append((name, cb, cat, notes))
 
     # ----- Exp 1 simple categories -----
-    print(f"[3/6] Generating Exp 1 simple categories "
+    print(f"[3/8] Generating Exp 1 simple categories "
           f"({N_PER_CATEGORY_EXP1} reads × {len(EXP1_SIMPLE_CATEGORIES)} CBs)...",
           file=sys.stderr)
     for cat in EXP1_SIMPLE_CATEGORIES:
@@ -625,7 +874,7 @@ def main():
             emit_simple(cat, cb, i, notes="exp1")
 
     # ----- Exp 1 clustered intergenic categories -----
-    print(f"[4/6] Generating Exp 1 clustered categories "
+    print(f"[4/8] Generating Exp 1 clustered categories "
           f"({CLUSTERED_N_CBS} CBs × {CLUSTERED_N_LOCI} loci × "
           f"{CLUSTERED_READS_PER_LOCUS_PER_CB} reads × "
           f"{len(EXP1_CLUSTERED_CATEGORIES)} categories)...", file=sys.stderr)
@@ -646,8 +895,17 @@ def main():
                     emit_clustered(cat, cb, seed, read_idx, notes="exp1")
                     read_idx += 1
 
+    # ----- Exp 4 artifact-flag cells (TSO_INVASION, POLYA_PRIMING) -----
+    print(f"[5/8] Generating Exp 4 artifact-flag cells "
+          f"({N_PER_CATEGORY_EXP1} reads × {len(EXP4_FLAG_CATEGORIES)} CBs)...",
+          file=sys.stderr)
+    for cat in EXP4_FLAG_CATEGORIES:
+        cb = f"CELL_EXP4_{cat}"
+        for i in range(N_PER_CATEGORY_EXP1):
+            emit_flag(cat, cb, i, notes=f"exp4;flag={cat.lower()}")
+
     # ----- Exp 2 mixture cells -----
-    print(f"[5/6] Generating Exp 2 mixture cells ({len(NOISE_FRACTIONS)} CBs, "
+    print(f"[6/8] Generating Exp 2 mixture cells ({len(NOISE_FRACTIONS)} CBs, "
           f"{MIXTURE_CELL_N_READS} reads each)...", file=sys.stderr)
     for noise_frac in NOISE_FRACTIONS:
         cb = f"CELL_EXP2_NOISE{int(noise_frac * 100):02d}"
@@ -666,7 +924,7 @@ def main():
                             notes=f"exp2;true_noise={noise_frac:.2f};pool={noise_cat}")
 
     # ----- Write BAM + supporting files -----
-    print(f"[6/6] Writing BAM ({len(reads)} reads)...", file=sys.stderr)
+    print(f"[7/8] Writing BAM ({len(reads)} reads)...", file=sys.stderr)
     reads.sort(key=lambda r: (r.reference_id, r.reference_start))
 
     bam_path = outdir / "synthetic.bam"
@@ -697,12 +955,37 @@ def main():
         for start, end in repeat_intervals:
             fh.write(f"{WORK_CHROM}\t{start}\t{end}\tSynth_Repeat\t0\t+\n")
 
+    # ----- Exp 5: Illumina paired-end CHIMERIC BAM -----
+    print(f"[8/8] Generating Exp 5 Illumina paired-end BAM "
+          f"({len(ILLUMINA_CATEGORIES)} CBs)...", file=sys.stderr)
+    _, illumina_gt = synthesize_illumina_bam(outdir, header, ref_id, picks, refs)
+
+    if illumina_gt:
+        gt_illumina_path = outdir / "ground_truth_illumina.tsv"
+        with open(gt_illumina_path, "w") as fh:
+            fh.write("read_name\tcell_barcode\ttrue_category\tnotes\n")
+            for row in illumina_gt:
+                fh.write("\t".join(row) + "\n")
+        print(f"      -> {gt_illumina_path}", file=sys.stderr)
+
+    # Emit barcode whitelist: every CB appearing in ground_truth (ONT + Illumina)
+    # EXCEPT the UNASSIGNED CB. The runner must pass this via --barcode-whitelist
+    # so UNASSIGNED reads trip the not-on-whitelist branch in the classifier.
+    whitelist_path = outdir / "whitelist.txt"
+    all_cbs = {row[1] for row in ground_truth} | {row[1] for row in illumina_gt}
+    with open(whitelist_path, "w") as fh:
+        for cb in sorted(all_cbs):
+            if cb == UNASSIGNED_CB:
+                continue
+            fh.write(cb + "\n")
+
     fa.close()
 
     print(f"      -> {bam_path}", file=sys.stderr)
     print(f"      -> {bam_path}.bai", file=sys.stderr)
     print(f"      -> {gt_path}", file=sys.stderr)
     print(f"      -> {repeats_path}", file=sys.stderr)
+    print(f"      -> {whitelist_path}", file=sys.stderr)
     print(f"done.", file=sys.stderr)
 
 
