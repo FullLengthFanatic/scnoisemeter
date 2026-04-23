@@ -1,0 +1,23 @@
+{
+  "title": "scNoiseMeter: platform-agnostic quantification of technical noise in single-cell RNA-seq",
+  "description": "scNoiseMeter is a Python package that measures per-cell technical noise in single-cell RNA-seq from a coordinate-sorted BAM plus a GTF. It supports ONT, PacBio/Kinnex, and short-read (Illumina, ElemBio) data from 10x Genomics or BD Rhapsody kits, as well as Smart-seq / FLASH-seq plates (96-well and 384-well).",
+  "upload_type": "software",
+  "access_right": "open",
+  "license": "MIT",
+  "creators": [
+    {
+      "name": "Picelli, Simone",
+      "affiliation": "Institute of Ophthalmology Basel (IOB)",
+      "orcid": "0000-0002-1747-614X"
+    }
+  ],
+  "keywords": [
+    "single-cell",
+    "RNA-seq",
+    "long-read sequencing",
+    "BAM",
+    "artifact",
+    "quality control",
+    "bioinformatics"
+  ]
+}
