@@ -74,9 +74,30 @@ def parse_args():
                    help="RepeatMasker BED passed through to scnoisemeter. "
                         "synthesize_bam.py emits outdir/repeats.bed; pass that here "
                         "to enable INTERGENIC_REPEAT classification.")
+    p.add_argument("--barcode-whitelist", default=None,
+                   help="Barcode whitelist passed through to scnoisemeter. "
+                        "synthesize_bam.py emits outdir/whitelist.txt; pass that here "
+                        "to enable UNASSIGNED classification (CBs absent from the file "
+                        "trip the not-on-whitelist branch).")
+    p.add_argument("--illumina-bam", default=None,
+                   help="Optional synthetic_illumina.bam for Exp 5 (paired-end CHIMERIC). "
+                        "When provided, scnoisemeter is invoked a second time with "
+                        "--platform illumina_10x and an Illumina-mode confusion matrix "
+                        "is emitted.")
+    p.add_argument("--illumina-truth", default=None,
+                   help="Optional ground_truth_illumina.tsv companion for --illumina-bam.")
     p.add_argument("--skip-run", action="store_true",
                    help="Skip the scnoisemeter invocation (use existing outputs in --outdir)")
     return p.parse_args()
+
+
+def _common_run_flags(args):
+    flags = []
+    if args.barcode_whitelist:
+        flags.extend(["--barcode-whitelist", args.barcode_whitelist])
+    else:
+        flags.extend(["--whitelist-db", "none"])
+    return flags
 
 
 def run_scnoisemeter(args):
@@ -86,12 +107,27 @@ def run_scnoisemeter(args):
         "--gtf", args.gtf,
         "--reference", args.fasta,
         "--platform", "ont",
-        "--whitelist-db", "none",
         "--output-dir", args.outdir,
         "--sample-name", args.sample_name,
     ]
+    cmd.extend(_common_run_flags(args))
     if args.repeats:
         cmd.extend(["--repeats", args.repeats])
+    print("running:", " ".join(cmd), file=sys.stderr)
+    subprocess.run(cmd, check=True)
+
+
+def run_scnoisemeter_illumina(args, sample_name: str = "synthetic_illumina"):
+    cmd = [
+        "python3", "-m", "scnoisemeter.cli", "run",
+        "--bam", args.illumina_bam,
+        "--gtf", args.gtf,
+        "--reference", args.fasta,
+        "--platform", "illumina_10x",
+        "--output-dir", args.outdir,
+        "--sample-name", sample_name,
+    ]
+    cmd.extend(_common_run_flags(args))
     print("running:", " ".join(cmd), file=sys.stderr)
     subprocess.run(cmd, check=True)
 
@@ -106,15 +142,21 @@ def load_ground_truth(path: Path) -> pd.DataFrame:
     return pd.read_csv(path, sep="\t")
 
 
-def build_confusion_matrix(cell_metrics: pd.DataFrame, truth: pd.DataFrame) -> pd.DataFrame:
-    """Return a (true_category x assigned_category) count matrix for Exp 1 CBs.
+def build_confusion_matrix(
+    cell_metrics: pd.DataFrame,
+    truth: pd.DataFrame,
+    notes_prefix: str = "exp1",
+) -> pd.DataFrame:
+    """Return a (true_category x assigned_category) count matrix.
 
+    `notes_prefix` selects which truth rows participate (e.g. "exp1" for the
+    main classifier matrix, "exp5" for the Illumina paired-end matrix).
     Multiple CBs may share one true_category (HOTSPOT / NOVEL / REPEAT use
     three CBs each to satisfy the >= 3 barcode threshold of the intergenic
     profiler); this function sums across those CBs per true_category.
     """
-    exp1 = truth[truth["notes"] == "exp1"].copy()
-    cb_to_true = dict(zip(exp1["cell_barcode"], exp1["true_category"]))
+    sub = truth[truth["notes"].str.startswith(notes_prefix, na=False)].copy()
+    cb_to_true = dict(zip(sub["cell_barcode"], sub["true_category"]))
     counts: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
     for _, row in cell_metrics.iterrows():
         cb = row["cell_barcode"]
@@ -132,6 +174,44 @@ def build_confusion_matrix(cell_metrics: pd.DataFrame, truth: pd.DataFrame) -> p
     mat.index.name = "true_category"
     mat = mat.sort_index()
     return mat
+
+
+def artifact_flag_metrics(cell_metrics: pd.DataFrame, truth: pd.DataFrame) -> pd.DataFrame:
+    """Validate per-cell n_tso / n_polya counters against the Exp 4 ground truth.
+
+    Each Exp 4 cell holds N reads carrying exactly one artifact flag
+    (TSO_INVASION or POLYA_PRIMING). The matching counter in cell_metrics
+    should equal N; the other counters should be zero.
+    """
+    exp4 = truth[truth["notes"].str.startswith("exp4", na=False)]
+    if exp4.empty:
+        return pd.DataFrame()
+    cb_to_flag = dict(zip(exp4["cell_barcode"], exp4["true_category"]))
+    cb_to_truth_count = exp4.groupby("cell_barcode").size().to_dict()
+    rows = []
+    for _, row in cell_metrics.iterrows():
+        cb = row["cell_barcode"]
+        if cb not in cb_to_flag:
+            continue
+        flag = cb_to_flag[cb]                 # TSO_INVASION or POLYA_PRIMING
+        expected = int(cb_to_truth_count[cb])
+        n_tso = int(row.get("n_tso", 0) or 0)
+        n_polya = int(row.get("n_polya", 0) or 0)
+        if flag == "TSO_INVASION":
+            observed = n_tso
+            other = n_polya
+        else:
+            observed = n_polya
+            other = n_tso
+        rows.append({
+            "cell_barcode": cb,
+            "flag": flag,
+            "expected_count": expected,
+            "observed_count": observed,
+            "other_flag_count": other,
+            "accuracy": round(observed / expected, 4) if expected else float("nan"),
+        })
+    return pd.DataFrame(rows)
 
 
 def per_category_metrics(mat: pd.DataFrame) -> pd.DataFrame:
@@ -195,7 +275,7 @@ def main():
     gt = load_ground_truth(Path(args.truth))
 
     print("Building confusion matrix (Exp 1)...", file=sys.stderr)
-    confusion = build_confusion_matrix(cm, gt)
+    confusion = build_confusion_matrix(cm, gt, notes_prefix="exp1")
     confusion_path = outdir / "benchmark_confusion_matrix.tsv"
     confusion.to_csv(confusion_path, sep="\t")
     print(f"  -> {confusion_path}", file=sys.stderr)
@@ -211,6 +291,12 @@ def main():
     dose.to_csv(dose_path, sep="\t", index=False)
     print(f"  -> {dose_path}", file=sys.stderr)
 
+    print("Building artifact-flag table (Exp 4: TSO / polyA)...", file=sys.stderr)
+    flags = artifact_flag_metrics(cm, gt)
+    flags_path = outdir / "benchmark_artifact_flags.tsv"
+    flags.to_csv(flags_path, sep="\t", index=False)
+    print(f"  -> {flags_path}", file=sys.stderr)
+
     summary = {
         "exp1_categories": len(metrics),
         "exp1_mean_accuracy": float(metrics["accuracy"].mean()) if len(metrics) else None,
@@ -218,7 +304,41 @@ def main():
         "exp2_cells": int(len(dose)),
         "exp2_mean_abs_delta": float(dose["delta_vs_true"].abs().mean()) if len(dose) else None,
         "exp2_max_abs_delta": float(dose["delta_vs_true"].abs().max()) if len(dose) else None,
+        "exp4_cells": int(len(flags)),
+        "exp4_min_accuracy": float(flags["accuracy"].min()) if len(flags) else None,
     }
+
+    # ----- Optional Exp 5: Illumina paired-end CHIMERIC -----
+    illumina_metrics: pd.DataFrame = pd.DataFrame()
+    illumina_confusion: pd.DataFrame = pd.DataFrame()
+    if args.illumina_bam:
+        if not args.illumina_truth:
+            print("ERROR: --illumina-bam requires --illumina-truth", file=sys.stderr)
+            sys.exit(1)
+        if not args.skip_run:
+            run_scnoisemeter_illumina(args)
+        cm_ill = load_cell_metrics(outdir, "synthetic_illumina")
+        gt_ill = load_ground_truth(Path(args.illumina_truth))
+
+        print("Building Illumina confusion matrix (Exp 5)...", file=sys.stderr)
+        illumina_confusion = build_confusion_matrix(cm_ill, gt_ill, notes_prefix="exp5")
+        ill_conf_path = outdir / "benchmark_illumina_confusion_matrix.tsv"
+        illumina_confusion.to_csv(ill_conf_path, sep="\t")
+        print(f"  -> {ill_conf_path}", file=sys.stderr)
+
+        illumina_metrics = per_category_metrics(illumina_confusion)
+        ill_met_path = outdir / "benchmark_illumina_per_category_metrics.tsv"
+        illumina_metrics.to_csv(ill_met_path, sep="\t", index=False)
+        print(f"  -> {ill_met_path}", file=sys.stderr)
+
+        summary["exp5_categories"] = int(len(illumina_metrics))
+        summary["exp5_mean_accuracy"] = (
+            float(illumina_metrics["accuracy"].mean()) if len(illumina_metrics) else None
+        )
+        summary["exp5_min_accuracy"] = (
+            float(illumina_metrics["accuracy"].min()) if len(illumina_metrics) else None
+        )
+
     summary_path = outdir / "benchmark_summary.json"
     with open(summary_path, "w") as fh:
         json.dump(summary, fh, indent=2)
@@ -229,6 +349,14 @@ def main():
 
     print("\n=== Exp 2: noise dose-response ===", file=sys.stderr)
     print(dose.to_string(index=False), file=sys.stderr)
+
+    if not flags.empty:
+        print("\n=== Exp 4: artifact-flag counters ===", file=sys.stderr)
+        print(flags.to_string(index=False), file=sys.stderr)
+
+    if not illumina_metrics.empty:
+        print("\n=== Exp 5: Illumina paired-end (per-category accuracy) ===", file=sys.stderr)
+        print(illumina_metrics.to_string(index=False), file=sys.stderr)
 
     print("\n=== Summary ===", file=sys.stderr)
     print(json.dumps(summary, indent=2), file=sys.stderr)
