@@ -180,11 +180,13 @@ The classifier initially labels every intergenic read `intergenic_sparse`. A sec
 |---|---|---|---|---|
 | ONT | `minimap2` @PG | SA tag, 10 kbp threshold | Yes | Stranded |
 | PacBio / Kinnex | `pbmm2` @PG | SA tag, 10 kbp threshold | Yes | Stranded |
-| 10x Genomics (short-read) | `STAR` / `STARsolo` / `cellranger` @PG | Paired-end insert size | Suppressed | Stranded |
-| BD Rhapsody (short-read) | `STAR` @PG | Paired-end insert size | Suppressed | Stranded |
-| Smart-seq / FLASH-seq (96- and 384-well) | set explicitly with `--platform smartseq` | Paired-end insert size | Yes (when long enough) | Unstranded |
+| 10x Genomics (short-read) | `STAR` / `STARsolo` / `cellranger` @PG | SA tag (STAR chimeric output) | Suppressed | Stranded |
+| BD Rhapsody (short-read) | `STAR` @PG | SA tag (STAR chimeric output) | Suppressed | Stranded |
+| Smart-seq / FLASH-seq (96- and 384-well) | set explicitly with `--platform smartseq` | Paired-end FLAG + TLEN (both mates are cDNA) | Yes (when long enough) | Unstranded |
 
 Short-read BAMs from either Illumina or ElemBio (AVITI) sequencers are handled identically; the row label reflects the library kit, not the sequencer vendor. Pass `--platform` explicitly to override auto-detection. Smart-seq is not auto-detected from the header and must be set explicitly; doing so selects the unstranded noise definition and suppresses the "missing CB tag" warning that is expected for one-cell-per-BAM data.
+
+**A note on chimeric detection for short-read kits.** The classifier always checks SA tags first on every read. A paired-end fallback (FLAG + RNEXT + TLEN, 1 Mb threshold) is available for `illumina`, `illumina_10x`, `illumina_bd`, and `smartseq` platforms, but only fires when no SA tag is present. On standard Cell Ranger / STARsolo 10x BAMs and BD Rhapsody BAMs only the cDNA read (R2) is aligned (R1 carries CB + UMI and is typically absent or unmapped), so the paired-end fallback is effectively inactive and chimeric calls come from STAR's SA tags. The fallback is relevant for bulk-style paired-end `illumina` BAMs and for Smart-seq / FLASH-seq, where both mates are cDNA and aligned as a proper pair.
 
 ---
 
