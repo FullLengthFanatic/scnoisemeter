@@ -1,10 +1,12 @@
 # scNoiseMeter
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19554841.svg)](https://doi.org/10.5281/zenodo.19554841)
+
 Platform-agnostic quantification of technical noise in single-cell RNA-seq BAM files.
 
 scNoiseMeter classifies every primary alignment into one of 19 mutually exclusive categories and reports per-sample and per-cell noise fractions, strand concordance, chimeric read rates, and artifact flag counts. It runs on ONT, PacBio/Kinnex, short-read (Illumina, ElemBio) BAMs from 10x Genomics or BD Rhapsody kits, and Smart-seq / FLASH-seq plates (96- and 384-well), using the same classification logic with platform-specific adjustments where the underlying biology differs.
 
-Current version: **0.4.0**.
+Current version: **0.4.1**.
 
 ---
 
@@ -248,6 +250,25 @@ Supply `--gtf` and `--polya-sites` explicitly to use specific versions, or use `
 ## Full documentation
 
 See [docs/documentation.md](docs/documentation.md) for complete flag descriptions, output column definitions, platform-specific notes, the plate workflow, and statistical methodology.
+
+---
+
+## Citation
+
+If you use scNoiseMeter in your work, please cite the archived version via the concept DOI (always resolves to the latest release):
+
+> Picelli, S. scNoiseMeter: platform-agnostic quantification of technical noise in single-cell RNA-seq. Zenodo. https://doi.org/10.5281/zenodo.19554841
+
+BibTeX:
+
+```bibtex
+@software{picelli_scnoisemeter,
+  author  = {Picelli, Simone},
+  title   = {scNoiseMeter: platform-agnostic quantification of technical noise in single-cell RNA-seq},
+  url     = {https://github.com/FullLengthFanatic/scnoisemeter},
+  doi     = {10.5281/zenodo.19554841}
+}
+```
 
 ---
 
