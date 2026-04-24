@@ -125,6 +125,7 @@ NOISE_CATEGORIES_STRICT = {
 # cDNA signal in non-stranded libraries (Smart-seq2, FLASH-seq, Smart-seq3).
 # Use this when platform == SMARTSEQ to avoid inflating the noise fraction.
 NOISE_CATEGORIES_UNSTRANDED = NOISE_CATEGORIES - {ReadCategory.EXONIC_ANTISENSE}
+NOISE_CATEGORIES_STRICT_UNSTRANDED = NOISE_CATEGORIES_STRICT - {ReadCategory.EXONIC_ANTISENSE}
 
 # Categories whose interpretation is ambiguous and reported separately
 AMBIGUOUS_CATEGORIES = {

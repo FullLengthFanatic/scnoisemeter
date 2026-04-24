@@ -56,6 +56,7 @@ from scnoisemeter.constants import (
     LENGTH_SHORT_READ_THRESHOLD,
     NOISE_CATEGORIES,
     NOISE_CATEGORIES_STRICT,
+    NOISE_CATEGORIES_STRICT_UNSTRANDED,
     NOISE_CATEGORIES_UNSTRANDED,
     ReadCategory,
 )
@@ -293,11 +294,12 @@ def compute_metrics(
     sm.noise_base_frac = sum(
         sm.base_fracs.get(cat.value, 0.0) for cat in _noise_cats
     )
+    _noise_cats_strict = NOISE_CATEGORIES_STRICT_UNSTRANDED if unstranded else NOISE_CATEGORIES_STRICT
     sm.noise_read_frac_strict = sum(
-        sm.read_fracs.get(cat.value, 0.0) for cat in NOISE_CATEGORIES_STRICT
+        sm.read_fracs.get(cat.value, 0.0) for cat in _noise_cats_strict
     )
     sm.noise_base_frac_strict = sum(
-        sm.base_fracs.get(cat.value, 0.0) for cat in NOISE_CATEGORIES_STRICT
+        sm.base_fracs.get(cat.value, 0.0) for cat in _noise_cats_strict
     )
 
     # Strand concordance
