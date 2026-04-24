@@ -8,7 +8,7 @@ scNoiseMeter measures technical noise in single-cell RNA-seq from a coordinate-s
 
 Same logic runs on ONT, PacBio/Kinnex, short-read (Illumina, ElemBio) BAMs from 10x Genomics or BD Rhapsody kits, and Smart-seq / FLASH-seq plates (96- and 384-well), with platform-specific adjustments where the underlying biology differs.
 
-Current version: **0.4.1**.
+Current version: **0.4.2**.
 
 ---
 
@@ -141,15 +141,15 @@ Every read receives exactly one category. The classification hierarchy is applie
 |---|---|
 | `multimapper` | NH tag > 1 on the primary alignment |
 | `chimeric` | Inter-chromosomal or strand-discordant SA split; or same-strand intra-chromosomal distance > 10 kbp; or paired-end insert size > 1 Mbp |
-| `mitochondrial` | Maps to chrM / MT |
+| `mitochondrial` | Maps to a mitochondrial contig (`chrM`, `MT`, `chrMT`, or `mitochondrion`) |
 | `exonic_sense` | Overlaps an annotated exon on the correct strand |
 | `exonic_antisense` | Overlaps an annotated exon on the wrong strand |
 | `intronic_jxnspan` | Intronic with a CIGAR N operation near a splice site |
 | `intronic_pure` | Entirely within an intron body, no junction signal |
 | `intronic_boundary` | Spans an exon-intron boundary without a splice operation |
 | `intergenic_repeat` | Intergenic, overlapping a RepeatMasker interval (requires `--repeats`) |
-| `intergenic_hotspot` | Intergenic locus above the adaptive threshold with an internal-priming signature |
-| `intergenic_novel` | Intergenic locus above threshold, near an annotated polyA site; candidate novel gene |
+| `intergenic_hotspot` | Intergenic monoexonic locus above threshold with a genomic A-run (>= 6 A within 20 bp downstream of the read 3' end) and not near any annotated polyA site; likely internal priming |
+| `intergenic_novel` | Intergenic locus above threshold with strong strand consistency, showing splice evidence (CIGAR N) and/or proximity to an annotated polyA site; candidate novel gene |
 | `intergenic_sparse` | Intergenic locus below the adaptive threshold |
 | `ambiguous` | Overlaps a region shared by multiple genes |
 | `ambiguous_cod_ncod` | Shared region between a coding gene and a non-coding gene |
@@ -170,7 +170,15 @@ The categories `intronic_jxnspan`, `intergenic_novel`, and the three `ambiguous`
 
 ### Intergenic locus scoring
 
-The classifier initially labels every intergenic read `intergenic_sparse`. A second pass clusters those reads into 500 bp windows and scores each locus against a Poisson background model (expected rate from total intergenic base coverage). Loci must meet minimum thresholds (>= 5 reads, >= 3 distinct barcodes or >= 0.01% of total barcodes) and pass a Bonferroni-corrected p < 0.01 before being promoted to `intergenic_hotspot`, `intergenic_novel`, or `intergenic_repeat`. Reads at promoted loci are moved out of the sparse bucket before any noise fraction is computed, so a locus promoted to `intergenic_novel` (ambiguous, not noise) reduces the reported noise fraction.
+The classifier initially labels every intergenic read `intergenic_sparse`. A second pass clusters those reads into 500 bp windows and scores each locus against a Poisson background model (expected rate from total intergenic base coverage). Loci must meet minimum thresholds (>= 5 reads, >= 3 distinct barcodes or >= 0.01% of total barcodes) and pass a Bonferroni-corrected p < 0.01 before being promoted.
+
+Promotion rules for the passing loci:
+
+- `intergenic_novel` requires >= 80% strand consistency, >= 3 distinct barcodes, and either splice evidence (at least one read with a CIGAR N) or a modal 3' end within 50 bp of an annotated polyA site.
+- `intergenic_hotspot` requires the locus to be monoexonic (no read carries a CIGAR N), to have >= 6 consecutive reference As within 20 bp downstream of the modal 3' end, and to be more than 50 bp from any annotated polyA site.
+- `intergenic_repeat` requires overlap with a RepeatMasker interval (BED passed via `--repeats`).
+
+Loci that pass significance but satisfy none of these rules default to `intergenic_hotspot` (flag for review). Reads at promoted loci are moved out of the sparse bucket before any noise fraction is computed, so a locus promoted to `intergenic_novel` (ambiguous, not noise) reduces the reported noise fraction.
 
 ---
 
@@ -241,9 +249,7 @@ Supply `--gtf` and `--polya-sites` explicitly to use specific versions, or use `
 
 **Genome.** GRCh38/hg38 only. Mouse and other species produce chromosome-length warnings but do not abort. Chromosome naming (UCSC `chr1` vs Ensembl `1`) must match between the BAM and the GTF; a mismatch is fatal.
 
-**Alignments.** Only primary alignments are classified. Secondary (flag 0x100) and supplementary (flag 0x800) records are skipped; supplementary records are read by the chimeric detector only.
-
-**`multimapper`.** NH > 1 reads currently receive their genomic category (e.g. `exonic_sense`) rather than the `multimapper` category. The `is_multimapper` flag is computed but not assigned — an intentional choice to keep multimappers in their biological context; the per-sample `multimapper_read_frac` metric is still reported. This is documented behavior, not a bug.
+**Alignments.** Only primary alignments are classified. Secondary (flag 0x100) and supplementary (flag 0x800) records are skipped; the `SA` tag on the primary alignment is parsed by the chimeric detector.
 
 **`intronic_pure` / `intronic_boundary`.** These categories cannot be distinguished from genuine pre-mRNA capture at the read level. They appear in conservative noise but not strict noise.
 

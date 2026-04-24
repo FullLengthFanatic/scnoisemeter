@@ -78,8 +78,8 @@ Every primary alignment receives exactly one category. The classification hierar
 |---|---|---|
 | `UNMAPPED` | `unmapped` | Read did not align. Excluded from all fractions. |
 | `SECONDARY` | `secondary` | SAM flag 0x100. Record is skipped entirely. |
-| `SUPPLEMENTARY` | `supplementary` | SAM flag 0x800. Routed to chimeric detector only; not counted in fractions. |
-| `MULTIMAPPER` | `multimapper` | Primary alignment with NH tag > 1. **Note:** this category is not currently assigned to individual reads; NH > 1 reads keep their genomic category (e.g. `exonic_sense`) and the multimapper share is reported only in the aggregate `multimapper_read_frac` metric. Intentional: keeps multimappers in their biological context. |
+| `SUPPLEMENTARY` | `supplementary` | SAM flag 0x800. Record is skipped; the `SA` tag on the primary alignment is what the chimeric detector uses. |
+| `MULTIMAPPER` | `multimapper` | Primary alignment with NH tag > 1. Highest priority in the classification hierarchy, so any NH > 1 read is assigned this category regardless of its genomic context. |
 | `CHIMERIC` | `chimeric` | SA tag present AND the split is inter-chromosomal, strand-discordant, or the same-strand intra-chromosomal distance exceeds the chimeric distance threshold (default 10,000 bp). For Illumina paired-end BAMs, also triggered when the absolute template length exceeds 1,000,000 bp. |
 | `MITOCHONDRIAL` | `mitochondrial` | Maps to the mitochondrial contig (chrM, MT, chrMT, or mitochondrion). |
 | `EXONIC_SENSE` | `exonic_sense` | Overlaps at least one annotated exon base on the correct strand. |
@@ -88,8 +88,8 @@ Every primary alignment receives exactly one category. The classification hierar
 | `INTRONIC_PURE` | `intronic_pure` | Maps entirely within an intron body with no junction signal. |
 | `INTRONIC_BOUNDARY` | `intronic_boundary` | Spans an exon–intron boundary without a splice operation in the CIGAR (candidate incomplete reverse transcription). |
 | `INTERGENIC_REPEAT` | `intergenic_repeat` | Intergenic read overlapping a RepeatMasker interval (requires `--repeats`). |
-| `INTERGENIC_HOTSPOT` | `intergenic_hotspot` | Intergenic read at a locus that passes the adaptive barcode threshold but shows an internal-priming or A-rich 3′-end signature. |
-| `INTERGENIC_NOVEL` | `intergenic_novel` | Intergenic read at a locus that passes the adaptive threshold, is strand-consistent, and falls near an annotated polyA site. Candidate unannotated gene or extended 3′ UTR. |
+| `INTERGENIC_HOTSPOT` | `intergenic_hotspot` | Intergenic monoexonic locus above threshold with a genomic A-run (>= 6 As within 20 bp downstream of the modal read 3' end) and more than 50 bp from any annotated polyA site. Likely internal priming. |
+| `INTERGENIC_NOVEL` | `intergenic_novel` | Intergenic locus above threshold with >= 80% strand consistency and >= 3 distinct barcodes, showing splice evidence (CIGAR N) and/or modal 3' end within 50 bp of an annotated polyA site. Candidate unannotated gene or extended 3' UTR. |
 | `INTERGENIC_SPARSE` | `intergenic_sparse` | Intergenic read at a locus below the adaptive barcode threshold. Likely noise. |
 | `AMBIGUOUS` | `ambiguous` | Overlaps a region shared by two or more genes where the gene types are not clearly distinguished by the sub-categories below. |
 | `AMBIGUOUS_COD_NCOD` | `ambiguous_cod_ncod` | Overlaps a shared region between a protein-coding gene and a non-coding gene (lncRNA, pseudogene, etc.). |
@@ -117,6 +117,8 @@ INTERGENIC_HOTSPOT + CHIMERIC
 ```
 
 The categories `INTRONIC_JXNSPAN`, `INTERGENIC_NOVEL`, `AMBIGUOUS`, `AMBIGUOUS_COD_NCOD`, and `AMBIGUOUS_COD_COD` are in neither noise set; their interpretation is ambiguous.
+
+*Unstranded mode.* When `--platform smartseq` is set (Smart-seq / FLASH-seq / Smart-seq3), `EXONIC_ANTISENSE` is dropped from both the conservative and strict noise sets. Unstranded libraries produce sense and antisense reads in roughly equal proportion by design, so counting antisense reads as noise would inflate the metric.
 
 **Adaptive intergenic threshold**
 
@@ -835,10 +837,10 @@ Activated when fewer than 50% of sampled reads (10,000 reads sampled from the BA
 
 **Read classification:**
 
-- Only primary alignments are classified. Secondary (flag 0x100) and supplementary (flag 0x800) alignments are skipped, except that supplementary records are examined by the chimeric detector.
-- `MULTIMAPPER` is defined as NH tag > 1 on the primary alignment record. Reads without an NH tag are not flagged as multimappers.
+- Only primary alignments are classified. Secondary (flag 0x100) and supplementary (flag 0x800) alignments are skipped; the `SA` tag on the primary alignment is what the chimeric detector parses.
+- `MULTIMAPPER` is defined as NH tag > 1 on the primary alignment record. It is the highest priority in the classification hierarchy; reads without an NH tag are not flagged as multimappers.
 - `INTRONIC_PURE` and `INTRONIC_BOUNDARY` cannot be distinguished from genuine pre-mRNA capture at the read level. They are included in conservative noise but excluded from strict noise. Their presence does not necessarily indicate an artifact.
-- `INTERGENIC_NOVEL` means a locus passes the adaptive barcode threshold and is near an annotated polyA site. It does not confirm the existence of an unannotated gene.
+- `INTERGENIC_NOVEL` requires >= 80% strand consistency, >= 3 distinct barcodes, and either splice evidence (CIGAR N) or proximity (<= 50 bp) to an annotated polyA site. It flags candidate loci for review; it does not confirm the existence of an unannotated gene.
 - `INTERGENIC_REPEAT` classification requires a RepeatMasker BED file (`--repeats`). Without it, repeat-overlapping intergenic reads fall into INTERGENIC_HOTSPOT or INTERGENIC_SPARSE.
 - Non-canonical junction detection requires a reference FASTA (`--reference`). Without it, `n_noncanon_junction` is 0 regardless of the actual data.
 
