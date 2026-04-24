@@ -46,6 +46,10 @@ scnoisemeter run \
 
 Platform is auto-detected from the BAM header and every flag shown in the `run` section below is optional tuning. The minimal invocation above works end-to-end on any supported BAM.
 
+![scNoiseMeter classification results](docs/report_preview2.png)
+
+*Sample view from the generated HTML report. The full report also covers sample metadata, read vs base fractions, length-stratified noise, per-cell noise distributions, artifact flag rates, and intergenic locus scoring — see `docs/report_preview1.png` through `docs/report_preview6.png` for the complete tour.*
+
 Output files written to `results/`:
 
 | File | Contents |
