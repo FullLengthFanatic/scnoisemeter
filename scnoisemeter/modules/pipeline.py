@@ -38,6 +38,7 @@ from __future__ import annotations
 import bisect
 import logging
 import random
+import zlib
 from collections import defaultdict
 from dataclasses import dataclass, field
 from multiprocessing import Pool
@@ -59,8 +60,33 @@ def _dd_set():
 def _dd_flags():
     return {"tso": 0, "polya": 0, "noncanon": 0}
 
+
+class _Reservoir(list):
+    """
+    Fixed-size list that tracks the number of items offered for true Algorithm R
+    sampling. Behaves as a plain list to consumers (iteration, len, indexing).
+    """
+    def __init__(self, max_size: int = 0):
+        super().__init__()
+        self.max_size = max_size
+        self.n_seen = 0
+
+
 def _dd_list():
-    return []
+    # MAX_LENGTH_SAMPLE is defined below; resolved at call time.
+    return _Reservoir(MAX_LENGTH_SAMPLE)
+
+
+def _make_intergenic_reservoir():
+    return _Reservoir(500_000)
+
+
+def _make_insert_size_reservoir():
+    return _Reservoir(500_000)
+
+
+def _make_position_reservoir():
+    return _Reservoir(MAX_LENGTH_SAMPLE)
 
 import pysam
 
@@ -132,20 +158,20 @@ class ContigResult:
     # (abs(template_length)) for properly-paired Illumina reads, split by
     # signal (EXONIC_SENSE) vs noise (everything else).  Populated only when
     # paired_end_chimeric=True; empty list otherwise.
-    insert_size_signal: list = field(default_factory=list)
-    insert_size_noise:  list = field(default_factory=list)
+    insert_size_signal: list = field(default_factory=_make_insert_size_reservoir)
+    insert_size_noise:  list = field(default_factory=_make_insert_size_reservoir)
 
     # intergenic_reads: lightweight side-table for intergenic profiler
     # Each entry: (contig, start, end, strand, cb, has_junction, three_prime)
-    intergenic_reads: list = field(default_factory=list)
+    intergenic_reads: list = field(default_factory=_make_intergenic_reservoir)
 
     # exonic_sense_three_prime: reservoir-sampled 3′ end positions of
     # exonic-sense reads, used for polyA-site-anchored full-length fraction
-    exonic_sense_three_prime: list = field(default_factory=list)
+    exonic_sense_three_prime: list = field(default_factory=_make_position_reservoir)
 
     # exonic_sense_five_prime: reservoir-sampled 5′ start positions of
     # exonic-sense reads, used for TSS/CAGE-anchored full-length fraction
-    exonic_sense_five_prime: list = field(default_factory=list)
+    exonic_sense_five_prime: list = field(default_factory=_make_position_reservoir)
 
     # Total reads processed (for progress / logging)
     n_reads_processed: int = 0
@@ -177,12 +203,12 @@ class SampleResult:
     # length_bin_counts[category][bin_idx] = exact read count per length bin
     length_bin_counts: dict = field(default_factory=lambda: defaultdict(_dd_int))
 
-    insert_size_signal: list = field(default_factory=list)
-    insert_size_noise:  list = field(default_factory=list)
+    insert_size_signal: list = field(default_factory=_make_insert_size_reservoir)
+    insert_size_noise:  list = field(default_factory=_make_insert_size_reservoir)
 
-    intergenic_reads: list = field(default_factory=list)
-    exonic_sense_three_prime: list = field(default_factory=list)
-    exonic_sense_five_prime:  list = field(default_factory=list)
+    intergenic_reads: list = field(default_factory=_make_intergenic_reservoir)
+    exonic_sense_three_prime: list = field(default_factory=_make_position_reservoir)
+    exonic_sense_five_prime:  list = field(default_factory=_make_position_reservoir)
 
     n_reads_total:     int = 0
     n_reads_processed: int = 0
@@ -213,6 +239,10 @@ def _contig_worker(args: dict) -> ContigResult:
     index               = args["index"]
     reference_path      = args.get("reference_path")
     cell_barcodes       = args.get("cell_barcodes")  # set or None
+    worker_seed         = args.get("seed")
+
+    if worker_seed is not None:
+        random.seed(worker_seed)
 
     reference = None
     if reference_path:
@@ -296,18 +326,23 @@ def _contig_worker(args: dict) -> ContigResult:
                         else:
                             _reservoir_add(result.insert_size_noise, tlen, 500_000)
 
-                # Store intergenic read position for the profiler
+                # Store intergenic read position for the profiler.
+                # Use read.reference_end (true rightmost genomic coordinate,
+                # inclusive of intron spans) rather than res.pos + res.read_length,
+                # and pick the strand-correct 3′ end — same reasoning as the
+                # EXONIC_SENSE block below.
                 if cat in (ReadCategory.INTERGENIC_SPARSE,
                            ReadCategory.INTERGENIC_REPEAT):
-                    import pysam as _pysam
+                    ref_end = read.reference_end or (res.pos + res.read_length)
+                    three_prime = res.pos if res.is_reverse else ref_end
                     result.intergenic_reads.append((
                         res.contig,
                         res.pos,
-                        res.pos + res.read_length,
+                        ref_end,
                         "-" if res.is_reverse else "+",
                         cb,
                         res.has_noncanonical_junction,
-                        res.pos + res.read_length,
+                        three_prime,
                     ))
 
                 # Store strand-correct 3′ and 5′ ends of exonic-sense reads.
@@ -376,6 +411,7 @@ def run_pipeline(
     store_umis: bool = True,
     reference_path: Optional[str] = None,
     contigs: Optional[list] = None,
+    seed: Optional[int] = None,
 ) -> SampleResult:
     """
     Run the full classification pipeline on *bam_path*.
@@ -413,6 +449,17 @@ def run_pipeline(
 
     logger.info("Processing %d contigs with %d threads …", len(contigs), threads)
 
+    # If a seed is provided, seed the parent process's RNG (used during merges)
+    # and derive deterministic per-worker seeds keyed on contig name so that
+    # parallel workers stay independent but reproducible.
+    if seed is not None:
+        random.seed(seed)
+
+    def _worker_seed(contig: str) -> Optional[int]:
+        if seed is None:
+            return None
+        return (seed + zlib.adler32(contig.encode("utf-8"))) & 0xFFFFFFFF
+
     # Build worker argument list
     worker_args = [
         {
@@ -427,6 +474,7 @@ def run_pipeline(
             "store_umis":          store_umis,
             "index":               index,
             "reference_path":      reference_path,
+            "seed":                _worker_seed(contig),
         }
         for contig in contigs
     ]
@@ -438,6 +486,7 @@ def run_pipeline(
             worker_args.append({
                 **worker_args[0],
                 "contig": mito,
+                "seed":   _worker_seed(mito),
             })
 
     # Run workers
@@ -621,11 +670,21 @@ def _select_contigs(meta: BamMetadata, min_length: int = 1_000_000) -> list:
 def _reservoir_add(reservoir: list, value, max_size: int) -> None:
     """
     Add *value* to *reservoir* using reservoir sampling (Algorithm R).
-    Keeps the list size ≤ max_size with uniform random sampling.
+    Keeps the reservoir size ≤ max_size with uniform random sampling.
+
+    For correct Algorithm R, the running count of items offered is required.
+    A `_Reservoir` carries that count; plain lists fall back to a slightly
+    biased length-based heuristic (kept for backwards compatibility).
     """
+    if isinstance(reservoir, _Reservoir):
+        reservoir.n_seen += 1
+        n = reservoir.n_seen
+    else:
+        n = len(reservoir) + 1
+
     if len(reservoir) < max_size:
         reservoir.append(value)
     else:
-        idx = random.randint(0, len(reservoir))
+        idx = random.randrange(n)
         if idx < max_size:
             reservoir[idx] = value
