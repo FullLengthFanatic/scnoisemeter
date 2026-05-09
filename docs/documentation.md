@@ -1,12 +1,12 @@
 # scNoiseMeter Documentation
 
-Version 0.4.0
+Version 0.4.2
 
 ---
 
 ## 1. Overview and Purpose
 
-scNoiseMeter quantifies technical noise in single-cell RNA-seq BAM files. It classifies every primary alignment into one of 19 mutually exclusive read categories and reports per-sample and per-cell noise fractions, strand concordance, chimeric read rates, and artifact flag counts.
+scNoiseMeter quantifies technical noise in single-cell RNA-seq BAM files. It classifies every primary alignment into one of 16 mutually exclusive output categories (plus three pre-classification filter states) and reports per-sample and per-cell noise fractions, strand concordance, chimeric read rates, and artifact flag counts.
 
 The tool is platform-agnostic: it processes ONT, PacBio/Kinnex, short-read (Illumina, ElemBio) BAMs from 10x Genomics or BD Rhapsody kits, and Smart-seq / FLASH-seq plates (96- and 384-well). The same classification logic is used throughout, with platform-specific adjustments where the underlying biology differs.
 

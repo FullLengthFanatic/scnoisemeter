@@ -534,3 +534,18 @@ class TestCase10UnalignedBAM:
         meta = _make_meta(reference_names=["chr1", "chr2", "chrX"])
         # Should not raise
         _validate_sq_lines(meta)
+
+
+class TestCLIVersion:
+    """`scnoisemeter --version` reports the package __version__."""
+
+    def test_version_flag_outputs_package_version(self):
+        from scnoisemeter import __version__
+        from scnoisemeter.cli import cli as cli_group
+
+        runner = CliRunner()
+        result = runner.invoke(cli_group, ["--version"])
+        assert result.exit_code == 0, f"--version exited {result.exit_code}: {result.output}"
+        assert __version__ in result.output, (
+            f"Expected version '{__version__}' in --version output, got: {result.output!r}"
+        )

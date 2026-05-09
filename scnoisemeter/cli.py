@@ -165,6 +165,11 @@ def _shared_options(func):
                      help="Use only cached annotation files; never make network calls. "
                           "Raises an error if the cache is empty. "
                           "Ignored when --gtf / --polya-sites are supplied explicitly."),
+        click.option("--seed",               default=None,   type=int,
+                     help="Integer seed for reservoir sampling (read-length, insert-size, "
+                          "intergenic, exonic-end position samples). When set, runs are "
+                          "byte-reproducible given identical inputs and thread count. "
+                          "Default: nondeterministic."),
         click.option("--verbose", "-v",      is_flag=True,   help="Enable debug logging."),
     ]
     for dec in reversed(decorators):
@@ -592,7 +597,7 @@ def run_cmd(
     chemistry, platform, pipeline_stage, chimeric_distance,
     repeats, reference, threads, no_umi_dedup, no_cache,
     exclude_biotypes, output_dir, obs_metadata, polya_sites, polya_db,
-    tss_sites, tss_db, numt_bed, offline, verbose,
+    tss_sites, tss_db, numt_bed, offline, seed, verbose,
 ):
     """
     Classify reads in a single BAM and produce QC metrics.
@@ -763,6 +768,7 @@ def run_cmd(
         threads=threads,
         store_umis=not no_umi_dedup,
         reference_path=reference,
+        seed=seed,
     )
 
     # Check that --cell-barcodes didn't filter out every read
@@ -927,7 +933,7 @@ def compare_cmd(
     chemistry, platform, pipeline_stage, chimeric_distance,
     repeats, reference, threads, no_umi_dedup, no_cache,
     exclude_biotypes, output_dir, obs_metadata, polya_sites, polya_db,
-    tss_sites, tss_db, numt_bed, offline, verbose,
+    tss_sites, tss_db, numt_bed, offline, seed, verbose,
 ):
     """
     Compare noise profiles between two BAMs (e.g. pre- vs post-filter).
@@ -985,6 +991,7 @@ def compare_cmd(
             threads=threads,
             store_umis=not no_umi_dedup,
             reference_path=reference,
+            seed=seed,
         )
         _bam_cs = _detect_chrom_style(meta.reference_names)
         result._polya_site_dict = _load_polya_sites(polya_paths, chrom_style=_bam_cs)
@@ -1060,10 +1067,12 @@ def compare_cmd(
               help="Use only cached annotation files; never make network calls. "
                    "Raises an error if the cache is empty. "
                    "Ignored when --gtf / --polya-sites are supplied explicitly.")
+@click.option("--seed",        default=None,   type=int,
+              help="Integer seed for reservoir sampling (reproducibility).")
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug logging.")
 def discover_cmd(
     bam_dir, reference, tss_sites, tss_db, threads, output_dir,
-    gtf, gtf_version, polya_sites, polya_db, run_all, offline, verbose,
+    gtf, gtf_version, polya_sites, polya_db, run_all, offline, seed, verbose,
 ):
     """
     Discover BAMs in a directory, infer their parameters, and run scNoiseMeter
@@ -1223,6 +1232,7 @@ def discover_cmd(
                 output_dir=bam_output_dir,
                 sample_name=stem,
                 verbose=verbose,
+                seed=seed,
             )
             results_summary.append((stem, bam_output_dir, "success", None))
             click.echo(f"  ✓ Completed: {bam_output_dir}")
@@ -1258,6 +1268,7 @@ def _run_single_bam_for_discover(
     output_dir: Path,
     sample_name: str,
     verbose: bool,
+    seed: Optional[int] = None,
 ) -> None:
     """Run the full scNoiseMeter pipeline on one BAM (used by discover_cmd)."""
     from scnoisemeter.modules.annotation import build_annotation_index
@@ -1290,6 +1301,7 @@ def _run_single_bam_for_discover(
         paired_end_chimeric=use_paired_chimeric,
         threads=threads,
         store_umis=True,
+        seed=seed,
         reference_path=reference,
     )
 
@@ -1462,6 +1474,7 @@ def _plate_well_task(task: dict) -> dict:
             threads=task["threads"],
             store_umis=task["store_umis"],
             reference_path=task["reference"],
+            seed=task.get("seed"),
         )
 
         well_result._polya_site_dict = _worker_state["polya"]
@@ -1603,7 +1616,7 @@ def run_plate_cmd(
     chemistry, platform, pipeline_stage, chimeric_distance,
     repeats, reference, threads, no_umi_dedup, no_cache,
     exclude_biotypes, output_dir, obs_metadata, polya_sites, polya_db,
-    tss_sites, tss_db, numt_bed, offline, verbose,
+    tss_sites, tss_db, numt_bed, offline, seed, verbose,
 ):
     """
     Classify reads from a plate of Smart-seq wells and produce per-plate metrics.
@@ -1808,6 +1821,7 @@ def run_plate_cmd(
                     "threads":          _threads_per_well,
                     "store_umis":       not no_umi_dedup,
                     "reference":        reference,
+                    "seed":             seed,
                 }
                 for well_id, bam_path in indexed_wells
             ]
@@ -1916,6 +1930,7 @@ def run_plate_cmd(
                         threads=threads,
                         store_umis=not no_umi_dedup,
                         reference_path=reference,
+                        seed=seed,
                     )
 
                     well_result._polya_site_dict = _shared_polya
