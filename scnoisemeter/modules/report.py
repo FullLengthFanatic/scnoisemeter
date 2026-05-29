@@ -370,6 +370,18 @@ def _metadata_table(sm: SampleMetrics) -> str:
         else:
             rows.append(("TSS / CAGE atlas", f"{tss_db_val} ({tss_source})"))
 
+    tso_info = getattr(sm, "_tso_info", None)
+    if tso_info:
+        tso_seqs   = tso_info.get("sequences", [])
+        tso_source = tso_info.get("source", "default")
+        tso_match  = tso_info.get("min_match")
+        seq_str = ", ".join(tso_seqs) if tso_seqs else "none"
+        polyg = " · poly-G off" if tso_info.get("check_polyg") is False else ""
+        rows.append((
+            "TSO sequences",
+            f"{seq_str} ({tso_source}, min match {tso_match} bp{polyg})",
+        ))
+
     inner = "".join(
         f"<tr><td><b>{k}</b></td><td>{v}</td></tr>" for k, v in rows
     )

@@ -156,6 +156,13 @@ class ReadClassifier:
         mate is unmapped (discordant).  Activate for --platform illumina*.
     tso_sequences : list[str]
         TSO sequences to check for in soft-clipped 5′ bases.
+    tso_min_match : int
+        Minimum prefix length (bp) of each TSO sequence required to match a
+        soft-clip.  Defaults to TSO_MIN_MATCH_LENGTH.
+    tso_check_polyg : bool
+        If True (default), a poly-G run (≥ TSO_POLYG_MIN_LENGTH G's) in a
+        soft-clip also flags TSO invasion.  Set False to require a TSO
+        sequence match only.
     reference : pysam.FastaFile | None
         Reference FASTA for polyA context check and splice-site dinucleotide
         lookup.  If None, those checks are skipped.
@@ -171,6 +178,8 @@ class ReadClassifier:
         chimeric_distance: int = DEFAULT_CHIMERIC_DISTANCE,
         paired_end_chimeric: bool = False,
         tso_sequences: Optional[list] = None,
+        tso_min_match: int = TSO_MIN_MATCH_LENGTH,
+        tso_check_polyg: bool = True,
         reference: Optional[pysam.FastaFile] = None,
     ):
         self.index = index
@@ -180,6 +189,8 @@ class ReadClassifier:
         self.chimeric_distance = chimeric_distance
         self.paired_end_chimeric = paired_end_chimeric
         self.tso_sequences = tso_sequences or [TSO_10X, TSO_PACBIO]
+        self.tso_min_match = tso_min_match
+        self.tso_check_polyg = tso_check_polyg
         self.reference = reference
 
         # Pre-build per-contig interval lookup tables for fast query
@@ -477,12 +488,12 @@ class ReadClassifier:
             clip_upper = clip.upper()
 
             # Poly-G check (TSO poly-G tail)
-            if "G" * TSO_POLYG_MIN_LENGTH in clip_upper:
+            if self.tso_check_polyg and "G" * TSO_POLYG_MIN_LENGTH in clip_upper:
                 return True
 
             # TSO sequence check
             for tso in self.tso_sequences:
-                tso_check = tso[:TSO_MIN_MATCH_LENGTH].upper()
+                tso_check = tso[:self.tso_min_match].upper()
                 if tso_check in clip_upper:
                     return True
 

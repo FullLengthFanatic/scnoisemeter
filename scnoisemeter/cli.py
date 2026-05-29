@@ -54,6 +54,9 @@ from scnoisemeter.constants import (
     Platform,
     PipelineStage,
     ReadCategory,
+    TSO_10X,
+    TSO_MIN_MATCH_LENGTH,
+    TSO_PACBIO,
 )
 from scnoisemeter.modules.annotation import build_annotation_index
 from scnoisemeter.modules.metrics import (
@@ -122,6 +125,19 @@ def _shared_options(func):
                      help="Processing stage of the BAM.  'auto' detects from BAM header."),
         click.option("--chimeric-distance",  default=DEFAULT_CHIMERIC_DISTANCE, show_default=True,
                      type=int, help="Max same-strand intra-chromosomal SA distance (bp) below which a split is NOT chimeric."),
+        click.option("--tso",                multiple=True,
+                     help="Template-switch oligo (TSO) sequence used to detect TSO invasion in "
+                          "soft-clipped bases. Repeat the flag to supply more than one sequence. "
+                          "When given, REPLACES the built-in 10x/PacBio defaults "
+                          "(AAGCAGTGGTATCAACGCAGAGTACATGGG / AAGCAGTGGTATCAACGCAGAGT). "
+                          "Use this to match a non-10x protocol's oligo."),
+        click.option("--tso-min-match",      default=TSO_MIN_MATCH_LENGTH, show_default=True, type=int,
+                     help="Minimum prefix length (bp) of a TSO sequence required to match a soft-clip. "
+                          "Lower it for short custom oligos; raise it for stricter matching."),
+        click.option("--no-polyg-tso",       is_flag=True,
+                     help="Disable the poly-G heuristic for TSO invasion (a soft-clip with ≥6 G's). "
+                          "Use this to count only true TSO-sequence matches, e.g. on data where "
+                          "G-rich genomic regions or sequencing artifacts inflate the poly-G signal."),
         click.option("--repeats",            default=None,   type=click.Path(exists=True), help="RepeatMasker BED for hg38 (optional)."),
         click.option("--reference",          default=None,   type=click.Path(exists=True), help="Reference FASTA (.fa/.fa.gz + .fai) for polyA and junction checks."),
         click.option("--threads",            default=DEFAULT_THREADS, show_default=True, type=int, help="Parallel worker processes."),
@@ -311,6 +327,52 @@ def _resolve_whitelist(
         return None
     path = fetch_10x_whitelist(whitelist_db.lower(), offline=offline)
     return _load_whitelist(str(path))
+
+
+def _resolve_tso(tso_arg, tso_min_match: int) -> Optional[list]:
+    """
+    Resolve and validate user-supplied TSO sequences.
+
+    Returns None when no --tso was given, so the pipeline keeps its built-in
+    10x/PacBio defaults.  Otherwise returns the cleaned, upper-cased list,
+    replacing the defaults.
+
+    Raises click.BadParameter for sequences containing non-DNA characters.
+    Warns (but does not fail) for sequences shorter than *tso_min_match*, which
+    would never match after prefix truncation.
+    """
+    if not tso_arg:
+        return None
+    cleaned = []
+    for seq in tso_arg:
+        up = seq.strip().upper()
+        if not up:
+            continue
+        if set(up) - set("ACGTN"):
+            raise click.BadParameter(
+                f"TSO sequence '{seq}' contains non-DNA characters "
+                f"(only A, C, G, T, N allowed).",
+                param_hint="--tso",
+            )
+        if len(up) < tso_min_match:
+            logger.warning(
+                "TSO sequence '%s' (%d bp) is shorter than --tso-min-match (%d bp); "
+                "the full %d bp sequence will be used as the match requirement.",
+                up, len(up), tso_min_match, len(up),
+            )
+        cleaned.append(up)
+    return cleaned or None
+
+
+def _make_tso_info(tso_seqs: Optional[list], tso_min_match: int, check_polyg: bool = True) -> dict:
+    """Provenance dict for the report metadata table (which TSO(s) were used)."""
+    seqs = list(tso_seqs) if tso_seqs else [TSO_10X, TSO_PACBIO]
+    return {
+        "sequences": seqs,
+        "min_match": tso_min_match,
+        "source": "user-supplied" if tso_seqs else "default",
+        "check_polyg": check_polyg,
+    }
 
 
 def _check_version_consistency(gtf_version: Optional[int], polya_version: Optional[int]) -> Optional[str]:
@@ -594,7 +656,7 @@ def _apply_intergenic_reclassification(result, intergenic_records, record_catego
 def run_cmd(
     bam, sample_name, cell_barcodes,
     gtf, gtf_version, barcode_whitelist, whitelist_db, barcode_tag, umi_tag,
-    chemistry, platform, pipeline_stage, chimeric_distance,
+    chemistry, platform, pipeline_stage, chimeric_distance, tso, tso_min_match, no_polyg_tso,
     repeats, reference, threads, no_umi_dedup, no_cache,
     exclude_biotypes, output_dir, obs_metadata, polya_sites, polya_db,
     tss_sites, tss_db, numt_bed, offline, seed, verbose,
@@ -758,6 +820,8 @@ def run_cmd(
     if use_paired_chimeric:
         logger.info("Illumina platform detected — enabling paired-end chimeric detection.")
 
+    tso_seqs = _resolve_tso(tso, tso_min_match)
+
     # Run pipeline
     result = run_pipeline(
         bam_path, index, meta,
@@ -765,6 +829,9 @@ def run_cmd(
         cell_barcodes=cell_barcode_set,
         chimeric_distance=chimeric_distance,
         paired_end_chimeric=use_paired_chimeric,
+        tso_sequences=tso_seqs,
+        tso_min_match=tso_min_match,
+        tso_check_polyg=not no_polyg_tso,
         threads=threads,
         store_umis=not no_umi_dedup,
         reference_path=reference,
@@ -878,6 +945,7 @@ def run_cmd(
         "source": "user-supplied" if tss_sites else "auto-downloaded",
         "path": tss_paths[0] if tss_paths else None,
     } if tss_paths else None
+    sm._tso_info = _make_tso_info(tso_seqs, tso_min_match, check_polyg=not no_polyg_tso)
     if version_warning:
         sm.warnings.append(version_warning)
 
@@ -926,11 +994,16 @@ def run_cmd(
 @click.option("--bam-b",        required=True, type=click.Path(exists=True), help="BAM B (e.g. post-filter).")
 @click.option("--label-a",      default="sample_A", show_default=True, help="Label for BAM A in reports.")
 @click.option("--label-b",      default="sample_B", show_default=True, help="Label for BAM B in reports.")
+@click.option("--tso-a",        multiple=True,
+              help="TSO sequence(s) for BAM A (repeatable). Overrides the shared --tso for side A. "
+                   "Use when the two methods being compared used different TSOs.")
+@click.option("--tso-b",        multiple=True,
+              help="TSO sequence(s) for BAM B (repeatable). Overrides the shared --tso for side B.")
 @_shared_options
 def compare_cmd(
-    bam_a, bam_b, label_a, label_b,
+    bam_a, bam_b, label_a, label_b, tso_a, tso_b,
     gtf, gtf_version, barcode_whitelist, whitelist_db, barcode_tag, umi_tag,
-    chemistry, platform, pipeline_stage, chimeric_distance,
+    chemistry, platform, pipeline_stage, chimeric_distance, tso, tso_min_match, no_polyg_tso,
     repeats, reference, threads, no_umi_dedup, no_cache,
     exclude_biotypes, output_dir, obs_metadata, polya_sites, polya_db,
     tss_sites, tss_db, numt_bed, offline, seed, verbose,
@@ -980,14 +1053,21 @@ def compare_cmd(
     )
 
     results = {}
-    for bam_path, label in [(bam_a, label_a), (bam_b, label_b)]:
+    for bam_path, label, tso_side in [
+        (bam_a, label_a, tso_a or tso),
+        (bam_b, label_b, tso_b or tso),
+    ]:
         click.echo(f"\nProcessing {label} ({bam_path}) …")
+        tso_seqs = _resolve_tso(tso_side, tso_min_match)
         meta = inspect_bam(Path(bam_path), barcode_tag=barcode_tag, umi_tag=umi_tag,
                            platform=plat, pipeline_stage=stage)
         result = run_pipeline(
             bam_path, index, meta,
             whitelist=whitelist,
             chimeric_distance=chimeric_distance,
+            tso_sequences=tso_seqs,
+            tso_min_match=tso_min_match,
+            tso_check_polyg=not no_polyg_tso,
             threads=threads,
             store_umis=not no_umi_dedup,
             reference_path=reference,
@@ -1013,6 +1093,7 @@ def compare_cmd(
             "source": "user-supplied" if tss_sites else "auto-downloaded",
             "path": tss_paths[0] if tss_paths else None,
         } if tss_paths else None
+        sm._tso_info = _make_tso_info(tso_seqs, tso_min_match, check_polyg=not no_polyg_tso)
         if version_warning:
             sm.warnings.append(version_warning)
         results[label] = (sm, ct, result)
@@ -1060,6 +1141,13 @@ def compare_cmd(
               type=click.Choice(["fantom5", "none"], case_sensitive=False),
               help="TSS database to auto-download when --tss-sites is not supplied. "
                    "fantom5 / none (disable TSS metric).")
+@click.option("--tso",         multiple=True,
+              help="Template-switch oligo (TSO) sequence for TSO-invasion detection (repeatable). "
+                   "Replaces the built-in 10x/PacBio defaults; applied to every discovered BAM.")
+@click.option("--tso-min-match", default=TSO_MIN_MATCH_LENGTH, show_default=True, type=int,
+              help="Minimum prefix length (bp) of a TSO sequence required to match a soft-clip.")
+@click.option("--no-polyg-tso", is_flag=True,
+              help="Disable the poly-G heuristic for TSO invasion (count only TSO-sequence matches).")
 @click.option("--run-all",     is_flag=True,
               help="Non-interactive: auto-run all BAMs that can be fully inferred. "
                    "BAMs with blocking issues are skipped with a warning.")
@@ -1072,7 +1160,8 @@ def compare_cmd(
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug logging.")
 def discover_cmd(
     bam_dir, reference, tss_sites, tss_db, threads, output_dir,
-    gtf, gtf_version, polya_sites, polya_db, run_all, offline, seed, verbose,
+    gtf, gtf_version, polya_sites, polya_db, tso, tso_min_match, no_polyg_tso,
+    run_all, offline, seed, verbose,
 ):
     """
     Discover BAMs in a directory, infer their parameters, and run scNoiseMeter
@@ -1105,6 +1194,7 @@ def discover_cmd(
         offline=offline,
     )
     tss_paths = _resolve_tss_sites(tss_sites, tss_db=tss_db, offline=offline)
+    tso_seqs = _resolve_tso(tso, tso_min_match)
     version_warning = _check_version_consistency(gtf_version, polya_version)
 
     # ------------------------------------------------------------------ #
@@ -1233,6 +1323,9 @@ def discover_cmd(
                 sample_name=stem,
                 verbose=verbose,
                 seed=seed,
+                tso_seqs=tso_seqs,
+                tso_min_match=tso_min_match,
+                no_polyg_tso=no_polyg_tso,
             )
             results_summary.append((stem, bam_output_dir, "success", None))
             click.echo(f"  ✓ Completed: {bam_output_dir}")
@@ -1269,6 +1362,9 @@ def _run_single_bam_for_discover(
     sample_name: str,
     verbose: bool,
     seed: Optional[int] = None,
+    tso_seqs: Optional[list] = None,
+    tso_min_match: int = TSO_MIN_MATCH_LENGTH,
+    no_polyg_tso: bool = False,
 ) -> None:
     """Run the full scNoiseMeter pipeline on one BAM (used by discover_cmd)."""
     from scnoisemeter.modules.annotation import build_annotation_index
@@ -1299,6 +1395,9 @@ def _run_single_bam_for_discover(
         whitelist=None,
         chimeric_distance=DEFAULT_CHIMERIC_DISTANCE,
         paired_end_chimeric=use_paired_chimeric,
+        tso_sequences=tso_seqs,
+        tso_min_match=tso_min_match,
+        tso_check_polyg=not no_polyg_tso,
         threads=threads,
         store_umis=True,
         seed=seed,
@@ -1356,6 +1455,7 @@ def _run_single_bam_for_discover(
         "source": "auto-downloaded",
         "path": tss_paths[0] if tss_paths else None,
     } if tss_paths else None
+    sm._tso_info = _make_tso_info(tso_seqs, tso_min_match, check_polyg=not no_polyg_tso)
     if version_warning:
         sm.warnings.append(version_warning)
 
@@ -1471,6 +1571,9 @@ def _plate_well_task(task: dict) -> dict:
             whitelist=task["whitelist"],
             chimeric_distance=task["chimeric_distance"],
             paired_end_chimeric=_is_illumina_platform(meta.platform),
+            tso_sequences=task.get("tso_sequences"),
+            tso_min_match=task.get("tso_min_match", TSO_MIN_MATCH_LENGTH),
+            tso_check_polyg=task.get("tso_check_polyg", True),
             threads=task["threads"],
             store_umis=task["store_umis"],
             reference_path=task["reference"],
@@ -1613,7 +1716,7 @@ def _discover_plate_wells(plate_dir: Path) -> dict:
 def run_plate_cmd(
     plate_dir, sample_sheet, sequencer, sample_name, plate_ids, parallel_wells,
     gtf, gtf_version, barcode_whitelist, whitelist_db, barcode_tag, umi_tag,
-    chemistry, platform, pipeline_stage, chimeric_distance,
+    chemistry, platform, pipeline_stage, chimeric_distance, tso, tso_min_match, no_polyg_tso,
     repeats, reference, threads, no_umi_dedup, no_cache,
     exclude_biotypes, output_dir, obs_metadata, polya_sites, polya_db,
     tss_sites, tss_db, numt_bed, offline, seed, verbose,
@@ -1747,6 +1850,7 @@ def run_plate_cmd(
     )
     version_warning = _check_version_consistency(gtf_version, polya_version)
     tss_paths = _resolve_tss_sites(tss_sites, tss_db=tss_db, offline=offline)
+    tso_seqs = _resolve_tso(tso, tso_min_match)
 
     # Build annotation index ONCE for all wells
     index = build_annotation_index(
@@ -1818,6 +1922,9 @@ def run_plate_cmd(
                     "stage_override":   stage,
                     "whitelist":        whitelist,
                     "chimeric_distance": chimeric_distance,
+                    "tso_sequences":    tso_seqs,
+                    "tso_min_match":    tso_min_match,
+                    "tso_check_polyg":  not no_polyg_tso,
                     "threads":          _threads_per_well,
                     "store_umis":       not no_umi_dedup,
                     "reference":        reference,
@@ -1927,6 +2034,9 @@ def run_plate_cmd(
                         whitelist=whitelist,
                         chimeric_distance=chimeric_distance,
                         paired_end_chimeric=_is_illumina_platform(meta.platform),
+                        tso_sequences=tso_seqs,
+                        tso_min_match=tso_min_match,
+                        tso_check_polyg=not no_polyg_tso,
                         threads=threads,
                         store_umis=not no_umi_dedup,
                         reference_path=reference,
@@ -2040,6 +2150,7 @@ def run_plate_cmd(
             "db": tss_db, "source": "auto-downloaded",
             "path": tss_paths[0] if tss_paths else None,
         } if tss_paths else None
+        plate_sm._tso_info = _make_tso_info(tso_seqs, tso_min_match, check_polyg=not no_polyg_tso)
         plate_sm._cell_barcodes_info = None
         if version_warning:
             plate_sm.warnings.append(version_warning)

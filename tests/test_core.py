@@ -152,10 +152,15 @@ class TestJunctionPositions:
 # ---------------------------------------------------------------------------
 
 class TestTSODetection:
-    def _make_classifier(self):
+    def _make_classifier(self, tso_sequences=None, tso_min_match=None):
         index = MagicMock()
         index.splice_sites = {}
-        return ReadClassifier(index, reference=None)
+        kwargs = {"reference": None}
+        if tso_sequences is not None:
+            kwargs["tso_sequences"] = tso_sequences
+        if tso_min_match is not None:
+            kwargs["tso_min_match"] = tso_min_match
+        return ReadClassifier(index, **kwargs)
 
     def _make_read(self, seq: str, cigar_tuples):
         read = MagicMock()
@@ -179,6 +184,22 @@ class TestTSODetection:
         read = self._make_read(seq, [(4, 10), (0, 100)])
         assert clf._check_tso_invasion(read) is True
 
+    def test_polyg_ignored_when_disabled(self):
+        clf = ReadClassifier(self._make_classifier().index, reference=None,
+                             tso_check_polyg=False)
+        clip = "G" * 10  # poly-G tail only, no TSO sequence
+        seq = clip + "A" * 100
+        read = self._make_read(seq, [(4, 10), (0, 100)])
+        assert clf._check_tso_invasion(read) is False
+
+    def test_tso_sequence_still_detected_with_polyg_disabled(self):
+        clf = ReadClassifier(self._make_classifier().index, reference=None,
+                             tso_check_polyg=False)
+        clip = TSO_10X[:20]
+        seq = clip + "A" * 100
+        read = self._make_read(seq, [(4, 20), (0, 100)])
+        assert clf._check_tso_invasion(read) is True
+
     def test_no_tso_not_detected(self):
         clf = self._make_classifier()
         seq = "ATCGATCG" * 15
@@ -190,6 +211,85 @@ class TestTSODetection:
         seq = "A" * 100
         read = self._make_read(seq, [(0, 100)])
         assert clf._check_tso_invasion(read) is False
+
+    # --- custom TSO sequences -------------------------------------------- #
+
+    CUSTOM_TSO = "CTGTCTCTTATACACATCTG"  # 20 bp, distinct from 10x/PacBio
+
+    def test_custom_tso_detected(self):
+        clf = self._make_classifier(tso_sequences=[self.CUSTOM_TSO], tso_min_match=12)
+        seq = self.CUSTOM_TSO + "A" * 100
+        read = self._make_read(seq, [(4, len(self.CUSTOM_TSO)), (0, 100)])
+        assert clf._check_tso_invasion(read) is True
+
+    def test_custom_tso_replaces_builtin_defaults(self):
+        # With a custom sequence set, a read carrying only the 10x TSO prefix
+        # (and no poly-G) must NOT be detected — defaults are replaced.
+        clf = self._make_classifier(tso_sequences=[self.CUSTOM_TSO], tso_min_match=12)
+        clip = TSO_10X[:20]
+        assert "G" * 6 not in clip  # guard: no poly-G shortcut
+        seq = clip + "A" * 100
+        read = self._make_read(seq, [(4, 20), (0, 100)])
+        assert clf._check_tso_invasion(read) is False
+
+    def test_tso_min_match_controls_required_length(self):
+        # Soft-clip contains only the first 10 bp of the custom TSO, then diverges.
+        clip = self.CUSTOM_TSO[:10] + "ACACTGACAC"
+        assert self.CUSTOM_TSO not in clip
+        seq = clip + "A" * 100
+        read = self._make_read(seq, [(4, len(clip)), (0, 100)])
+
+        # min_match 10 → only first 10 bp required → matches
+        clf_lo = self._make_classifier(tso_sequences=[self.CUSTOM_TSO], tso_min_match=10)
+        assert clf_lo._check_tso_invasion(read) is True
+
+        # min_match 20 → full sequence required → no match
+        clf_hi = self._make_classifier(tso_sequences=[self.CUSTOM_TSO], tso_min_match=20)
+        assert clf_hi._check_tso_invasion(read) is False
+
+
+class TestResolveTSO:
+    """Validation/normalisation of the --tso CLI option."""
+
+    def test_empty_returns_none(self):
+        from scnoisemeter.cli import _resolve_tso
+        assert _resolve_tso((), 12) is None
+
+    def test_uppercases_and_strips(self):
+        from scnoisemeter.cli import _resolve_tso
+        assert _resolve_tso((" aagcagtg ",), 4) == ["AAGCAGTG"]
+
+    def test_multiple_sequences(self):
+        from scnoisemeter.cli import _resolve_tso
+        assert _resolve_tso(("ACGT", "tgca"), 4) == ["ACGT", "TGCA"]
+
+    def test_rejects_non_dna(self):
+        import click
+        from scnoisemeter.cli import _resolve_tso
+        with pytest.raises(click.BadParameter):
+            _resolve_tso(("ACGTX",), 12)
+
+    def test_short_sequence_warns_but_kept(self, caplog):
+        from scnoisemeter.cli import _resolve_tso
+        with caplog.at_level("WARNING"):
+            result = _resolve_tso(("ACGTAC",), 12)
+        assert result == ["ACGTAC"]
+        assert any("shorter than" in r.message for r in caplog.records)
+
+    def test_make_tso_info_default(self):
+        from scnoisemeter.cli import _make_tso_info
+        from scnoisemeter.constants import TSO_10X as _10x, TSO_PACBIO as _pb
+        info = _make_tso_info(None, 12)
+        assert info["source"] == "default"
+        assert info["sequences"] == [_10x, _pb]
+        assert info["min_match"] == 12
+
+    def test_make_tso_info_user(self):
+        from scnoisemeter.cli import _make_tso_info
+        info = _make_tso_info(["ACGTACGTACGT"], 9)
+        assert info["source"] == "user-supplied"
+        assert info["sequences"] == ["ACGTACGTACGT"]
+        assert info["min_match"] == 9
 
 
 # ---------------------------------------------------------------------------

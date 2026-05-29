@@ -8,7 +8,7 @@ scNoiseMeter measures technical noise in single-cell RNA-seq from a coordinate-s
 
 Same logic runs on ONT, PacBio/Kinnex, short-read (Illumina, ElemBio) BAMs from 10x Genomics or BD Rhapsody kits, and Smart-seq / FLASH-seq plates (96- and 384-well), with platform-specific adjustments where the underlying biology differs.
 
-Current version: **0.4.3**.
+Current version: **0.5.0**.
 
 ---
 
@@ -222,6 +222,9 @@ Short-read BAMs from either Illumina or ElemBio (AVITI) sequencers are handled i
 | `--pipeline-stage` | auto | `raw`, `pre_filter`, `post_filter`, `custom` |
 | `--threads` | 4 | One worker process per chromosome within a single BAM |
 | `--chimeric-distance` | 10000 | SA-tag intra-chromosomal distance threshold (bp) |
+| `--tso` | 10x + PacBio | Custom TSO sequence for TSO-invasion detection (repeatable); replaces the built-in defaults. `compare` also accepts `--tso-a` / `--tso-b` for per-side overrides |
+| `--tso-min-match` | 12 | Minimum TSO prefix length (bp) required to match a soft-clip |
+| `--no-polyg-tso` | off | Disable the poly-G heuristic for TSO invasion; count only TSO-sequence matches |
 | `--no-umi-dedup` | off | Skip UMI tracking; reduces memory for large datasets |
 | `--offline` | off | Use only cached files; no network calls |
 | `--no-cache` | off | Skip reading and writing the annotation index cache |
