@@ -1,6 +1,6 @@
 # scNoiseMeter Documentation
 
-Version 0.4.3
+Version 0.5.0
 
 ---
 
@@ -143,12 +143,36 @@ Three artifact flags are computed per read and counted at the sample and per-cel
 
 Detects reads where soft-clipped bases at the 5′ end match a template-switching oligonucleotide (TSO) sequence. Detection requires at least 12 bp of match.
 
-TSO sequences checked:
+TSO sequences checked (defaults):
 
 - 10x Genomics v3/v4: `AAGCAGTGGTATCAACGCAGAGTACATGGG`
 - PacBio Kinnex / IsoSeq: `AAGCAGTGGTATCAACGCAGAGT`
 
 A poly-G tail of ≥ 6 bp at the 5′ soft-clip is also flagged as TSO-proximal.
+
+#### Custom TSO sequences
+
+TSO is a property of the library protocol, so you can tell scNoiseMeter exactly which oligo your sample used:
+
+- `--tso SEQ` supplies a custom TSO. Repeat the flag for more than one sequence. When given, it **replaces** the built-in 10x/PacBio defaults (it does not add to them), so detection reflects your protocol rather than mixing in oligos you did not use. Available in `run`, `discover`, and `run-plate`.
+- `--tso-min-match N` controls how many bases of the TSO must match. Detection looks for the first `N` bases of each TSO in the soft-clip, so a larger `N` is stricter and a smaller `N` is more permissive (default 12). If a TSO is shorter than `N`, the full sequence is used as the match requirement (a warning notes this). Sequences are validated to contain only `A`, `C`, `G`, `T`, `N`.
+- `--no-polyg-tso` disables the poly-G heuristic, leaving only TSO-sequence matches. The poly-G check (≥ 6 G's in a soft-clip) is independent of `--tso` and is on by default. Disable it when G-rich genomic regions or sequencing artifacts inflate the poly-G signal, or to count true TSO-sequence invasion in isolation. On adapter-trimmed pipelines (e.g. PacBio Kinnex after `lima`/`skera`) the TSO sequence has already been removed from soft-clips, so the metric is poly-G-only; run on pre-trim BAMs to capture the sequence signal.
+- In `compare`, `--tso-a` and `--tso-b` override the TSO per side, so two methods that used two different TSOs each get the correct sequence. A shared `--tso` acts as the default for both sides.
+
+The TSO sequence(s) and the min-match used are recorded in the HTML report metadata table.
+
+Example:
+
+```bash
+scnoisemeter run --bam sample.bam --gtf gencode.gtf \
+  --tso AAGCAGTGGTATCAACGCAGAGTACATGGG --tso-min-match 12 \
+  --output-dir out/
+
+scnoisemeter compare --bam-a methodA.bam --bam-b methodB.bam --gtf gencode.gtf \
+  --tso-a AAGCAGTGGTATCAACGCAGAGTACATGGG \
+  --tso-b GCAGTGGTATCAACGCAGAGTACTCTGCGTTGATACCAC \
+  --output-dir cmp/
+```
 
 ### Internal polyA priming (`n_polya_priming`)
 

@@ -97,6 +97,7 @@ from scnoisemeter.constants import (
     LENGTH_BIN_BREAKS,
     MITO_CONTIG_NAMES,
     ReadCategory,
+    TSO_MIN_MATCH_LENGTH,
 )
 from scnoisemeter.modules.annotation import AnnotationIndex
 from scnoisemeter.modules.classifier import ReadClassifier
@@ -240,6 +241,9 @@ def _contig_worker(args: dict) -> ContigResult:
     reference_path      = args.get("reference_path")
     cell_barcodes       = args.get("cell_barcodes")  # set or None
     worker_seed         = args.get("seed")
+    tso_sequences       = args.get("tso_sequences")
+    tso_min_match       = args.get("tso_min_match", TSO_MIN_MATCH_LENGTH)
+    tso_check_polyg     = args.get("tso_check_polyg", True)
 
     if worker_seed is not None:
         random.seed(worker_seed)
@@ -258,6 +262,9 @@ def _contig_worker(args: dict) -> ContigResult:
         whitelist=whitelist,
         chimeric_distance=chimeric_dist,
         paired_end_chimeric=paired_end_chimeric,
+        tso_sequences=tso_sequences,
+        tso_min_match=tso_min_match,
+        tso_check_polyg=tso_check_polyg,
         reference=reference,
     )
 
@@ -412,6 +419,9 @@ def run_pipeline(
     reference_path: Optional[str] = None,
     contigs: Optional[list] = None,
     seed: Optional[int] = None,
+    tso_sequences: Optional[list] = None,
+    tso_min_match: int = TSO_MIN_MATCH_LENGTH,
+    tso_check_polyg: bool = True,
 ) -> SampleResult:
     """
     Run the full classification pipeline on *bam_path*.
@@ -475,6 +485,9 @@ def run_pipeline(
             "index":               index,
             "reference_path":      reference_path,
             "seed":                _worker_seed(contig),
+            "tso_sequences":       tso_sequences,
+            "tso_min_match":       tso_min_match,
+            "tso_check_polyg":     tso_check_polyg,
         }
         for contig in contigs
     ]
