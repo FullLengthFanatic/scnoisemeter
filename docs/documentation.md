@@ -1,6 +1,6 @@
 # scNoiseMeter Documentation
 
-Version 0.5.0
+Version 0.6.0
 
 ---
 
@@ -18,6 +18,15 @@ Four subcommands are provided:
 - `discover` — scan a directory for BAM files, infer their parameters, and run `scnoisemeter run` on selected files
 
 The tool requires a coordinate-sorted, indexed BAM file aligned to human GRCh38/hg38, and a GENCODE GTF annotation. Both the GTF and a PolyASite 3.0 atlas are downloaded automatically on first use if not supplied explicitly.
+
+### What's new in 0.6
+
+- **User-configurable TSO** (`--tso`, `--tso-min-match`, `--no-polyg-tso`, and per-side `--tso-a`/`--tso-b` in `compare`), added in 0.5: supply the template-switch oligo your library actually used instead of the built-in 10x/PacBio defaults.
+- **Reverse-complement TSO matching (default-on).** TSO invasion now matches both the forward TSO and its reverse complement, so reads whose TSO end maps antisense are no longer missed. Changes existing `n_tso_invasion` counts (they can only increase).
+- **Strand-aware internal-priming (default-on).** `n_polya_priming` and the intergenic-locus polyA-context check now look upstream for a T-run on minus-strand reads/loci, not only downstream for an A-run on the plus strand. Previously minus-strand internal priming was under-counted.
+- **TSO concatemer metric** (`n_tso_concatemer`): reads containing more than one occurrence of the TSO or its reverse complement, per Chou et al. (bioRxiv 2025.10.06.680646). Surfaced in `read_metrics.tsv`, the MultiQC JSON (`tso_concatemer_frac`), and the report's artifact panel.
+
+Because the reverse-complement and strand-aware changes shift metric values for existing 10x/PacBio data, this is a minor version bump (0.6.0), not a patch.
 
 ### What's new in 0.4
 
@@ -141,14 +150,14 @@ Three artifact flags are computed per read and counted at the sample and per-cel
 
 ### TSO invasion (`n_tso_invasion`)
 
-Detects reads where soft-clipped bases at the 5′ end match a template-switching oligonucleotide (TSO) sequence. Detection requires at least 12 bp of match.
+Detects reads whose soft-clipped bases (at either the 5′ or 3′ end) match a template-switching oligonucleotide (TSO) sequence. Detection requires at least 12 bp of match, and checks **both orientations**: the forward TSO and its reverse complement. This catches reads whose TSO end maps antisense, whose clip carries the reverse-complemented TSO.
 
 TSO sequences checked (defaults):
 
 - 10x Genomics v3/v4: `AAGCAGTGGTATCAACGCAGAGTACATGGG`
 - PacBio Kinnex / IsoSeq: `AAGCAGTGGTATCAACGCAGAGT`
 
-A poly-G tail of ≥ 6 bp at the 5′ soft-clip is also flagged as TSO-proximal.
+A poly-G tail of ≥ 6 bp in a soft-clip is also flagged as TSO-proximal (see `--no-polyg-tso` to disable for non-G-tailed chemistries).
 
 #### Custom TSO sequences
 
@@ -158,6 +167,8 @@ TSO is a property of the library protocol, so you can tell scNoiseMeter exactly 
 - `--tso-min-match N` controls how many bases of the TSO must match. Detection looks for the first `N` bases of each TSO in the soft-clip, so a larger `N` is stricter and a smaller `N` is more permissive (default 12). If a TSO is shorter than `N`, the full sequence is used as the match requirement (a warning notes this). Sequences are validated to contain only `A`, `C`, `G`, `T`, `N`.
 - `--no-polyg-tso` disables the poly-G heuristic, leaving only TSO-sequence matches. The poly-G check (≥ 6 G's in a soft-clip) is independent of `--tso` and is on by default. Disable it when G-rich genomic regions or sequencing artifacts inflate the poly-G signal, or to count true TSO-sequence invasion in isolation. On adapter-trimmed pipelines (e.g. PacBio Kinnex after `lima`/`skera`) the TSO sequence has already been removed from soft-clips, so the metric is poly-G-only; run on pre-trim BAMs to capture the sequence signal.
 - In `compare`, `--tso-a` and `--tso-b` override the TSO per side, so two methods that used two different TSOs each get the correct sequence. A shared `--tso` acts as the default for both sides.
+
+Both the forward TSO and its reverse complement are matched automatically, so you do **not** need to pass the reverse complement as a second `--tso`. This matters for chemistries whose TSO is not self-complementary (e.g. the poly-T-tailed TSO used by UltraMarathonRT, where reads can map either sense).
 
 The TSO sequence(s) and the min-match used are recorded in the HTML report metadata table.
 
@@ -176,10 +187,24 @@ scnoisemeter compare --bam-a methodA.bam --bam-b methodB.bam --gtf gencode.gtf \
 
 ### Internal polyA priming (`n_polya_priming`)
 
-Detects reads whose 3′ end is immediately followed by an A-run in the reference genome, indicating the read likely originated from internal priming on an A-rich region rather than the true polyA tail. Detection parameters:
+Detects reads whose transcript 3′ end abuts an A-run in the reference genome, indicating the read likely originated from internal priming on an A-rich region rather than the true polyA tail. The check is **strand-aware**:
 
-- Context window inspected: 20 bp downstream of the read 3′ end
-- Minimum A-run length: 6 consecutive A bases within the window
+- Forward reads: look 20 bp **downstream** (higher coordinate) of `reference_end` for an A-run on the + strand.
+- Reverse reads: look 20 bp **upstream** (lower coordinate) of `reference_start` for a T-run on the + strand (which is an A-run in the transcript's orientation).
+- Minimum run length: 6 consecutive bases within the window.
+
+(Earlier versions checked only the + strand downstream, which under-counted minus-strand internal priming. The same strand-aware logic applies to the intergenic-locus polyA-context check that feeds `intergenic_hotspot` / `intergenic_novel`.)
+
+Requires a reference FASTA (`--reference`); without one this flag is not computed.
+
+### TSO concatemer (`n_tso_concatemer`)
+
+Counts reads containing **more than one occurrence** of a TSO sequence or its reverse complement, anywhere in the read (soft-clipped or aligned bases). These arise when template switching runs from one TSO onto another, producing TSO-TSO concatemers that should not carry biological signal. The definition follows Chou et al. (bioRxiv 2025.10.06.680646): concatemer reads ÷ total reads.
+
+- Uses the full configured `--tso` sequence(s) and their reverse complements (not the 12 bp prefix used for invasion).
+- Counting is non-overlapping and longest-first, so a shorter TSO that is a substring of a longer one (e.g. the PacBio TSO within the 10x TSO) is not double-counted at a single locus.
+- Like TSO invasion, this requires the TSO to still be present in the read, so run on **untrimmed** BAMs.
+- Surfaced as `n_tso_concatemer` in `read_metrics.tsv`, as `tso_concatemer_frac` in the MultiQC JSON, and as a bar in the report's artifact-flag panel.
 
 ### Non-canonical junction (`n_noncanon_junction`)
 

@@ -37,6 +37,7 @@ from scnoisemeter.modules.classifier import (
     _bases_in,
     _get_jxn_positions,
     _overlaps_any,
+    _revcomp,
 )
 from scnoisemeter.modules.metrics import compute_length_stratification, compute_metrics, CellTable
 from scnoisemeter.modules.pipeline import _get_length_bin
@@ -232,6 +233,15 @@ class TestTSODetection:
         read = self._make_read(seq, [(4, 20), (0, 100)])
         assert clf._check_tso_invasion(read) is False
 
+    def test_revcomp_tso_detected_by_default(self):
+        # An antisense read carries the reverse complement of the TSO in its
+        # clip; this is now matched automatically (no need to pass revcomp).
+        clf = self._make_classifier(tso_sequences=[self.CUSTOM_TSO], tso_min_match=12)
+        rc = _revcomp(self.CUSTOM_TSO)
+        seq = rc + "A" * 100
+        read = self._make_read(seq, [(4, len(rc)), (0, 100)])
+        assert clf._check_tso_invasion(read) is True
+
     def test_tso_min_match_controls_required_length(self):
         # Soft-clip contains only the first 10 bp of the custom TSO, then diverges.
         clip = self.CUSTOM_TSO[:10] + "ACACTGACAC"
@@ -246,6 +256,80 @@ class TestTSODetection:
         # min_match 20 → full sequence required → no match
         clf_hi = self._make_classifier(tso_sequences=[self.CUSTOM_TSO], tso_min_match=20)
         assert clf_hi._check_tso_invasion(read) is False
+
+
+class TestTSOConcatemer:
+    """Concatemer = >1 occurrence of the TSO (or its reverse complement)."""
+    TSO = "CCCTCTCTCTCTCTTTCCTCTCTCTTTT"  # uMRT
+
+    def _clf(self, seqs=None):
+        index = MagicMock(); index.splice_sites = {}
+        kw = {"reference": None}
+        if seqs is not None:
+            kw["tso_sequences"] = seqs
+        return ReadClassifier(index, **kw)
+
+    def _read(self, seq):
+        r = MagicMock(); r.query_sequence = seq; return r
+
+    def test_two_copies_flagged(self):
+        clf = self._clf(seqs=[self.TSO])
+        assert clf._check_tso_concatemer(self._read(self.TSO + "ACGT" * 20 + self.TSO)) is True
+
+    def test_one_copy_not_flagged(self):
+        clf = self._clf(seqs=[self.TSO])
+        assert clf._check_tso_concatemer(self._read(self.TSO + "ACGT" * 20)) is False
+
+    def test_forward_plus_revcomp_flagged(self):
+        clf = self._clf(seqs=[self.TSO])
+        seq = self.TSO + "ACGT" * 20 + _revcomp(self.TSO)
+        assert clf._check_tso_concatemer(self._read(seq)) is True
+
+    def test_default_single_10x_not_double_counted(self):
+        # PacBio TSO is a substring of the 10x TSO; a single 10x occurrence
+        # must count once (non-overlapping longest-first), not as a concatemer.
+        clf = self._clf(seqs=None)
+        assert clf._check_tso_concatemer(self._read(TSO_10X + "ACGT" * 20)) is False
+
+    def test_empty_sequence(self):
+        clf = self._clf(seqs=[self.TSO])
+        assert clf._check_tso_concatemer(self._read(None)) is False
+
+
+class TestPolyAPrimingStrand:
+    """Strand-aware internal-priming: forward looks downstream for A-run,
+    reverse looks upstream for T-run."""
+
+    class _FakeRef:
+        """fetch(contig, a, b): forward reads query [>=1000]; reverse query the
+        upstream window ending at reference_start (500)."""
+        def __init__(self, downstream, upstream):
+            self.downstream, self.upstream = downstream, upstream
+        def fetch(self, contig, a, b):
+            return self.downstream if a >= 1000 else self.upstream
+
+    def _clf(self, downstream, upstream):
+        index = MagicMock(); index.splice_sites = {}
+        return ReadClassifier(index, reference=self._FakeRef(downstream, upstream))
+
+    def _read(self, is_reverse):
+        r = MagicMock()
+        r.reference_name = "chr1"; r.reference_start = 500; r.reference_end = 1000
+        r.is_reverse = is_reverse
+        return r
+
+    def test_forward_a_run_downstream(self):
+        clf = self._clf("AAAAAAAA" + "C" * 12, "C" * 20)
+        assert clf._check_polya_priming(self._read(False)) is True
+
+    def test_reverse_t_run_upstream(self):
+        clf = self._clf("C" * 20, "CCCCC" + "TTTTTTTT" + "CCCCCCC")
+        assert clf._check_polya_priming(self._read(True)) is True
+
+    def test_reverse_a_run_upstream_not_flagged(self):
+        # An A-run on the wrong side/base must not trigger a reverse read.
+        clf = self._clf("C" * 20, "AAAAAAAA" + "C" * 12)
+        assert clf._check_polya_priming(self._read(True)) is False
 
 
 class TestResolveTSO:
@@ -366,6 +450,7 @@ class TestUnassigned:
         read.reference_end = 1100
         read.query_name = "read1"
         read.query_alignment_length = 100
+        read.query_sequence = "ACGT" * 25
         read.cigartuples = [(0, 100)]
         read.get_blocks = lambda: [(1000, 1100)]
         read.has_tag = lambda tag: False
@@ -1053,6 +1138,12 @@ class TestCellMetricsTSVColumns:
     def test_base_frac_ambiguous_is_separate_column(self):
         ct = self._get_ct()
         assert "base_frac_ambiguous" in ct.df.columns
+
+    def test_artifact_flag_columns_present(self):
+        # All four artifact flags appear per-cell (parity, v0.6.0).
+        ct = self._get_ct()
+        for col in ("n_tso", "n_polya", "n_noncanon", "n_tso_concat"):
+            assert col in ct.df.columns
 
     def test_no_concatenated_base_frac_multimapper_ambiguous_column(self):
         ct = self._get_ct()

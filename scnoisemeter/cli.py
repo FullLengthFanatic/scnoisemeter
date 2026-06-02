@@ -1994,6 +1994,7 @@ def run_plate_cmd(
                     ),
                     "n_tso_invasion":        well_sm.n_tso_invasion,
                     "n_polya_priming":       well_sm.n_polya_priming,
+                    "n_tso_concatemer":      well_sm.n_tso_concatemer,
                     "bam_path":              str(bam_path),
                 }
                 if well_meta_from_sheet:
@@ -2070,6 +2071,7 @@ def run_plate_cmd(
                         ),
                         "n_tso_invasion":        well_sm.n_tso_invasion,
                         "n_polya_priming":       well_sm.n_polya_priming,
+                        "n_tso_concatemer":      well_sm.n_tso_concatemer,
                         "bam_path":              str(bam_path),
                     }
                     if well_meta_from_sheet:
@@ -2446,7 +2448,7 @@ def _write_run_outputs(sm, ct, result, output_dir: Path, sample_name: str,
                  "strand_concordance", "chimeric_read_frac",
                  "multimapper_read_frac", "per_cell_noise_median",
                  "per_cell_noise_iqr", "n_tso_invasion", "n_polya_priming",
-                 "n_noncanon_junction"]:
+                 "n_noncanon_junction", "n_tso_concatemer"]:
         rows.append((attr, getattr(sm, attr, "")))
     for cat_name, frac in sm.read_fracs.items():
         rows.append((f"read_frac_{cat_name}", f"{frac:.6f}"))
