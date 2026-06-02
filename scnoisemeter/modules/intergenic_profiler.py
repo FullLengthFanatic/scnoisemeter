@@ -308,7 +308,9 @@ def _score_locus(
     polya_run_downstream = False
     if reference is not None:
         modal_end = _modal_three_prime(records)
-        polya_run_downstream = _check_polya_context(reference, contig, modal_end)
+        polya_run_downstream = _check_polya_context(
+            reference, contig, modal_end, strand=dominant_strand
+        )
 
     # Annotated polyA site proximity
     near_polya = False
@@ -462,13 +464,25 @@ def _modal_three_prime(records: list[IntergenicReadRecord]) -> int:
 # Helper: polyA context check
 # ---------------------------------------------------------------------------
 
-def _check_polya_context(reference, contig: str, position: int) -> bool:
+def _check_polya_context(reference, contig: str, position: int, strand: str = "+") -> bool:
     """
-    Check for an A-run of >= POLYA_RUN_MIN_LENGTH within
-    POLYA_CONTEXT_WINDOW bp downstream of *position*.
+    Check for an A-run of >= POLYA_RUN_MIN_LENGTH within POLYA_CONTEXT_WINDOW bp
+    of the locus transcript 3′ end (*position*), strand-aware.
+
+    For a + strand locus the A-run sits downstream (higher coordinate) on the
+    + strand.  For a - strand locus the transcript 3′ end is the lower
+    coordinate and the same A-run reads as a T-run on the + strand just upstream
+    (lower coordinate).  Checking only the + strand downstream under-detected
+    minus-strand internal priming.
     """
     import re
     try:
+        if strand == "-":
+            lo = max(0, position - POLYA_CONTEXT_WINDOW)
+            if lo >= position:
+                return False
+            context = reference.fetch(contig, lo, position).upper()
+            return bool(re.search(f"T{{{POLYA_RUN_MIN_LENGTH},}}", context))
         context = reference.fetch(contig, position, position + POLYA_CONTEXT_WINDOW).upper()
         return bool(re.search(f"A{{{POLYA_RUN_MIN_LENGTH},}}", context))
     except (ValueError, KeyError):

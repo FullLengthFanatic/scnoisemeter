@@ -513,13 +513,15 @@ def _insert_size_distribution(insert_sizes: dict) -> go.Figure:
 
 def _artifact_flags(sm: SampleMetrics) -> go.Figure:
     """Horizontal bar chart of artifact flag rates — labels never cut off."""
-    labels = ["TSO invasion", "Internal polyA priming", "Non-canonical junction"]
-    values = [sm.n_tso_invasion, sm.n_polya_priming, sm.n_noncanon_junction]
-    colors = ["#e74c3c", "#e67e22", "#3498db"]
+    labels = ["TSO invasion", "Internal polyA priming", "Non-canonical junction", "TSO concatemer"]
+    values = [sm.n_tso_invasion, sm.n_polya_priming, sm.n_noncanon_junction,
+              getattr(sm, "n_tso_concatemer", 0)]
+    colors = ["#e74c3c", "#e67e22", "#3498db", "#8e44ad"]
     descriptions = [
-        "Reads with TSO sequence in 5′ soft-clip",
-        "Intergenic reads ending at A-rich reference sequence",
+        "Reads with TSO sequence (or its reverse complement) in a soft-clip",
+        "Reads ending at an A-rich (forward) / T-rich (reverse) reference stretch",
         "Splice junctions not matching GT-AG / GC-AG / AT-AC rule",
+        "Reads containing more than one TSO sequence or its reverse complement",
     ]
 
     denom = max(sm.n_reads_classified, 1)
@@ -549,7 +551,7 @@ def _artifact_flags(sm: SampleMetrics) -> go.Figure:
             range=[0, max_frac * 1.05],  # tight — text inside or on bars
         ),
         yaxis=dict(autorange="reversed", automargin=True),
-        height=240,
+        height=280,
         margin=dict(t=60, b=40, l=200, r=60),
         uniformtext=dict(minsize=9, mode="hide"),
     )

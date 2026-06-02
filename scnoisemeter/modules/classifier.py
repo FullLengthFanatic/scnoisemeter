@@ -72,6 +72,14 @@ _AMBIGUOUS_COD_NCOD = ReadCategory.AMBIGUOUS_COD_NCOD
 from scnoisemeter.modules.annotation import AnnotationIndex
 
 
+_COMPLEMENT = str.maketrans("ACGTN", "TGCAN")
+
+
+def _revcomp(seq: str) -> str:
+    """Reverse complement of a DNA string (uppercased; non-ACGTN map to N)."""
+    return seq.upper().translate(_COMPLEMENT)[::-1]
+
+
 # ---------------------------------------------------------------------------
 # Result dataclass (one per classified read)
 # ---------------------------------------------------------------------------
@@ -102,6 +110,9 @@ class ReadResult:
     has_noncanonical_junction : bool
         True if any CIGAR N operation falls at a non-canonical splice site
         not present in the annotation.
+    is_tso_concatemer : bool
+        True if the read sequence contains more than one occurrence of a TSO
+        sequence or its reverse complement (template-switch concatemer).
     contig : str
     pos : int
         0-based leftmost mapping position.
@@ -119,6 +130,7 @@ class ReadResult:
     is_tso_invasion:        bool
     is_polya_priming:       bool
     has_noncanonical_junction: bool
+    is_tso_concatemer:      bool
     contig:                 str
     pos:                    int
     is_reverse:             bool
@@ -193,6 +205,30 @@ class ReadClassifier:
         self.tso_check_polyg = tso_check_polyg
         self.reference = reference
 
+        # Match prefixes for TSO-invasion detection: forward AND reverse
+        # complement of each TSO, so reads whose TSO end maps antisense (the
+        # clip carries revcomp(TSO)) are detected too.  Deduplicated.
+        _prefixes = []
+        for t in self.tso_sequences:
+            up = t.upper()
+            _prefixes.append(up[:tso_min_match])
+            _prefixes.append(_revcomp(up)[:tso_min_match])
+        self._tso_match_prefixes = list(dict.fromkeys(_prefixes))
+
+        # Concatemer detection: non-overlapping count of full TSO sequences and
+        # their reverse complements in the read.  Longest-first alternation so a
+        # shorter TSO that is a substring of a longer one (e.g. PacBio ⊂ 10x) is
+        # not double-counted at the same locus.
+        _concat = []
+        for t in self.tso_sequences:
+            up = t.upper()
+            _concat.append(up)
+            _concat.append(_revcomp(up))
+        _concat = sorted(set(_concat), key=len, reverse=True)
+        self._tso_concat_pattern = (
+            re.compile("|".join(re.escape(s) for s in _concat)) if _concat else None
+        )
+
         # Pre-build per-contig interval lookup tables for fast query
         # These are built lazily on first access via _get_contig_intervals()
         self._contig_cache: dict[str, dict] = {}
@@ -248,6 +284,7 @@ class ReadClassifier:
                     is_tso_invasion=False,
                     is_polya_priming=False,
                     has_noncanonical_junction=False,
+                    is_tso_concatemer=False,
                     contig=read.reference_name or "",
                     pos=read.reference_start or 0,
                     is_reverse=read.is_reverse,
@@ -269,11 +306,16 @@ class ReadClassifier:
                 is_tso_invasion=False,
                 is_polya_priming=False,
                 has_noncanonical_junction=False,
+                is_tso_concatemer=False,
                 contig=read.reference_name or "",
                 pos=read.reference_start or 0,
                 is_reverse=read.is_reverse,
                 read_length=read.query_alignment_length or 0,
             )
+
+        # TSO concatemer is independent of read category (checked on every
+        # classified read, matching the paper's raw-read definition).
+        is_concat = self._check_tso_concatemer(read)
 
         # --- Multimapper (NH > 1) — highest priority per README hierarchy ---
         if self._is_multimapper(read):
@@ -282,6 +324,7 @@ class ReadClassifier:
                 ReadCategory.MULTIMAPPER,
                 {ReadCategory.MULTIMAPPER: read.query_alignment_length or 0},
                 True,
+                is_tso_concatemer=is_concat,
             )
 
         # --- Mitochondrial ---
@@ -289,14 +332,16 @@ class ReadClassifier:
         if contig in MITO_CONTIG_NAMES:
             category = ReadCategory.MITOCHONDRIAL
             base_counts = {ReadCategory.MITOCHONDRIAL: read.query_alignment_length or 0}
-            return self._make_result(read, cb, umi, category, base_counts, False)
+            return self._make_result(read, cb, umi, category, base_counts, False,
+                                     is_tso_concatemer=is_concat)
 
         # --- Chimeric ---
         is_chimeric, _ = self._check_chimeric(read)
         if is_chimeric:
             category = ReadCategory.CHIMERIC
             base_counts = {ReadCategory.CHIMERIC: read.query_alignment_length or 0}
-            return self._make_result(read, cb, umi, category, base_counts, False)
+            return self._make_result(read, cb, umi, category, base_counts, False,
+                                     is_tso_concatemer=is_concat)
 
         # --- Artifact flags (TSO, polyA) ---
         is_tso   = self._check_tso_invasion(read)
@@ -305,7 +350,8 @@ class ReadClassifier:
         # --- Genomic classification ---
         category, base_counts, has_noncano = self._classify_by_intervals(read)
 
-        result = self._make_result(read, cb, umi, category, base_counts, False)
+        result = self._make_result(read, cb, umi, category, base_counts, False,
+                                   is_tso_concatemer=is_concat)
         result.is_tso_invasion           = is_tso
         result.is_polya_priming          = is_polya
         result.has_noncanonical_junction = has_noncano
@@ -491,12 +537,33 @@ class ReadClassifier:
             if self.tso_check_polyg and "G" * TSO_POLYG_MIN_LENGTH in clip_upper:
                 return True
 
-            # TSO sequence check
-            for tso in self.tso_sequences:
-                tso_check = tso[:self.tso_min_match].upper()
+            # TSO sequence check (forward + reverse-complement prefixes)
+            for tso_check in self._tso_match_prefixes:
                 if tso_check in clip_upper:
                     return True
 
+        return False
+
+    def _check_tso_concatemer(self, read: pysam.AlignedSegment) -> bool:
+        """
+        Check whether the read contains more than one occurrence of a TSO
+        sequence or its reverse complement (a template-switch concatemer).
+
+        Matches the full TSO sequence(s), counting non-overlapping hits across
+        the whole read (soft-clipped and aligned bases).  Mirrors the metric in
+        Chou et al. (bioRxiv 2025.10.06.680646): reads with > 1 TSO-or-revcomp
+        occurrence divided by total reads.
+        """
+        if self._tso_concat_pattern is None:
+            return False
+        seq = read.query_sequence
+        if not seq:
+            return False
+        n = 0
+        for _ in self._tso_concat_pattern.finditer(seq.upper()):
+            n += 1
+            if n > 1:
+                return True
         return False
 
     # ------------------------------------------------------------------
@@ -506,13 +573,19 @@ class ReadClassifier:
     def _check_polya_priming(self, read: pysam.AlignedSegment) -> bool:
         """
         Check for an A-rich stretch immediately downstream of the read's
-        3′ mapping end in the reference genome.
+        transcript 3′ end in the reference genome (strand-aware).
 
-        Requires self.reference (pysam.FastaFile) to be set.
-        If unavailable, returns False (check is skipped gracefully).
+        For a forward read the transcript 3′ end is the rightmost coordinate
+        (reference_end), and internal priming shows as an A-run just downstream
+        on the + strand.  For a reverse read the transcript 3′ end is the
+        leftmost coordinate (reference_start), and the same A-run in the
+        transcript reads as a T-run on the + strand just upstream (lower
+        coordinate).  Checking only the + strand downstream (the previous
+        behaviour) under-detected minus-strand internal priming.
 
-        An A-run of >= POLYA_RUN_MIN_LENGTH within POLYA_CONTEXT_WINDOW bp
-        downstream of the aligned 3′ end is flagged.
+        Requires self.reference (pysam.FastaFile).  Returns False if unavailable.
+        An A-run (forward) / T-run (reverse) of >= POLYA_RUN_MIN_LENGTH within
+        POLYA_CONTEXT_WINDOW bp of the transcript 3′ end is flagged.
         """
         if self.reference is None:
             return False
@@ -521,19 +594,28 @@ class ReadClassifier:
         if not contig:
             return False
 
-        end_pos = read.reference_end  # 0-based exclusive
-        if end_pos is None:
-            return False
-
         try:
-            context = self.reference.fetch(
-                contig, end_pos, end_pos + POLYA_CONTEXT_WINDOW
-            ).upper()
+            if read.is_reverse:
+                start = read.reference_start
+                if start is None:
+                    return False
+                lo = max(0, start - POLYA_CONTEXT_WINDOW)
+                if lo >= start:
+                    return False
+                context = self.reference.fetch(contig, lo, start).upper()
+                run_re = re.compile(f"T{{{POLYA_RUN_MIN_LENGTH},}}")
+            else:
+                end_pos = read.reference_end  # 0-based exclusive
+                if end_pos is None:
+                    return False
+                context = self.reference.fetch(
+                    contig, end_pos, end_pos + POLYA_CONTEXT_WINDOW
+                ).upper()
+                run_re = re.compile(f"A{{{POLYA_RUN_MIN_LENGTH},}}")
         except (ValueError, KeyError):
             return False
 
-        a_run_re = re.compile(f"A{{{POLYA_RUN_MIN_LENGTH},}}")
-        return bool(a_run_re.search(context))
+        return bool(run_re.search(context))
 
     # ------------------------------------------------------------------
     # Interval-based genomic classification
@@ -706,6 +788,7 @@ class ReadClassifier:
         category: ReadCategory,
         base_counts: dict,
         is_multimapper: bool,
+        is_tso_concatemer: bool = False,
     ) -> ReadResult:
         return ReadResult(
             query_name=read.query_name or "",
@@ -717,6 +800,7 @@ class ReadClassifier:
             is_tso_invasion=False,
             is_polya_priming=False,
             has_noncanonical_junction=False,
+            is_tso_concatemer=is_tso_concatemer,
             contig=read.reference_name or "",
             pos=read.reference_start or 0,
             is_reverse=read.is_reverse,

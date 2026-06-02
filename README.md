@@ -8,7 +8,7 @@ scNoiseMeter measures technical noise in single-cell RNA-seq from a coordinate-s
 
 Same logic runs on ONT, PacBio/Kinnex, short-read (Illumina, ElemBio) BAMs from 10x Genomics or BD Rhapsody kits, and Smart-seq / FLASH-seq plates (96- and 384-well), with platform-specific adjustments where the underlying biology differs.
 
-Current version: **0.5.0**.
+Current version: **0.6.0**.
 
 ---
 

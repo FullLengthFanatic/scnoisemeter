@@ -58,7 +58,7 @@ def _dd_set():
     return defaultdict(set)
 
 def _dd_flags():
-    return {"tso": 0, "polya": 0, "noncanon": 0}
+    return {"tso": 0, "polya": 0, "noncanon": 0, "tso_concat": 0}
 
 
 class _Reservoir(list):
@@ -145,7 +145,7 @@ class ContigResult:
     # umi_sets[cb][category] = set of UMI strings
     umi_sets:     dict = field(default_factory=lambda: defaultdict(_dd_set))
 
-    # artifact_flags[cb] = {"tso": int, "polya": int, "noncanon": int}
+    # artifact_flags[cb] = {"tso": int, "polya": int, "noncanon": int, "tso_concat": int}
     artifact_flags: dict = field(default_factory=lambda: defaultdict(_dd_flags))
 
     # length_samples[category] = list of read lengths (reservoir sample)
@@ -315,6 +315,8 @@ def _contig_worker(args: dict) -> ContigResult:
                     result.artifact_flags[cb]["polya"] += 1
                 if res.has_noncanonical_junction:
                     result.artifact_flags[cb]["noncanon"] += 1
+                if res.is_tso_concatemer:
+                    result.artifact_flags[cb]["tso_concat"] += 1
 
                 # Read-length reservoir sample
                 _reservoir_add(

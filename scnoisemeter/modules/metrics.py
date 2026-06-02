@@ -147,6 +147,7 @@ class SampleMetrics:
     n_tso_invasion:        int = 0
     n_polya_priming:       int = 0
     n_noncanon_junction:   int = 0
+    n_tso_concatemer:      int = 0
 
     # Optional metrics — None when the required reference file was not provided
     tss_anchored_frac:     Optional[float] = None   # 5'-anchored at TSS (CAGE)
@@ -168,7 +169,7 @@ class CellTable:
     Index: cell_barcode (str)
     Columns include: n_reads, n_bases, read_frac_*, base_frac_*,
     umi_complexity_*, noise_read_frac, noise_base_frac,
-    n_tso, n_polya, n_noncanon.
+    n_tso, n_polya, n_noncanon, n_tso_concat.
     """
     df: pd.DataFrame
     sample_name: str
@@ -245,9 +246,10 @@ def compute_metrics(
 
         # Artifact flags
         flags = result.artifact_flags.get(cb, {})
-        row["n_tso"]      = flags.get("tso",      0)
-        row["n_polya"]    = flags.get("polya",     0)
-        row["n_noncanon"] = flags.get("noncanon",  0)
+        row["n_tso"]        = flags.get("tso",        0)
+        row["n_polya"]      = flags.get("polya",      0)
+        row["n_noncanon"]   = flags.get("noncanon",   0)
+        row["n_tso_concat"] = flags.get("tso_concat", 0)
 
         rows.append(row)
 
@@ -313,9 +315,10 @@ def compute_metrics(
 
     # Artifact flag totals
     for cb, flags in result.artifact_flags.items():
-        sm.n_tso_invasion      += flags.get("tso",      0)
-        sm.n_polya_priming     += flags.get("polya",    0)
-        sm.n_noncanon_junction += flags.get("noncanon", 0)
+        sm.n_tso_invasion      += flags.get("tso",        0)
+        sm.n_polya_priming     += flags.get("polya",      0)
+        sm.n_noncanon_junction += flags.get("noncanon",   0)
+        sm.n_tso_concatemer    += flags.get("tso_concat", 0)
 
     # UMI complexity (mean across cells, per category)
     if not cell_df.empty:
@@ -562,9 +565,10 @@ def compute_cluster_metrics(
                 ) if len(vals) > 1 else 0.0
 
         for flag_col, out_name in [
-            ("n_tso",     "median_tso_rate"),
-            ("n_polya",   "median_polya_rate"),
-            ("n_noncanon","median_noncanon_rate"),
+            ("n_tso",       "median_tso_rate"),
+            ("n_polya",     "median_polya_rate"),
+            ("n_noncanon",  "median_noncanon_rate"),
+            ("n_tso_concat","median_tso_concatemer_rate"),
         ]:
             if flag_col in grp.columns and "n_reads" in grp.columns:
                 rates = grp[flag_col] / grp["n_reads"].replace(0, float("nan"))
@@ -638,6 +642,9 @@ def to_multiqc_json(sm: SampleMetrics) -> dict:
         "n_reads_classified":       sm.n_reads_classified,
         "per_cell_noise_median":    round(sm.per_cell_noise_median,    4),
         "per_cell_noise_iqr":       round(sm.per_cell_noise_iqr,       4),
+        "tso_invasion_frac":        round(sm.n_tso_invasion    / (sm.n_reads_classified or 1), 4),
+        "polya_priming_frac":       round(sm.n_polya_priming   / (sm.n_reads_classified or 1), 4),
+        "tso_concatemer_frac":      round(sm.n_tso_concatemer  / (sm.n_reads_classified or 1), 4),
     }
     # Add per-category read fractions
     for cat_name, frac in sm.read_fracs.items():
