@@ -31,8 +31,8 @@ A locus is called INTERGENIC_HOTSPOT (internal priming artifact) if ALL of:
   1. Monoexonic: all reads lack CIGAR N (no splice junctions)
   2. A-rich 3′ context: ≥ POLYA_RUN_MIN_LENGTH As within POLYA_CONTEXT_WINDOW
      bp downstream of the modal read 3′ end in the reference
-  3. NOT near an annotated polyA site (> POLYA_SITE_PROXIMITY bp from any
-     entry in the PolyASite 2.0 / APADB database, if provided)
+  3. NOT within POLYA_SITE_PROXIMITY bp of an annotated polyA site (otherwise
+     routed to INTERGENIC_NOVEL when strand-consistent with enough barcodes)
 
 A locus is called INTERGENIC_NOVEL if ALL of:
   1. Passes the Poisson significance threshold
@@ -372,11 +372,11 @@ def _is_hotspot(
     """
     Rule-based hotspot (internal priming artifact) classifier.
 
-    Requires monoexonic reads AND A-rich 3′ context.
-    The absence of a nearby annotated polyA site increases confidence
-    but is not strictly required (the polyA site DB may be incomplete).
+    Requires monoexonic reads, an A-rich 3′ context, AND that the locus is
+    NOT within POLYA_SITE_PROXIMITY bp of an annotated polyA site (such a
+    locus with strand support is routed to INTERGENIC_NOVEL instead).
     """
-    return is_monoexonic and polya_run_downstream
+    return is_monoexonic and polya_run_downstream and not near_polya_site
 
 
 def _is_novel_gene(

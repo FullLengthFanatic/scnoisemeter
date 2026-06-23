@@ -249,10 +249,6 @@ TSO_10X = "AAGCAGTGGTATCAACGCAGAGTACATGGG"
 # PacBio Kinnex / IsoSeq TSO (5′ SMART primer, also used in SMART-seq)
 TSO_PACBIO = "AAGCAGTGGTATCAACGCAGAGT"
 
-# PacBio Kinnex adapter sequences (used by skera for segmentation)
-# These appear in chimeric reads where segmentation was imperfect
-KINNEX_ADAPTER = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-
 # Minimum matching length for TSO detection in soft-clipped bases
 TSO_MIN_MATCH_LENGTH = 12
 
@@ -333,9 +329,13 @@ NUMT_OVERLAP_FRACTION = 0.80   # fraction of read that must overlap NUMT
 # Full-length read detection
 # When a polyA site database is provided (--polya-sites), a read is considered
 # full-length if its 3′ end falls within POLYA_SITE_PROXIMITY bp of a known
-# polyA site.  Without the database, the fallback is a minimum length threshold.
-FULL_LENGTH_MIN_LENGTH_ONT    = 500   # bp — fallback when no polyA site DB
-FULL_LENGTH_MIN_LENGTH_PACBIO = 1000  # bp — PacBio HiFi reads are longer
+# polyA site.  Without the database, the fallback is a per-platform minimum
+# length threshold (keyed by platform string; "default" used for any other).
+FULL_LENGTH_THRESHOLD = {
+    "ont":      500,   # bp, fallback when no polyA site DB
+    "pacbio":  1000,   # bp, PacBio HiFi reads are longer
+    "default":  500,
+}
 
 # Cluster metadata column names (for --obs-metadata TSV)
 OBS_BARCODE_COL = "cell_barcode"

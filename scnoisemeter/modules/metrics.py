@@ -50,6 +50,7 @@ import pandas as pd
 from scnoisemeter.constants import (
     AMBIGUOUS_CATEGORIES,
     CATEGORY_ORDER,
+    FULL_LENGTH_THRESHOLD,
     LENGTH_BIN_BREAKS,
     LENGTH_BIN_LABELS_LONG,
     LENGTH_BIN_LABELS_SHORT,
@@ -70,17 +71,6 @@ logger = logging.getLogger(__name__)
 # Minimum reads per cell to include in per-cell table (avoids noise from
 # extremely low-coverage barcodes)
 MIN_READS_PER_CELL = 10
-
-# Fallback full-length read thresholds by platform (bp)
-# Used only when no polyA site database is provided via --polya-sites.
-# When a polyA site database IS provided, a read is considered full-length
-# if its 3' end falls within POLYA_SITE_PROXIMITY bp of a known polyA site —
-# a much more biologically meaningful criterion.
-FULL_LENGTH_THRESHOLD = {
-    "ont":      500,
-    "pacbio":  1000,
-    "default":  500,
-}
 
 
 # ---------------------------------------------------------------------------

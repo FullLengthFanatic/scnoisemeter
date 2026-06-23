@@ -8,7 +8,7 @@ scNoiseMeter measures technical noise in single-cell RNA-seq from a coordinate-s
 
 Same logic runs on ONT, PacBio/Kinnex, short-read (Illumina, ElemBio) BAMs from 10x Genomics or BD Rhapsody kits, and Smart-seq / FLASH-seq plates (96- and 384-well), with platform-specific adjustments where the underlying biology differs.
 
-Current version: **0.6.0**.
+Current version: **0.6.1**.
 
 > New here? The [white paper](docs/whitepaper.md) explains what scNoiseMeter measures and the logic behind it, for readers who work with RNA-seq data. For the code-level detail, see the [annotated methods](docs/methods_annotated.md).
 
@@ -152,15 +152,15 @@ Every read receives exactly one category. The classification hierarchy is applie
 | Category | What it means |
 |---|---|
 | `multimapper` | NH tag > 1 on the primary alignment |
-| `chimeric` | Inter-chromosomal or strand-discordant SA split; or same-strand intra-chromosomal distance > 10 kbp; or paired-end insert size > 1 Mbp |
 | `mitochondrial` | Maps to a mitochondrial contig (`chrM`, `MT`, `chrMT`, or `mitochondrion`) |
+| `chimeric` | Inter-chromosomal or strand-discordant SA split; or same-strand intra-chromosomal distance > 10 kbp; or paired-end insert size > 1 Mbp |
 | `exonic_sense` | Overlaps an annotated exon on the correct strand |
 | `exonic_antisense` | Overlaps an annotated exon on the wrong strand |
 | `intronic_jxnspan` | Intronic with a CIGAR N operation near a splice site |
 | `intronic_pure` | Entirely within an intron body, no junction signal |
 | `intronic_boundary` | Spans an exon-intron boundary without a splice operation |
 | `intergenic_repeat` | Intergenic, overlapping a RepeatMasker interval (requires `--repeats`) |
-| `intergenic_hotspot` | Intergenic monoexonic locus above threshold with a genomic A-run (>= 6 A within 20 bp downstream of the read 3' end) and not near any annotated polyA site; likely internal priming |
+| `intergenic_hotspot` | Intergenic monoexonic locus above threshold with a genomic A-run (>= 6 A within 20 bp downstream of the read 3' end) and more than 50 bp from any annotated polyA site; likely internal priming |
 | `intergenic_novel` | Intergenic locus above threshold with strong strand consistency, showing splice evidence (CIGAR N) and/or proximity to an annotated polyA site; candidate novel gene |
 | `intergenic_sparse` | Intergenic locus below the adaptive threshold |
 | `ambiguous` | Overlaps a region shared by multiple genes |
@@ -187,10 +187,19 @@ The classifier initially labels every intergenic read `intergenic_sparse`. A sec
 Promotion rules for the passing loci:
 
 - `intergenic_novel` requires >= 80% strand consistency, >= 3 distinct barcodes, and either splice evidence (at least one read with a CIGAR N) or a modal 3' end within 50 bp of an annotated polyA site.
-- `intergenic_hotspot` requires the locus to be monoexonic (no read carries a CIGAR N), to have >= 6 consecutive reference As within 20 bp downstream of the modal 3' end, and to be more than 50 bp from any annotated polyA site.
+- `intergenic_hotspot` requires the locus to be monoexonic (no read carries a CIGAR N), to have >= 6 consecutive reference As within 20 bp downstream of the modal 3' end, and to be more than 50 bp from any annotated polyA site. A monoexonic A-run locus that is near an annotated polyA site and strand-consistent is promoted to `intergenic_novel` instead.
 - `intergenic_repeat` requires overlap with a RepeatMasker interval (BED passed via `--repeats`).
 
 Loci that pass significance but satisfy none of these rules default to `intergenic_hotspot` (flag for review). Reads at promoted loci are moved out of the sparse bucket before any noise fraction is computed, so a locus promoted to `intergenic_novel` (ambiguous, not noise) reduces the reported noise fraction.
+
+### Artifact flags
+
+Independent of the read category, every classified read can carry sequence-level artifact flags, reported as per-sample and per-cell counts:
+
+- **TSO invasion**: a TSO sequence in a soft-clip. Both the forward TSO and its reverse complement are matched, so a TSO end that mapped antisense is still caught, plus a poly-G heuristic for the 10x TSO's G-rich tail. Configure with `--tso`, `--tso-min-match`, `--no-polyg-tso`.
+- **TSO concatemer**: more than one TSO occurrence in a single read, the template-switching signature. The metric follows Chou et al. (bioRxiv 2025.10.06.680646).
+- **Internal polyA priming**: a genomic A-run within 20 bp downstream of a forward read's 3' end, or a T-run upstream of a reverse read's 3' end (strand-aware). Requires `--reference`.
+- **Non-canonical junction**: a CIGAR N whose donor dinucleotide is not GT-AG / GC-AG / AT-AC and is not annotated. Requires `--reference`.
 
 ---
 

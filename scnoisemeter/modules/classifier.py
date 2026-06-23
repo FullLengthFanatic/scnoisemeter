@@ -5,8 +5,8 @@ The core per-read classification engine.
 
 For every primary, non-secondary alignment the classifier:
 
-  1. Applies the priority hierarchy (chimeric → mito → exonic → intronic
-     → intergenic) to assign a single :class:`ReadCategory`.
+  1. Applies the priority hierarchy (multimapper → mito → chimeric →
+     exonic → intronic → intergenic) to assign a single :class:`ReadCategory`.
   2. Simultaneously tallies the number of aligned *bases* falling into each
      category (base-level fractions — the primary benchmarking metric).
   3. Checks for TSO invasion signature in soft-clipped 5′ bases.
@@ -19,8 +19,8 @@ Classification hierarchy
   SECONDARY         skip
   SUPPLEMENTARY     chimeric detector only
   MULTIMAPPER       (NH > 1) → multimapper bucket, still base-classified
-  CHIMERIC          SA tag + distance/strand rules
   MITOCHONDRIAL     maps to chrM / MT
+  CHIMERIC          SA tag + distance/strand rules
   EXONIC_SENSE      ≥1 bp overlap with exon, correct strand
   EXONIC_ANTISENSE  ≥1 bp overlap with exon, wrong strand
   INTRONIC_JXNSPAN  intronic + CIGAR N at known/novel splice site
