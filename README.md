@@ -10,21 +10,33 @@ Same logic runs on ONT, PacBio/Kinnex, short-read (Illumina, ElemBio) BAMs from 
 
 Current version: **0.6.0**.
 
+> New here? The [white paper](docs/whitepaper.md) explains what scNoiseMeter measures and the logic behind it, for readers who work with RNA-seq data. For the code-level detail, see the [annotated methods](docs/methods_annotated.md).
+
 ---
 
 ## Installation
 
+scNoiseMeter is installed from GitHub (it is not on PyPI). Install the latest release directly with pip:
+
 ```bash
-pip install scnoisemeter
+pip install git+https://github.com/FullLengthFanatic/scnoisemeter.git
+```
+
+No admin rights on a shared server? Add `--user` (installs into your home directory):
+
+```bash
+pip install --user git+https://github.com/FullLengthFanatic/scnoisemeter.git
+```
+
+Or install from a clone:
+
+```bash
+git clone https://github.com/FullLengthFanatic/scnoisemeter.git
+cd scnoisemeter
+pip install .                 # or: pip install -e ".[dev]" for an editable dev install
 ```
 
 Python >= 3.9 required. Dependencies (pysam, pyranges, pandas, numpy, click, plotly, scipy, tqdm) are installed automatically.
-
-Development extras:
-
-```bash
-pip install "scnoisemeter[dev]"
-```
 
 The input BAM must be coordinate-sorted and indexed before use:
 
@@ -266,9 +278,11 @@ Supply `--gtf` and `--polya-sites` explicitly to use specific versions, or use `
 
 ---
 
-## Full documentation
+## Documentation
 
-See [docs/documentation.md](docs/documentation.md) for complete flag descriptions, output column definitions, platform-specific notes, the plate workflow, and statistical methodology.
+- **[White paper](docs/whitepaper.md)** — what scNoiseMeter measures, the classification logic, and why it is built this way. Start here.
+- **[Annotated methods](docs/methods_annotated.md)** — every rule and threshold mapped to its exact code location, with snippets, named comparisons to other tools, strengths and limitations, and a tuning cheat-sheet.
+- **[Full reference](docs/documentation.md)** — complete flag descriptions, output column definitions, platform-specific notes, the plate workflow, and statistical methodology.
 
 ---
 
