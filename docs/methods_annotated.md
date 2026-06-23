@@ -407,7 +407,7 @@ The two rule functions are small and testable:
 ```python
 # intergenic_profiler.py:367-399
 def _is_hotspot(is_monoexonic, polya_run_downstream, near_polya_site):
-    return is_monoexonic and polya_run_downstream
+    return is_monoexonic and polya_run_downstream and not near_polya_site
 
 def _is_novel_gene(has_splice_evidence, near_polya_site, strand_consistent, n_barcodes, min_barcodes):
     return (
@@ -421,7 +421,7 @@ Strand consistency is `>= 0.80` on the dominant strand (`STRAND_CONSISTENCY_MIN`
 
 Reads at a promoted locus are written back into `record_categories` (`intergenic_profiler.py:245-247`) and applied to the per-cell counts before metrics, so promoting a locus to `intergenic_novel` (ambiguous, not noise) lowers the reported noise fraction.
 
-> **Note, flagged in [section 14](#14-discrepancies-found-during-review):** the README and this module's own docstring (`intergenic_profiler.py:30-36`) say a hotspot must also be `> 50 bp from any annotated polyA site`, but `_is_hotspot` does not enforce `near_polya`. The function docstring (`intergenic_profiler.py:376-377`) admits the distance "is not strictly required." So the behavior is the function, not the prose.
+> **Note:** the hotspot rule also requires the locus to be more than `POLYA_SITE_PROXIMITY` (50 bp) from any annotated polyA site (`and not near_polya_site`). A monoexonic A-run locus that does sit near an annotated polyA site is not flagged as a hotspot; when it is strand-consistent with enough barcodes it is promoted to `intergenic_novel` instead, since proximity to a real polyA site is evidence for a transcript. This was made an enforced rule in 0.6.1 (earlier versions documented it but did not apply it).
 
 ---
 
@@ -650,23 +650,21 @@ scNoiseMeter is a per-alignment, mechanistic noise classifier. It is not an ambi
 
 ---
 
-## 14. Discrepancies found during review
+## 14. Review notes (addressed in 0.6.1)
 
-Surfaced here rather than smoothed over.
+These code-versus-documentation mismatches were found during review. All but the last were resolved in 0.6.1.
 
-1. **Category priority: chimeric vs mitochondrial.** `classify()` checks mitochondrial (`classifier.py:330-336`) before chimeric (`classifier.py:338-344`), so a mitochondrial read carrying a chimeric `SA` tag is labeled `mitochondrial`. The README "Read categories" table and this file's own top docstring (`classifier.py:8`) list chimeric before mitochondrial. The effect is rare but the documented order does not match the code. Fix the docs, or reorder the checks if chimeric should win.
+1. **Category priority: chimeric vs mitochondrial (resolved, docs).** `classify()` checks mitochondrial (`classifier.py:330-336`) before chimeric (`classifier.py:338-344`), so a mitochondrial read carrying a chimeric `SA` tag is labeled `mitochondrial`. The README table and the classifier docstring previously listed chimeric first. 0.6.1 corrects the docs to the real order (multimapper, mitochondrial, chimeric). The behavior was left unchanged: a chrM read is a small, well-defined set best called by location.
 
-2. **Intergenic hotspot polyA-distance rule not enforced.** The README (and the module docstring `intergenic_profiler.py:30-36`) state a hotspot must be `> 50 bp from any annotated polyA site`. `_is_hotspot` (`intergenic_profiler.py:367-379`) only checks `is_monoexonic and polya_run_downstream`; `near_polya` is computed but not used. The function docstring admits it is "not strictly required." Either wire `near_polya` into the rule or correct both docstrings.
+2. **Intergenic hotspot polyA-distance rule (resolved, behavior).** Earlier, `_is_hotspot` checked only `is_monoexonic and polya_run_downstream` while the README and docstrings said a hotspot must also be more than 50 bp from any annotated polyA site. 0.6.1 enforces this in code (`return is_monoexonic and polya_run_downstream and not near_polya_site`), so a monoexonic A-run locus near an annotated polyA site is now routed to `intergenic_novel` (when strand-consistent with enough barcodes) rather than flagged as a hotspot.
 
-3. **README is missing three v0.6.0 features.** Reverse-complement TSO matching, strand-aware internal priming, and the TSO-concatemer metric are all in `docs/documentation.md` but not in `README.md`. Users who read only the README will not know about them.
+3. **README missing three v0.6.0 features (resolved).** Reverse-complement TSO matching, strand-aware internal priming, and the TSO-concatemer metric now have an Artifact flags section in the README.
 
-4. **`KINNEX_ADAPTER` is dead code.** Defined at `constants.py:254` with a comment about skera segmentation, but never referenced in any module. There is no Kinnex-specific artifact detector. Remove the constant or implement the detector; until then, do not claim Kinnex-segmentation detection.
+4. **`KINNEX_ADAPTER` dead code (resolved).** The unused constant and its misleading skera comment were removed. There is no Kinnex-specific artifact detector; imperfectly segmented reads surface as chimeras or TSO concatemers.
 
-5. **Duplicate full-length thresholds.** `constants.py:337-338` defines `FULL_LENGTH_MIN_LENGTH_ONT`/`_PACBIO` (500 / 1000), but `metrics.py` uses its own local `FULL_LENGTH_THRESHOLD` dict (`metrics.py:79-83`) with the same numbers. Editing the constants.py values will not change behavior; edit `metrics.py:79-83`. Consolidate to one source.
+5. **Duplicate full-length thresholds (resolved).** The length fallback now lives only in `constants.py` as `FULL_LENGTH_THRESHOLD`, imported by `metrics.py`. The redundant `FULL_LENGTH_MIN_LENGTH_*` constants were removed, so the threshold has a single source.
 
-6. **Example outputs are stale.** The bundled `results_examples/` files predate `n_tso_concatemer` and do not contain it, and their `multiqc.json` lacks the artifact-flag fractions that the current `to_multiqc_json` emits. Regenerate the examples with v0.6.0.
-
-None of these change the core classification result for a typical run; items 1, 2, 4 are documentation-versus-code mismatches and items 5, 6 are maintenance issues.
+6. **Example outputs are stale (open).** The bundled `results_examples/` files predate `n_tso_concatemer` and their `multiqc.json` lacks the artifact-flag fractions the current code emits. Regenerating them requires rerunning the tool on BAMs and is tracked separately.
 
 ---
 

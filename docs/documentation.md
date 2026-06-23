@@ -1,6 +1,6 @@
 # scNoiseMeter Documentation
 
-Version 0.6.0
+Version 0.6.1
 
 ---
 
@@ -87,8 +87,8 @@ Every primary alignment receives exactly one category. The classification hierar
 | `SECONDARY` | `secondary` | SAM flag 0x100. Record is skipped entirely. |
 | `SUPPLEMENTARY` | `supplementary` | SAM flag 0x800. Record is skipped; the `SA` tag on the primary alignment is what the chimeric detector uses. |
 | `MULTIMAPPER` | `multimapper` | Primary alignment with NH tag > 1. Highest priority in the classification hierarchy, so any NH > 1 read is assigned this category regardless of its genomic context. |
-| `CHIMERIC` | `chimeric` | SA tag present AND the split is inter-chromosomal, strand-discordant, or the same-strand intra-chromosomal distance exceeds the chimeric distance threshold (default 10,000 bp). For Illumina paired-end BAMs, also triggered when the absolute template length exceeds 1,000,000 bp. |
 | `MITOCHONDRIAL` | `mitochondrial` | Maps to the mitochondrial contig (chrM, MT, chrMT, or mitochondrion). |
+| `CHIMERIC` | `chimeric` | SA tag present AND the split is inter-chromosomal, strand-discordant, or the same-strand intra-chromosomal distance exceeds the chimeric distance threshold (default 10,000 bp). For Illumina paired-end BAMs, also triggered when the absolute template length exceeds 1,000,000 bp. |
 | `EXONIC_SENSE` | `exonic_sense` | Overlaps at least one annotated exon base on the correct strand. |
 | `EXONIC_ANTISENSE` | `exonic_antisense` | Overlaps at least one annotated exon base on the wrong strand. |
 | `INTRONIC_JXNSPAN` | `intronic_jxnspan` | Maps within an intron but the CIGAR contains an N operation near a splice site (candidate intron-retention or non-consensus transcript). |

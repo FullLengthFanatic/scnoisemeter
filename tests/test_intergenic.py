@@ -110,10 +110,11 @@ class TestHotspotRule:
     def test_has_junction_not_hotspot(self):
         assert not _is_hotspot(is_monoexonic=False, polya_run_downstream=True, near_polya_site=False)
 
-    def test_near_known_polya_does_not_override(self):
-        # near_polya_site alone doesn't change hotspot rule — still hotspot
-        # if monoexonic + polya_run, regardless of polya site proximity
-        assert _is_hotspot(is_monoexonic=True, polya_run_downstream=True, near_polya_site=True)
+    def test_near_known_polya_is_not_hotspot(self):
+        # A monoexonic A-run locus that sits near an annotated polyA site is
+        # not an internal-priming hotspot; proximity to a real polyA site is
+        # evidence for a transcript, so it is routed to INTERGENIC_NOVEL.
+        assert not _is_hotspot(is_monoexonic=True, polya_run_downstream=True, near_polya_site=True)
 
 
 class TestNovelGeneRule:
