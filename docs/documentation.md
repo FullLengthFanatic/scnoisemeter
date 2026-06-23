@@ -49,9 +49,13 @@ Because the reverse-complement and strand-aware changes shift metric values for 
 
 ## 2. Installation
 
+scNoiseMeter is installed from GitHub (it is not on PyPI):
+
 ```
-pip install scnoisemeter
+pip install git+https://github.com/FullLengthFanatic/scnoisemeter.git
 ```
+
+On a shared server without admin rights, add `--user`. Or install from a clone (`pip install .`, or `pip install -e ".[dev]"` for an editable dev install with test tooling).
 
 Dependencies (installed automatically):
 
@@ -63,12 +67,6 @@ Dependencies (installed automatically):
 - plotly >= 5.18
 - scipy >= 1.11
 - tqdm >= 4.66
-
-Development extras:
-
-```
-pip install "scnoisemeter[dev]"
-```
 
 The BAM must be coordinate-sorted and indexed before use:
 
