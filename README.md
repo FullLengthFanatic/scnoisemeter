@@ -301,7 +301,7 @@ If you use scNoiseMeter in your work, please cite the archived version via the c
 
 > Picelli, S. scNoiseMeter: platform-agnostic quantification of technical noise in single-cell RNA-seq. Zenodo. https://doi.org/10.5281/zenodo.19554841
 
-To cite a specific release, use its version DOI. Latest: v0.6.0 → [10.5281/zenodo.20502961](https://doi.org/10.5281/zenodo.20502961).
+To cite a specific release, use its version DOI. Latest: v0.6.1 → [10.5281/zenodo.20823118](https://doi.org/10.5281/zenodo.20823118).
 
 BibTeX:
 
