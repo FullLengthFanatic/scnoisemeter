@@ -1,6 +1,6 @@
 # scNoiseMeter annotated methods
 
-**Code-linked implementation companion for version 0.7.0**
+**Code-linked implementation companion for version 0.7.1**
 
 This document maps the scientific rules to modules and functions. It avoids fixed line numbers because they become stale during refactoring. See [whitepaper.md](whitepaper.md) for rationale and literature context, and [documentation.md](documentation.md) for the CLI/output reference.
 
@@ -92,7 +92,7 @@ Independent artifact/context checks run for every classified primary alignment, 
 
 ### Multimapper
 
-`_is_multimapper()` uses `NH > 1` when `NH` exists. If it does not, MAPQ 0 and non-empty `XA` are conservative fallbacks. A low but non-zero MAPQ does not imply multimapping because MAPQ scales differ between aligners.
+`_is_multimapper()` uses `NH > 1` when `NH` exists. If `NH` is absent, a non-empty `XA` tag is accepted as explicit alternative-hit evidence. MAPQ alone does not establish how many alignments were reported: it is a mapping-confidence score, and aligner conventions differ. Low-MAPQ records retain their genomic category and are reported through the independent low-MAPQ metric.
 
 ### Chimeric alignment
 

@@ -78,7 +78,7 @@ CATEGORY_CRITERIA: dict[ReadCategory, str] = {
     ReadCategory.UNMAPPED:            "Did not align to the reference genome.",
     ReadCategory.SECONDARY:           "SAM flag 0x100 — duplicate multi-mapper record, skipped.",
     ReadCategory.SUPPLEMENTARY:       "SAM flag 0x800 — split alignment partner, passed to chimeric detector only.",
-    ReadCategory.MULTIMAPPER:         "NH tag > 1: aligns equally well to multiple genomic loci.",
+    ReadCategory.MULTIMAPPER:         "Explicit multi-hit evidence: NH tag > 1, or non-empty XA when NH is absent. MAPQ 0 alone is reported separately as low MAPQ.",
     ReadCategory.CHIMERIC:            "SA evidence is inter-chromosomal, strand-discordant, or incompatible in query/genomic order; extreme paired insert size is a fallback.",
     ReadCategory.MITOCHONDRIAL:       "Maps to the mitochondrial chromosome (chrM / MT).",
     ReadCategory.EXONIC_SENSE:        "≥1 aligned base overlaps an annotated exon on the same strand as the read.",
