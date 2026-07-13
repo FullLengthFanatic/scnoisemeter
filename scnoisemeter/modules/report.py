@@ -5,9 +5,8 @@ Generates interactive HTML reports using Plotly.
 
 Single-sample report (run mode)
 --------------------------------
-  - Noise profile donut chart (read fractions by category)
-  - Noise profile bar chart (base fractions by category)
-  - Per-cell noise distribution (violin + strip plot)
+  - Alignment-category composition charts
+  - Per-cell broad non-canonical composition
   - Read length distributions per category (overlapping histograms)
   - Artifact flag summary (TSO, polyA, non-canonical junctions)
   - Sample metadata table
@@ -15,20 +14,19 @@ Single-sample report (run mode)
 
 Comparison report (compare mode)
 ---------------------------------
-  - Side-by-side noise profile bars (A vs B)
-  - Delta plot showing change per category with significance indicators
-  - Per-cell noise distribution shift (paired violin)
+  - Side-by-side category composition bars (A vs B)
+  - Descriptive delta plot
+  - Per-cell broad-composition shift (paired violin)
   - Read length distribution overlays
   - Statistics table from comparison.stats.tsv
 
-All plots are written into a single self-contained HTML file.
-Plotly JS is loaded from CDN — requires internet access to render.
+All plots are written into one HTML file. Plotly JavaScript is loaded from a
+CDN by default or embedded when offline report mode is requested.
 For fully offline reports, set offline=True (embeds the JS, ~3 MB).
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Optional
@@ -36,15 +34,10 @@ from typing import Optional
 import pandas as pd
 import plotly.io as pio
 
-from scnoisemeter.constants import (
-    AMBIGUOUS_CATEGORIES,
-    NOISE_CATEGORIES,
-)
 from scnoisemeter.modules.metrics import CellTable, SampleMetrics
 from scnoisemeter.modules.report_figures import (
-    CATEGORY_COLOURS,
-    CATEGORY_CRITERIA,
-    CATEGORY_LABELS,
+    CATEGORY_COLOURS as CATEGORY_COLOURS,
+    CATEGORY_LABELS as CATEGORY_LABELS,
     _artifact_flags,
     _base_fraction_bars,
     _category_legend,
@@ -54,7 +47,7 @@ from scnoisemeter.modules.report_figures import (
     _comparison_lengths,
     _comparison_violin,
     _delta_plot,
-    _fraction_bar,
+    _fraction_bar as _fraction_bar,
     _insert_size_distribution,
     _intergenic_loci_plots,
     _length_distributions,
@@ -96,11 +89,11 @@ def write_run_report(
     output_path : Path
         Destination HTML file.
     cluster_df : pd.DataFrame, optional
-        Per-cluster noise metrics from compute_cluster_metrics().
+        Per-cluster category and aggregate metrics from compute_cluster_metrics().
         When provided, adds cluster decomposition plots to the report.
     length_stratified : pd.DataFrame, optional
         Output of compute_length_stratification().  When provided, a stacked
-        horizontal bar chart ("Noise by read length") is added after the
+        horizontal composition-by-length chart is added after the
         classification bar charts.
     offline : bool
         If True, embed Plotly JS in the HTML (no internet required).
@@ -146,7 +139,7 @@ def write_run_report(
                 "insert size distribution plot was not generated."
             )
 
-    # Intergenic loci plots (only when profiler ran and found significant loci)
+    # Intergenic window plots (only when the profiler ran)
     if intergenic_loci:
         for fig_ig in _intergenic_loci_plots(intergenic_loci):
             if fig_ig.data:
@@ -161,7 +154,7 @@ def write_run_report(
     if is_illumina_sc:
         report_warnings.append(
             "Illumina short-read data: TSS-anchored and polyA-anchored "
-            "full-length metrics reflect read-end proximity only.  Because "
+            "fractions reflect read-end proximity only. Because "
             "reads are 50\u2013150 bp, they rarely span an entire transcript.  "
             "These values should NOT be compared directly with long-read "
             "TSS/polyA fractions; they indicate strand-correct 5\u2032 or 3\u2032 "
@@ -173,22 +166,16 @@ def write_run_report(
         if _unstranded:
             report_warnings.append(
                 "Unstranded protocol (Smart-seq / FLASH-seq): "
-                "reads on both strands are sequenced, so ~30–35% of reads are expected "
-                "to map antisense to annotated genes. "
-                "The reported Noise fraction EXCLUDES these antisense exonic reads — "
-                "they are genuine cDNA signal, not artifacts. "
-                "Strand concordance (~50%) is expected for non-stranded libraries and "
-                "is not informative here."
+                "The broad non-canonical fraction EXCLUDES these antisense exonic reads — "
+                "orientation-dependent TSS/polyA anchoring is suppressed, and strand "
+                "concordance is not interpreted as an artifact metric."
             )
-        report_warnings.append(
-            "Smart-seq data: TSS-anchored and polyA-anchored fractions are "
-            "computed per individual read.  In paired-end Smart-seq BAMs, R1 and "
-            "R2 of the same molecule sample both ends of the cDNA — R1 proximity "
-            "to a CAGE peak and R2 proximity to a polyA site are both informative "
-            "for full-length capture quality.  These fractions can be compared "
-            "across Smart-seq experiments but should not be compared directly with "
-            "long-read full-molecule fractions."
-        )
+        elif getattr(sm, "both_ends_anchored_frac", None) is not None:
+            report_warnings.append(
+                "Smart-seq endpoint fractions are computed on each alignment, not by "
+                "combining R1 and R2 into a molecule. Interpret them as read-level "
+                "atlas proximity."
+            )
 
     html = _assemble_html(
         figures=figures,
@@ -263,43 +250,46 @@ def _metadata_table(sm: SampleMetrics) -> str:
          if _is_smartseq else sm.pipeline_stage),
         ("Aligner",         sm.aligner or "unknown"),
         ("Total reads",     f"{sm.n_reads_total:,}"),
+        ("Unmapped reads",  f"{sm.n_reads_unmapped:,} ({sm.unmapped_read_frac:.2%})"),
         ("Classified reads", f"{sm.n_reads_classified:,}"),
         ("Cells detected",
          "N/A (Smart-seq: 1 cell per BAM)" if _is_smartseq
          else f"{sm.n_cells:,}" if sm.n_cells > 1
          else "N/A — barcode-agnostic mode (no CB tags in BAM)"),
-        ("Noise — conservative (reads)",
-         f"{sm.noise_read_frac:.2%}  "
-         "(includes intronic pure/boundary — upper bound; may contain genuine pre-mRNA)"),
-        ("Noise — strict (reads)",
-         f"{sm.noise_read_frac_strict:.2%}  "
-         "(unambiguous RT/PCR artifacts only — lower bound)"),
-        ("Noise (bases)",   f"{sm.noise_base_frac:.2%}"),
+        ("Broad non-canonical composition (reads)",
+         f"{sm.broad_noncanonical_read_frac:.2%}  "
+         "(descriptive; may contain genuine biology)"),
+        ("Artifact-candidate composition (reads)",
+         f"{sm.artifact_candidate_read_frac:.2%}  "
+         "(positive alignment evidence; not a causal noise estimate)"),
+        ("Broad non-canonical composition (bases)",
+         f"{sm.broad_noncanonical_base_frac:.2%}"),
         ("Strand concordance",
          "~50% (expected — unstranded protocol)" if getattr(sm, "is_unstranded", False)
          else f"{sm.strand_concordance:.2%}"),
         ("Chimeric rate",   f"{sm.chimeric_read_frac:.2%}"),
     ]
-    if sm.full_length_read_frac is not None:
-        if getattr(sm, "_polya_sites_used", False):
-            label = "3′-end at annotated polyA site"
-            tooltip = "(fraction of exonic-sense reads ending within 50 bp of a known polyA site)"
-        else:
-            label = "Full-length read fraction"
-            tooltip = "(length proxy — provide --polya-sites for the polyA-anchored metric)"
-        rows.append((label, f"{sm.full_length_read_frac:.2%} {tooltip}"))
-
-    if getattr(sm, "tss_anchored_frac", None) is not None:
+    if sm.three_prime_anchored_frac is not None:
         rows.append((
-            "5′-end at annotated TSS",
-            f"{sm.tss_anchored_frac:.2%}  "
-            "(fraction of exonic-sense reads starting within 100 bp of a CAGE peak)",
+            "3′-end at strand-matched polyA site",
+            f"{sm.three_prime_anchored_frac:.2%}",
+        ))
+    if sm.five_prime_anchored_frac is not None:
+        rows.append((
+            "5′-end at strand-matched TSS",
+            f"{sm.five_prime_anchored_frac:.2%}",
+        ))
+    if sm.both_ends_anchored_frac is not None:
+        rows.append((
+            "Both ends anchored on the same read",
+            f"{sm.both_ends_anchored_frac:.2%}  "
+            "(candidate complete molecules; transcript compatibility not asserted)",
         ))
 
-    if getattr(sm, "numt_read_frac", None) is not None:
+    if getattr(sm, "n_numt_intervals_loaded", None) is not None:
         rows.append((
             "NUMT intervals loaded",
-            f"{int(sm.numt_read_frac):,}  "
+            f"{int(sm.n_numt_intervals_loaded):,}  "
             "(nuclear mitochondrial segments; full NUMT disambiguation requires dual-alignment)",
         ))
 
@@ -394,8 +384,8 @@ def _comparison_metadata_table(sm_a: SampleMetrics, sm_b: SampleMetrics) -> str:
         ("Pipeline stage",  "pipeline_stage"),
         ("Total reads",     "n_reads_total"),
         ("Cells detected",  "n_cells"),
-        ("Noise (reads)",   "noise_read_frac"),
-        ("Noise (bases)",   "noise_base_frac"),
+        ("Broad non-canonical (reads)", "broad_noncanonical_read_frac"),
+        ("Artifact candidates (reads)", "artifact_candidate_read_frac"),
         ("Strand concordance", "strand_concordance"),
         ("Chimeric rate",   "chimeric_read_frac"),
     ]
@@ -423,10 +413,6 @@ def _assemble_html(
     warnings: list,
     offline: bool,
 ) -> str:
-    include_plotlyjs = "cdn"
-    if offline:
-        include_plotlyjs = True
-
     fig_divs = []
     for fig in figures:
         div = pio.to_html(fig, full_html=False, include_plotlyjs=False)

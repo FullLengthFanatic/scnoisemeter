@@ -35,8 +35,11 @@ from scnoisemeter.modules.classifier import (
     ReadClassifier,
     _add_bases,
     _bases_in,
+    _check_junction_canonicality,
+    _get_junctions,
     _get_jxn_positions,
     _overlaps_any,
+    _partition_block,
     _revcomp,
 )
 from scnoisemeter.modules.metrics import compute_length_stratification, compute_metrics, CellTable
@@ -146,6 +149,142 @@ class TestJunctionPositions:
         assert len(positions) == 2
         assert positions[0] == 30
         assert positions[1] == 560   # 30 + 500 + 30
+
+    def test_exact_junction_boundaries(self):
+        read = self._make_read([(0, 50), (3, 100), (0, 25)], ref_start=1000)
+        assert _get_junctions(read) == [(1050, 1150)]
+
+
+class TestJunctionCanonicality:
+    class _Reference:
+        def __init__(self, values):
+            self.values = values
+
+        def fetch(self, contig, start, end):
+            return self.values[(contig, start, end)]
+
+    def test_plus_strand_requires_donor_and_acceptor(self):
+        ref = self._Reference({
+            ("chr1", 100, 102): "GT",
+            ("chr1", 198, 200): "AG",
+        })
+        assert _check_junction_canonicality(ref, "chr1", 100, 200, "+")
+        ref.values[("chr1", 198, 200)] = "TT"
+        assert not _check_junction_canonicality(ref, "chr1", 100, 200, "+")
+
+    def test_minus_strand_is_checked_in_transcript_orientation(self):
+        ref = self._Reference({
+            ("chr1", 100, 102): "CT",  # reverse complement of AG
+            ("chr1", 198, 200): "AC",  # reverse complement of GT
+        })
+        assert _check_junction_canonicality(ref, "chr1", 100, 200, "-")
+
+
+class TestAtomicBasePartition:
+    @staticmethod
+    def _intervals(*pairs):
+        pairs = sorted(pairs)
+        prefix = []
+        maximum = 0
+        for _start, end in pairs:
+            maximum = max(maximum, end)
+            prefix.append(maximum)
+        return pairs, prefix
+
+    def test_complex_overlaps_never_double_count(self):
+        empty = ([], [])
+        intervals = {
+            "shared_cod_cod": self._intervals((20, 40)),
+            "shared_cod_ncod": self._intervals((35, 55)),
+            "exon_sense": self._intervals((0, 70)),
+            "exon_anti": self._intervals((50, 90)),
+            "intron_sense": self._intervals((65, 100)),
+            "intron_anti": empty,
+        }
+        counts = _partition_block(intervals, 0, 100)
+        assert sum(counts.values()) == 100
+        assert counts[ReadCategory.AMBIGUOUS_COD_COD] == 20
+        assert counts[ReadCategory.AMBIGUOUS_COD_NCOD] == 15
+        assert counts[ReadCategory.EXONIC_SENSE] == 35
+        assert counts[ReadCategory.EXONIC_ANTISENSE] == 20
+        assert counts[ReadCategory.INTRONIC_PURE] == 10
+
+
+class TestPipelineAggregationCorrections:
+    def _meta(self):
+        from scnoisemeter.constants import Platform, PipelineStage
+        from scnoisemeter.utils.bam_inspector import BamMetadata
+
+        meta = BamMetadata(path=Path("sample.bam"))
+        meta.platform = Platform.ONT
+        meta.pipeline_stage = PipelineStage.CUSTOM
+        return meta
+
+    def test_plate_barcode_relabel_updates_all_structures(self):
+        from scnoisemeter.modules.pipeline import SampleResult, relabel_barcode
+
+        result = SampleResult(Path("sample.bam"), self._meta())
+        result.read_counts["NO_BARCODE"][ReadCategory.EXONIC_SENSE] = 2
+        result.base_counts["NO_BARCODE"][ReadCategory.EXONIC_SENSE] = 200
+        result.umi_sets["NO_BARCODE"][ReadCategory.EXONIC_SENSE].add("AAAA")
+        result.artifact_flags["NO_BARCODE"]["low_mapq"] = 1
+        result.alignment_sums["NO_BARCODE"]["mapq_sum"] = 60
+        result.intergenic_reads.append(
+            ("chr1", 10, 20, "+", "NO_BARCODE", False, 20, 10, "AAAA", 10, "r/0")
+        )
+        result.read_assignments["r/0"] = (ReadCategory.INTERGENIC_SPARSE, "NO_BARCODE")
+
+        relabel_barcode(result, "NO_BARCODE", "P1_A1")
+
+        assert "NO_BARCODE" not in result.read_counts
+        assert result.read_counts["P1_A1"][ReadCategory.EXONIC_SENSE] == 2
+        assert result.alignment_sums["P1_A1"]["mapq_sum"] == 60
+        assert result.intergenic_reads[0][4] == "P1_A1"
+        assert result.read_assignments["r/0"][1] == "P1_A1"
+
+    def test_both_end_metric_requires_same_read(self):
+        from scnoisemeter.modules.pipeline import SampleResult
+
+        result = SampleResult(Path("sample.bam"), self._meta())
+        result.exonic_sense_endpoints.extend([
+            ("chr1", "+", 1000, 5000, "three_only"),
+            ("chr1", "+", 2000, 6000, "five_only"),
+        ])
+        result._polya_site_dict = {("chr1", "+"): [5000]}
+        result._tss_site_dict = {("chr1", "+"): [2000]}
+
+        metrics, _ = compute_metrics(result, "sample")
+        assert metrics.three_prime_anchored_frac == pytest.approx(0.5)
+        assert metrics.five_prime_anchored_frac == pytest.approx(0.5)
+        assert metrics.both_ends_anchored_frac == 0.0
+        assert metrics.full_length_read_frac == 0.0
+
+    def test_unmapped_fraction_uses_bam_total(self):
+        from scnoisemeter.modules.pipeline import SampleResult
+
+        result = SampleResult(Path("sample.bam"), self._meta())
+        result.n_reads_total = 100
+        result.n_reads_mapped_index = 80
+        result.n_reads_unmapped = 20
+        metrics, _ = compute_metrics(result, "sample")
+        assert metrics.unmapped_read_frac == pytest.approx(0.2)
+        assert metrics.n_records_total == 100
+        assert metrics.n_records_mapped == 80
+        assert metrics.n_records_unmapped == 20
+
+    def test_disabled_umi_tracking_is_missing_not_zero(self):
+        import math
+
+        from scnoisemeter.modules.pipeline import SampleResult
+
+        result = SampleResult(Path("sample.bam"), self._meta())
+        result.umi_tracking_enabled = False
+        result.read_counts["CELL"][ReadCategory.EXONIC_SENSE] = 10
+        result.base_counts["CELL"][ReadCategory.EXONIC_SENSE] = 1_000
+        _metrics, cells = compute_metrics(result, "sample")
+        assert math.isnan(
+            cells.df.loc["CELL", "umi_sequence_diversity_exonic_sense"]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -362,18 +501,26 @@ class TestResolveTSO:
 
     def test_make_tso_info_default(self):
         from scnoisemeter.cli import _make_tso_info
-        from scnoisemeter.constants import TSO_10X as _10x, TSO_PACBIO as _pb
         info = _make_tso_info(None, 12)
-        assert info["source"] == "default"
-        assert info["sequences"] == [_10x, _pb]
+        assert info["source"] == "disabled"
+        assert info["sequences"] == []
         assert info["min_match"] == 12
 
     def test_make_tso_info_user(self):
         from scnoisemeter.cli import _make_tso_info
         info = _make_tso_info(["ACGTACGTACGT"], 9)
-        assert info["source"] == "user-supplied"
+        assert info["source"] == "configured"
         assert info["sequences"] == ["ACGTACGTACGT"]
         assert info["min_match"] == 9
+
+    def test_protocol_aware_defaults_are_conservative(self):
+        from scnoisemeter.cli import _default_tso_sequences
+        from scnoisemeter.constants import Platform, TSO_PACBIO
+
+        assert _default_tso_sequences(Platform.UNKNOWN) == []
+        assert _default_tso_sequences(Platform.ILLUMINA) == []
+        assert _default_tso_sequences(Platform.PACBIO) == [TSO_PACBIO]
+        assert _default_tso_sequences(Platform.ONT) == [TSO_10X]
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +540,7 @@ class TestChimericDetection:
         read.reference_name = contig
         read.reference_start = pos
         read.is_reverse = is_reverse
+        read.cigarstring = "100M"
         return read
 
     def test_interchromosomal_is_chimeric(self):
@@ -411,12 +559,20 @@ class TestChimericDetection:
         assert is_chimeric
         assert "strand-discordant" in reason
 
-    def test_far_same_strand_is_chimeric(self):
+    def test_far_same_strand_is_not_sufficient_for_chimera(self):
         clf = self._make_classifier(chimeric_distance=10_000)
-        # SA on same chromosome, same strand, 50 kb away
+        # A long same-strand genomic gap can be a legitimate intron.
         read = self._make_read("chr1,60000,+,100M,255,0;", "chr1", 1000, False)
+        is_chimeric, _ = clf._check_chimeric(read)
+        assert not is_chimeric
+
+    def test_incompatible_query_and_genomic_order_is_chimeric(self):
+        clf = self._make_classifier()
+        read = self._make_read("chr1,500,+,100S100M,255,0;", "chr1", 1000, False)
+        read.cigarstring = "100M100S"
         is_chimeric, reason = clf._check_chimeric(read)
         assert is_chimeric
+        assert "incompatible" in reason
 
     def test_close_same_strand_not_chimeric(self):
         clf = self._make_classifier(chimeric_distance=10_000)
@@ -980,14 +1136,14 @@ class TestPairedEndChimericDetection:
         read.is_reverse = bool(flag & SamFlag.REVERSE_STRAND)
         return read
 
-    def test_discordant_mate_unmapped_is_chimeric(self):
-        """FLAG 0x001 (paired) | 0x008 (mate unmapped) → chimeric."""
+    def test_mate_unmapped_is_discordant_not_chimeric(self):
+        """An orphan pair is a QC flag, not evidence of a fusion."""
         clf = self._make_classifier()
         flag = SamFlag.PAIRED | SamFlag.MATE_UNMAPPED
         read = self._make_paired_read(flag=flag)
-        is_chimeric, reason = clf._check_chimeric(read)
-        assert is_chimeric
-        assert "mate" in reason.lower() and "unmapped" in reason.lower()
+        is_chimeric, _ = clf._check_chimeric(read)
+        assert not is_chimeric
+        assert clf._is_discordant_pair(read)
 
     def test_interchromosomal_pair_is_chimeric(self):
         """Read on chr1, mate on chr2 → chimeric."""

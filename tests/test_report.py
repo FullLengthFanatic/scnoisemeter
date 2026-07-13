@@ -173,7 +173,7 @@ class TestIlluminaInsertSizePlot:
 class TestLongReadPlatformsRegression:
     def test_ont_has_noise_by_read_length(self, tmp_path):
         html = _write_report(tmp_path, platform="ont")
-        assert "Noise by read length" in html
+        assert "Broad non-canonical composition by read length" in html
 
     def test_ont_has_read_length_distributions(self, tmp_path):
         html = _write_report(tmp_path, platform="ont")
@@ -181,7 +181,7 @@ class TestLongReadPlatformsRegression:
 
     def test_pacbio_has_noise_by_read_length(self, tmp_path):
         html = _write_report(tmp_path, platform="pacbio")
-        assert "Noise by read length" in html
+        assert "Broad non-canonical composition by read length" in html
 
     def test_pacbio_has_read_length_distributions(self, tmp_path):
         html = _write_report(tmp_path, platform="pacbio")
@@ -331,7 +331,7 @@ def _write_compare(tmp_path, n_cells_a: int, n_cells_b: int) -> str:
 class TestCompareViolinBarcodeAgnostic:
     def test_violin_present_when_both_have_cells(self, tmp_path):
         html = _write_compare(tmp_path, n_cells_a=50, n_cells_b=50)
-        assert "Per-cell noise fraction" in html
+        assert "Per-cell broad non-canonical composition" in html
 
     def test_violin_absent_when_sample_a_agnostic(self, tmp_path):
         html = _write_compare(tmp_path, n_cells_a=1, n_cells_b=50)

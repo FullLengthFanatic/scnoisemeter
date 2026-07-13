@@ -23,7 +23,6 @@ fallback.
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -35,8 +34,6 @@ from scnoisemeter.constants import (
     BARCODE_AUTODETECT_MIN_FRACTION,
     BARCODE_AUTODETECT_SAMPLE_SIZE,
     BamTag,
-    Chemistry,
-    CHEMISTRY_BARCODE_LENGTH,
     Platform,
     PipelineStage,
 )
@@ -143,7 +140,13 @@ def inspect_bam(
         Number of reads to sample for barcode-tag presence check.
     """
     bam_path = Path(bam_path)
-    meta = BamMetadata(path=bam_path, barcode_tag=barcode_tag, umi_tag=umi_tag)
+    meta = BamMetadata(
+        path=bam_path,
+        barcode_tag=barcode_tag,
+        umi_tag=umi_tag,
+        platform=platform or Platform.UNKNOWN,
+        platform_confidence="user" if platform is not None else "unknown",
+    )
 
     with pysam.AlignmentFile(str(bam_path), "rb") as bam:
         _parse_header(bam, meta)
@@ -223,6 +226,12 @@ def _parse_header(bam: pysam.AlignmentFile, meta: BamMetadata) -> None:
     # (may set meta.aligner via CL-path detection, e.g. cellranger)
     _refine_platform_from_pipeline_hints(meta)
 
+    if meta.aligner and meta.platform == Platform.UNKNOWN:
+        meta.warnings.append(
+            f"Aligner '{meta.aligner}' does not uniquely identify the sequencing "
+            "platform or library protocol. Pass --platform explicitly."
+        )
+
     # Only warn if aligner is still unresolved after all detection paths
     if not meta.aligner:
         meta.warnings.append(
@@ -243,12 +252,13 @@ def _refine_platform_from_pipeline_hints(meta: BamMetadata) -> None:
       - "isoseq3" or "pbmm2" in hints → PacBio
       - "cellranger" in hints → Illumina 10x
     """
+    if meta.platform_confidence == "user":
+        return
+
     hints_lower = [h.lower() for h in meta.pipeline_hints]
 
     ont_signals   = {"wf-single-cell", "guppy", "dorado", "bonito", "ont"}
     pacbio_signals = {"isoseq3", "pbmm2", "skera", "lima", "ccs", "kinnex"}
-    illumina_signals = {"cellranger", "starsolo", "star", "spaceranger"}
-
     for signal in ont_signals:
         if any(signal in h for h in hints_lower):
             meta.platform = Platform.ONT
@@ -261,8 +271,8 @@ def _refine_platform_from_pipeline_hints(meta: BamMetadata) -> None:
             meta.platform_confidence = "header"
             return
 
-    # Illuminate SC (10x/BD) signals are distinct from bare STAR.
-    # cellranger/starsolo/spaceranger → 10x-family; bare STAR only → Smart-seq.
+    # Illumina single-cell signals are distinct from bare STAR.
+    # An aligner alone cannot establish chemistry or strandedness.
     illumina_sc_signals = {"cellranger", "starsolo", "spaceranger"}
     has_sc = any(any(s in h for h in hints_lower) for s in illumina_sc_signals)
     has_star = any("star" in h for h in hints_lower)
@@ -282,9 +292,14 @@ def _refine_platform_from_pipeline_hints(meta: BamMetadata) -> None:
         return
 
     if has_star:
-        # STAR without any 10x-specific tools → Smart-seq (plate-based, no CB tags)
-        meta.platform = Platform.SMARTSEQ
-        meta.platform_confidence = "header"
+        meta.platform = Platform.ILLUMINA
+        meta.platform_confidence = "inferred"
+        meta.warnings.append(
+            "Bare STAR header detected. This does not identify the library as "
+            "Smart-seq, BD Rhapsody, bulk RNA-seq, or another protocol. Pass "
+            "--platform explicitly so paired-end and strandedness interpretation "
+            "match the experiment."
+        )
         return
 
 

@@ -159,9 +159,9 @@ class TestRefinePlatformHints:
         _refine_platform_from_pipeline_hints(meta)
         return meta
 
-    def test_star_alone_gives_smartseq(self):
+    def test_star_alone_gives_generic_illumina(self):
         meta = self._make_meta_unknown(["STAR"])
-        assert meta.platform == Platform.SMARTSEQ
+        assert meta.platform == Platform.ILLUMINA
 
     def test_star_with_starsolo_gives_illumina_10x(self):
         meta = self._make_meta_unknown(["STAR", "STARsolo"])

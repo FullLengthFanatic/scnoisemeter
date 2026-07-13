@@ -11,7 +11,7 @@ should hard-code these values.  This makes the taxonomy easy to audit, extend,
 and document.
 """
 
-from enum import Enum, auto
+from enum import Enum
 
 
 # ---------------------------------------------------------------------------
@@ -20,17 +20,20 @@ from enum import Enum, auto
 
 class ReadCategory(str, Enum):
     """
-    Exhaustive, mutually-exclusive classification of every primary alignment.
+    Mutually-exclusive classification of every analysed, mapped primary
+    alignment.  Unmapped, secondary and supplementary record totals are
+    reported separately because they do not carry a comparable genomic
+    location classification.
 
     Hierarchy (earlier entries take priority over later ones during assignment):
 
       UNMAPPED          – read did not align; excluded from all fractions
       SECONDARY         – SAM flag 0x100; skipped (redundant record)
       SUPPLEMENTARY     – SAM flag 0x800; routed to chimeric detector only
-      MULTIMAPPER       – primary alignment with NH > 1
-      CHIMERIC          – SA tag present AND (inter-chromosomal OR
-                          strand-discordant OR same-strand distance > threshold)
+      MULTIMAPPER       – primary alignment with explicit multi-hit evidence
       MITOCHONDRIAL     – maps to the mitochondrial contig (chrM / MT)
+      CHIMERIC          – SA tag with inter-chromosomal, strand-discordant,
+                          or incompatible query/genomic order evidence
       EXONIC_SENSE      – overlaps ≥1 annotated exon base, correct strand
       EXONIC_ANTISENSE  – overlaps ≥1 annotated exon base, wrong strand
       INTRONIC_JXNSPAN  – intronic but CIGAR contains N near a splice site
@@ -44,6 +47,8 @@ class ReadCategory(str, Enum):
       INTERGENIC_NOVEL  – intergenic, passes adaptive threshold, strand-
                           consistent, near annotated polyA site (candidate
                           unannotated gene)
+      INTERGENIC_ENRICHED – enriched intergenic locus without enough evidence
+                            to call a hotspot or transcript candidate
       INTERGENIC_SPARSE – intergenic, below adaptive threshold (likely noise)
       AMBIGUOUS         – overlaps shared region of two or more genes
       UNASSIGNED        – CB tag absent or not on whitelist
@@ -63,6 +68,7 @@ class ReadCategory(str, Enum):
     INTERGENIC_REPEAT  = "intergenic_repeat"
     INTERGENIC_HOTSPOT = "intergenic_hotspot"
     INTERGENIC_NOVEL   = "intergenic_novel"
+    INTERGENIC_ENRICHED = "intergenic_enriched"
     INTERGENIC_SPARSE  = "intergenic_sparse"
     AMBIGUOUS          = "ambiguous"           # catch-all (should be rare after fixes)
     AMBIGUOUS_COD_NCOD = "ambiguous_cod_ncod"  # protein-coding vs lncRNA/pseudogene
@@ -81,6 +87,7 @@ CATEGORY_ORDER = [
     ReadCategory.INTERGENIC_REPEAT,
     ReadCategory.INTERGENIC_HOTSPOT,
     ReadCategory.INTERGENIC_NOVEL,
+    ReadCategory.INTERGENIC_ENRICHED,
     ReadCategory.CHIMERIC,
     ReadCategory.MITOCHONDRIAL,
     ReadCategory.MULTIMAPPER,
@@ -92,45 +99,43 @@ CATEGORY_ORDER = [
     # those reads are skipped before any aggregation loop that uses this list.
 ]
 
-# Categories counted as "noise" in summary noise-fraction metrics.
-# Intronic sub-categories are reported separately; users choose interpretation.
-NOISE_CATEGORIES = {
+# Broad non-canonical alignment composition.  These categories are useful for
+# diagnostic comparison, but they are not a causal estimate of technical
+# noise: every member can contain genuine biology in an appropriate context.
+BROAD_NONCANONICAL_CATEGORIES = {
     ReadCategory.EXONIC_ANTISENSE,
     ReadCategory.INTRONIC_PURE,
     ReadCategory.INTRONIC_BOUNDARY,
     ReadCategory.INTERGENIC_SPARSE,
     ReadCategory.INTERGENIC_REPEAT,
     ReadCategory.INTERGENIC_HOTSPOT,
+    ReadCategory.INTERGENIC_ENRICHED,
     ReadCategory.CHIMERIC,
 }
 
-# Conservative noise: includes INTRONIC_PURE and INTRONIC_BOUNDARY, which may
-# represent genuine pre-mRNA capture rather than RT/PCR artifacts. This is the
-# reported "Noise" fraction and represents an upper bound on true noise.
-NOISE_CATEGORIES_CONSERVATIVE = NOISE_CATEGORIES  # alias for clarity
-
-# Strict noise: only unambiguous RT/PCR/sequencing artifacts. Excludes
-# INTRONIC_PURE and INTRONIC_BOUNDARY because these cannot be distinguished
-# from genuine pre-mRNA capture at the read level. This is a lower bound on
-# true noise — everything in this set is definitively an artifact.
-NOISE_CATEGORIES_STRICT = {
-    ReadCategory.EXONIC_ANTISENSE,
-    ReadCategory.INTERGENIC_SPARSE,
-    ReadCategory.INTERGENIC_REPEAT,
+# Categories with positive alignment-level evidence for a possible artifact.
+# Even these remain "candidates": chimeric alignments may be real fusions and
+# A-rich hotspots can coincide with genuine transcript ends.
+ARTIFACT_CANDIDATE_CATEGORIES = {
     ReadCategory.INTERGENIC_HOTSPOT,
     ReadCategory.CHIMERIC,
 }
 
-# Unstranded-protocol noise: excludes EXONIC_ANTISENSE, which is genuine
-# cDNA signal in non-stranded libraries (Smart-seq2, FLASH-seq, Smart-seq3).
-# Use this when platform == SMARTSEQ to avoid inflating the noise fraction.
-NOISE_CATEGORIES_UNSTRANDED = NOISE_CATEGORIES - {ReadCategory.EXONIC_ANTISENSE}
-NOISE_CATEGORIES_STRICT_UNSTRANDED = NOISE_CATEGORIES_STRICT - {ReadCategory.EXONIC_ANTISENSE}
+# Backwards-compatible aliases.  Output fields using the old ``noise_*`` names
+# are retained through v0.7, but documentation labels them as deprecated.
+NOISE_CATEGORIES = BROAD_NONCANONICAL_CATEGORIES
+NOISE_CATEGORIES_CONSERVATIVE = BROAD_NONCANONICAL_CATEGORIES
+NOISE_CATEGORIES_STRICT = ARTIFACT_CANDIDATE_CATEGORIES
+NOISE_CATEGORIES_UNSTRANDED = (
+    BROAD_NONCANONICAL_CATEGORIES - {ReadCategory.EXONIC_ANTISENSE}
+)
+NOISE_CATEGORIES_STRICT_UNSTRANDED = ARTIFACT_CANDIDATE_CATEGORIES
 
 # Categories whose interpretation is ambiguous and reported separately
 AMBIGUOUS_CATEGORIES = {
     ReadCategory.INTRONIC_JXNSPAN,
     ReadCategory.INTERGENIC_NOVEL,
+    ReadCategory.INTERGENIC_ENRICHED,
     ReadCategory.AMBIGUOUS,
     ReadCategory.AMBIGUOUS_COD_NCOD,
     ReadCategory.AMBIGUOUS_COD_COD,
@@ -200,9 +205,13 @@ class Platform(str, Enum):
 # Known aligner @PG ID strings → platform mapping
 # Used for auto-detection from BAM header
 ALIGNER_PLATFORM_MAP = {
-    "minimap2":   Platform.ONT,       # default assumption for minimap2
+    # An aligner does not identify the sequencing platform.  Minimap2 is used
+    # for ONT and PacBio; bare STAR is used for many bulk and single-cell
+    # protocols.  Pipeline-specific @PG hints refine these UNKNOWN/generic
+    # values in bam_inspector.py.
+    "minimap2":   Platform.UNKNOWN,
     "pbmm2":      Platform.PACBIO,
-    "STAR":       Platform.ILLUMINA_10X,
+    "STAR":       Platform.ILLUMINA,
     "STARsolo":   Platform.ILLUMINA_10X,
     "cellranger": Platform.ILLUMINA_10X,
     "bwa":        Platform.UNKNOWN,
@@ -260,10 +269,9 @@ TSO_POLYG_MIN_LENGTH = 6
 # Chimeric read detection thresholds
 # ---------------------------------------------------------------------------
 
-# Default maximum intra-chromosomal same-strand distance (bp) below which a
-# split alignment is considered a legitimate splice, not a chimera.
-# Rationale: polyA+ cDNA molecules are typically <3 kb; RT processivity
-# limits capture to ~10–15 kb even for long transcripts.  10 kb is generous.
+# Deprecated compatibility value. Distance alone is never sufficient for a
+# chimera call because genomic distance includes introns; version 0.7 does not
+# use this value in the decision rule.
 DEFAULT_CHIMERIC_DISTANCE = 10_000  # bp
 
 # For Illumina paired-end: maximum intra-chromosomal insert size (bp) before
@@ -284,11 +292,15 @@ ADAPTIVE_MIN_BARCODES_ABSOLUTE = 3        # hard floor regardless of fraction
 # Minimum reads at locus for Poisson significance testing
 ADAPTIVE_MIN_READS = 5
 
-# Bonferroni-corrected p-value threshold for intergenic locus significance
+# Multiple-testing-adjusted enrichment threshold for fixed intergenic windows
 ADAPTIVE_PVALUE_THRESHOLD = 0.01
 
 # Window size (bp) for locus read-depth aggregation
 INTERGENIC_LOCUS_WINDOW = 500
+
+# Require this fraction of the sampled aligned bases at an intergenic window
+# to overlap RepeatMasker before assigning INTERGENIC_REPEAT.
+INTERGENIC_REPEAT_MIN_FRACTION = 0.50
 
 
 # ---------------------------------------------------------------------------
@@ -318,24 +330,8 @@ CANONICAL_SPLICE_SITES = {
 
 
 # ---------------------------------------------------------------------------
-# TSS proximity threshold for 5'-anchored full-length metric
+# TSS proximity threshold for 5'-anchored endpoint metric
 TSS_SITE_PROXIMITY = 100   # bp — CAGE peak half-width
-
-# NUMT: nuclear mitochondrial DNA segments
-# Reads mapping to chrM that also have a good match to a NUMT locus
-# are ambiguous; scNoiseMeter flags them separately when a NUMT BED is provided.
-NUMT_OVERLAP_FRACTION = 0.80   # fraction of read that must overlap NUMT
-
-# Full-length read detection
-# When a polyA site database is provided (--polya-sites), a read is considered
-# full-length if its 3′ end falls within POLYA_SITE_PROXIMITY bp of a known
-# polyA site.  Without the database, the fallback is a per-platform minimum
-# length threshold (keyed by platform string; "default" used for any other).
-FULL_LENGTH_THRESHOLD = {
-    "ont":      500,   # bp, fallback when no polyA site DB
-    "pacbio":  1000,   # bp, PacBio HiFi reads are longer
-    "default":  500,
-}
 
 # Cluster metadata column names (for --obs-metadata TSV)
 OBS_BARCODE_COL = "cell_barcode"
@@ -361,6 +357,10 @@ BARCODE_AUTODETECT_MIN_FRACTION = 0.50
 # ---------------------------------------------------------------------------
 
 DEFAULT_THREADS = 4
+
+# MAPQ scales differ between aligners. This threshold is therefore used only
+# for a descriptive low-confidence flag, never as a classification filter.
+LOW_MAPQ_THRESHOLD = 10
 
 
 # ---------------------------------------------------------------------------

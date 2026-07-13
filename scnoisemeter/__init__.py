@@ -1,11 +1,11 @@
 """
 scNoiseMeter
 ============
-Platform-agnostic quantification of technical noise in single-cell RNA-seq.
+Barcode-aware alignment artifact and read-distribution QC for single-cell RNA-seq.
 
 Supports ONT, PacBio/Kinnex, and short-read (Illumina, ElemBio) BAMs from 10x
 Genomics or BD Rhapsody kits, plus Smart-seq / FLASH-seq plates.
 """
 
-__version__ = "0.6.1"
+__version__ = "0.7.0"
 __author__ = "scNoiseMeter contributors"

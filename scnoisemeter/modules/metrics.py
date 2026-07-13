@@ -17,19 +17,18 @@ All fractions are computed twice:
 UNASSIGNED reads are included in the denominator (they are real reads, just
 unattributable to a cell).
 
-UMI complexity ratio
---------------------
-  umi_complexity_<category> = unique_UMIs / total_reads  (per cell per category)
-A ratio close to 1.0 means every read represents a distinct molecule
-(consistent with genuine transcription or rare events).
-A ratio << 1.0 means many reads share UMIs (expected for high-coverage
-genuine transcripts; suspicious if seen in noise categories).
+UMI sequence-diversity ratio
+----------------------------
+  umi_sequence_diversity_<category> = unique UMI strings / reads
 
-Full-length read fraction (long-read specific)
-----------------------------------------------
-Estimated from the fraction of exonic-sense reads whose length exceeds a
-platform-specific threshold (default: 500 bp for ONT, 1000 bp for PacBio).
-A proxy for RT completeness.
+This is not a molecule-complexity estimate: UMIs are not grouped by gene or
+genomic molecule and sequencing-error correction is not attempted.  The old
+``umi_complexity_*`` columns remain as compatibility aliases.
+
+End-anchoring fractions
+-----------------------
+Reported from the same exonic-sense read against strand-aware TSS and polyA
+atlases.  No read-length-only fallback is presented as full-length evidence.
 
 Strand concordance ratio
 ------------------------
@@ -41,17 +40,15 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 
+from scnoisemeter.modules.pipeline import SampleResult
+
 from scnoisemeter.constants import (
-    AMBIGUOUS_CATEGORIES,
     CATEGORY_ORDER,
-    FULL_LENGTH_THRESHOLD,
-    LENGTH_BIN_BREAKS,
     LENGTH_BIN_LABELS_LONG,
     LENGTH_BIN_LABELS_SHORT,
     LENGTH_SHORT_READ_THRESHOLD,
@@ -64,7 +61,6 @@ from scnoisemeter.constants import (
 
 # Ensure new sub-categories are excluded from noise (they go in ambiguous bucket)
 _AMBIGUOUS_SUB = {ReadCategory.AMBIGUOUS_COD_COD, ReadCategory.AMBIGUOUS_COD_NCOD}
-from scnoisemeter.modules.pipeline import SampleResult
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +89,21 @@ class SampleMetrics:
     n_reads_total:         int = 0
     n_reads_classified:    int = 0
     n_reads_unassigned:    int = 0
+    n_reads_mapped:        int = 0
+    n_reads_unmapped:      int = 0
+    n_primary_mapped:      int = 0
+    n_secondary:           int = 0
+    n_supplementary:       int = 0
+    n_qcfail:              int = 0
+    n_duplicate:           int = 0
     n_cells:               int = 0
+
+    # Precise aliases: BAM index counters are alignment-record counts, and
+    # classification is per mapped primary alignment (mates count separately).
+    n_records_total:       int = 0
+    n_records_mapped:      int = 0
+    n_records_unmapped:    int = 0
+    n_alignments_classified: int = 0
 
     # Per-category read fractions (sample-wide)
     read_fracs:            dict = field(default_factory=dict)
@@ -101,14 +111,17 @@ class SampleMetrics:
     # Per-category base fractions (sample-wide)
     base_fracs:            dict = field(default_factory=dict)
 
-    # Aggregate noise fractions
+    # Preferred, descriptive aggregate names.
+    broad_noncanonical_read_frac: float = 0.0
+    broad_noncanonical_base_frac: float = 0.0
+    artifact_candidate_read_frac: float = 0.0
+    artifact_candidate_base_frac: float = 0.0
+
+    # Deprecated compatibility aliases for pre-v0.7 consumers.
     noise_read_frac:       float = 0.0
     noise_base_frac:       float = 0.0
 
-    # Strict noise: only unambiguous RT/PCR artifacts (excludes INTRONIC_PURE
-    # and INTRONIC_BOUNDARY which may represent genuine pre-mRNA capture).
-    # Conservative noise (noise_read_frac above) includes these and is an
-    # upper bound. Strict noise is a lower bound. True noise lies between them.
+    # ``strict`` now aliases artifact_candidate_*; it is not a lower bound.
     noise_read_frac_strict: float = 0.0
     noise_base_frac_strict: float = 0.0
 
@@ -120,6 +133,11 @@ class SampleMetrics:
 
     # Multimapper rate
     multimapper_read_frac: float = 0.0
+    unmapped_read_frac:    float = 0.0
+    low_mapq_read_frac:    float = 0.0
+    mean_mapq:             Optional[float] = None
+    mean_edit_distance:    Optional[float] = None
+    softclip_base_frac:    Optional[float] = None
 
     # True when the protocol is non-stranded (e.g. Smart-seq2 / FLASH-seq).
     # When True, noise_read_frac excludes EXONIC_ANTISENSE — those reads are
@@ -127,21 +145,29 @@ class SampleMetrics:
     is_unstranded: bool = False
 
     # Soft-clip fraction (reported separately — see bam_inspector)
-    # UMI complexity per category (mean across cells)
+    # UMI sequence diversity per category (mean across cells). The historical
+    # ``umi_complexity`` name is retained as a compatibility alias.
+    umi_sequence_diversity: dict = field(default_factory=dict)
     umi_complexity:        dict = field(default_factory=dict)
 
-    # Full-length read fraction (long-read specific)
+    # End anchoring. ``full_length_read_frac`` is a deprecated alias for
+    # both_ends_anchored_frac and is only populated when both atlases exist.
     full_length_read_frac: Optional[float] = None
+    three_prime_anchored_frac: Optional[float] = None
+    five_prime_anchored_frac: Optional[float] = None
+    both_ends_anchored_frac: Optional[float] = None
 
     # Artifact flags (sample-wide counts)
     n_tso_invasion:        int = 0
     n_polya_priming:       int = 0
     n_noncanon_junction:   int = 0
     n_tso_concatemer:      int = 0
+    n_discordant_pair:     int = 0
+    n_low_mapq:            int = 0
 
     # Optional metrics — None when the required reference file was not provided
-    tss_anchored_frac:     Optional[float] = None   # 5'-anchored at TSS (CAGE)
-    numt_read_frac:        Optional[float] = None   # mito reads flagged as NUMT
+    tss_anchored_frac:     Optional[float] = None   # deprecated endpoint alias
+    n_numt_intervals_loaded: Optional[int] = None
 
     # Per-cell summary statistics (median ± IQR of noise fraction)
     per_cell_noise_median: float = 0.0
@@ -201,6 +227,10 @@ def compute_metrics(
     # ------------------------------------------------------------------
     rows = []
     for cb, cat_read_counts in result.read_counts.items():
+        # A BAM without CB tags has sample-level metrics but no cells. Plate
+        # mode relabels this sentinel to the well ID before aggregation.
+        if cb in {"", "NO_BARCODE"}:
+            continue
         total_reads = sum(cat_read_counts.values())
         if total_reads < min_reads_per_cell:
             continue
@@ -218,13 +248,20 @@ def compute_metrics(
                 result.base_counts[cb].get(cat, 0) / total_bases if total_bases else 0.0
             )
 
-        # UMI complexity per category
+        # UMI sequence diversity per category.  This is not gene-aware
+        # deduplication and must not be interpreted as molecule complexity.
         for cat in CATEGORY_ORDER:
             n_reads_cat = cat_read_counts.get(cat, 0)
             n_umis_cat  = len(result.umi_sets[cb].get(cat, set()))
-            row[f"umi_complexity_{cat.value}"] = (
-                n_umis_cat / n_reads_cat if n_reads_cat > 0 else float("nan")
+            invalid_umi = cat in getattr(result, "_invalid_umi_categories", set())
+            diversity = (
+                float("nan")
+                if invalid_umi or not getattr(result, "umi_tracking_enabled", True)
+                else n_umis_cat / n_reads_cat if n_reads_cat > 0
+                else float("nan")
             )
+            row[f"umi_sequence_diversity_{cat.value}"] = diversity
+            row[f"umi_complexity_{cat.value}"] = diversity
 
         # Aggregate noise — use unstranded set for non-stranded protocols
         _noise_cats = NOISE_CATEGORIES_UNSTRANDED if unstranded else NOISE_CATEGORIES
@@ -234,12 +271,45 @@ def compute_metrics(
         noise_bases = sum(result.base_counts[cb].get(cat, 0) for cat in _noise_cats)
         row["noise_base_frac"] = noise_bases / total_bases if total_bases else 0.0
 
+        _candidate_cats = (
+            NOISE_CATEGORIES_STRICT_UNSTRANDED if unstranded
+            else NOISE_CATEGORIES_STRICT
+        )
+        candidate_reads = sum(cat_read_counts.get(cat, 0) for cat in _candidate_cats)
+        candidate_bases = sum(result.base_counts[cb].get(cat, 0) for cat in _candidate_cats)
+        row["broad_noncanonical_read_frac"] = row["noise_read_frac"]
+        row["broad_noncanonical_base_frac"] = row["noise_base_frac"]
+        row["artifact_candidate_read_frac"] = candidate_reads / total_reads if total_reads else 0.0
+        row["artifact_candidate_base_frac"] = candidate_bases / total_bases if total_bases else 0.0
+        row["noise_read_frac_strict"] = row["artifact_candidate_read_frac"]
+        row["noise_base_frac_strict"] = row["artifact_candidate_base_frac"]
+
         # Artifact flags
         flags = result.artifact_flags.get(cb, {})
         row["n_tso"]        = flags.get("tso",        0)
         row["n_polya"]      = flags.get("polya",      0)
         row["n_noncanon"]   = flags.get("noncanon",   0)
         row["n_tso_concat"] = flags.get("tso_concat", 0)
+        row["n_discordant_pair"] = flags.get("discordant_pair", 0)
+        row["n_low_mapq"] = flags.get("low_mapq", 0)
+        row["low_mapq_read_frac"] = (
+            row["n_low_mapq"] / total_reads if total_reads else 0.0
+        )
+
+        alignment = getattr(result, "alignment_sums", {}).get(cb, {})
+        row["mean_mapq"] = (
+            alignment.get("mapq_sum", 0) / total_reads
+            if total_reads else float("nan")
+        )
+        n_nm = alignment.get("nm_observed", 0)
+        row["mean_edit_distance"] = (
+            alignment.get("nm_sum", 0) / n_nm if n_nm else float("nan")
+        )
+        query_bases = alignment.get("query_bases", 0)
+        row["softclip_base_frac"] = (
+            alignment.get("softclip_bases", 0) / query_bases
+            if query_bases else float("nan")
+        )
 
         rows.append(row)
 
@@ -262,9 +332,22 @@ def compute_metrics(
         for cat, n in cat_counts.items():
             total_bases_all[cat] = total_bases_all.get(cat, 0) + n
 
-    sm.n_reads_total      = result.n_reads_processed
+    sm.n_reads_total      = result.n_reads_total or (
+        result.n_reads_mapped_index + result.n_reads_unmapped
+    )
+    sm.n_reads_mapped     = result.n_reads_mapped_index
+    sm.n_reads_unmapped   = result.n_reads_unmapped
+    sm.n_primary_mapped   = result.n_primary_mapped
+    sm.n_secondary        = result.n_secondary
+    sm.n_supplementary    = result.n_supplementary
+    sm.n_qcfail           = result.n_qcfail
+    sm.n_duplicate        = result.n_duplicate
     sm.n_reads_classified = sum(total_reads_all.values())
     sm.n_reads_unassigned = total_reads_all.get(ReadCategory.UNASSIGNED, 0)
+    sm.n_records_total = sm.n_reads_total
+    sm.n_records_mapped = sm.n_reads_mapped
+    sm.n_records_unmapped = sm.n_reads_unmapped
+    sm.n_alignments_classified = sm.n_reads_classified
 
     denom_reads = sm.n_reads_classified or 1
     denom_bases = sum(total_bases_all.values()) or 1
@@ -293,6 +376,10 @@ def compute_metrics(
     sm.noise_base_frac_strict = sum(
         sm.base_fracs.get(cat.value, 0.0) for cat in _noise_cats_strict
     )
+    sm.broad_noncanonical_read_frac = sm.noise_read_frac
+    sm.broad_noncanonical_base_frac = sm.noise_base_frac
+    sm.artifact_candidate_read_frac = sm.noise_read_frac_strict
+    sm.artifact_candidate_base_frac = sm.noise_base_frac_strict
 
     # Strand concordance
     es = total_reads_all.get(ReadCategory.EXONIC_SENSE, 0)
@@ -302,6 +389,9 @@ def compute_metrics(
     # Chimeric / multimapper rates
     sm.chimeric_read_frac    = sm.read_fracs.get(ReadCategory.CHIMERIC.value, 0.0)
     sm.multimapper_read_frac = sm.read_fracs.get(ReadCategory.MULTIMAPPER.value, 0.0)
+    sm.unmapped_read_frac = (
+        sm.n_reads_unmapped / sm.n_reads_total if sm.n_reads_total else 0.0
+    )
 
     # Artifact flag totals
     for cb, flags in result.artifact_flags.items():
@@ -309,15 +399,38 @@ def compute_metrics(
         sm.n_polya_priming     += flags.get("polya",      0)
         sm.n_noncanon_junction += flags.get("noncanon",   0)
         sm.n_tso_concatemer    += flags.get("tso_concat", 0)
+        sm.n_discordant_pair   += flags.get("discordant_pair", 0)
+        sm.n_low_mapq          += flags.get("low_mapq", 0)
 
-    # UMI complexity (mean across cells, per category)
+    alignment_totals = {
+        key: sum(
+            values.get(key, 0)
+            for values in getattr(result, "alignment_sums", {}).values()
+        )
+        for key in ("mapq_sum", "nm_sum", "nm_observed", "softclip_bases", "query_bases")
+    }
+    if sm.n_reads_classified:
+        sm.mean_mapq = alignment_totals["mapq_sum"] / sm.n_reads_classified
+        sm.low_mapq_read_frac = sm.n_low_mapq / sm.n_reads_classified
+    if alignment_totals["nm_observed"]:
+        sm.mean_edit_distance = (
+            alignment_totals["nm_sum"] / alignment_totals["nm_observed"]
+        )
+    if alignment_totals["query_bases"]:
+        sm.softclip_base_frac = (
+            alignment_totals["softclip_bases"] / alignment_totals["query_bases"]
+        )
+
+    # UMI sequence diversity (mean across cells, per category)
     if not cell_df.empty:
         for cat in CATEGORY_ORDER:
-            col = f"umi_complexity_{cat.value}"
+            col = f"umi_sequence_diversity_{cat.value}"
             if col in cell_df.columns:
-                sm.umi_complexity[cat.value] = float(
+                value = float(
                     cell_df[col].replace([float("inf"), float("-inf")], float("nan")).mean(skipna=True)
                 )
+                sm.umi_sequence_diversity[cat.value] = value
+                sm.umi_complexity[cat.value] = value
 
     # Per-cell noise summary stats
     if not cell_df.empty and "noise_read_frac" in cell_df.columns:
@@ -326,68 +439,45 @@ def compute_metrics(
             sm.per_cell_noise_median = float(np.median(vals))
             sm.per_cell_noise_iqr    = float(np.percentile(vals, 75) - np.percentile(vals, 25))
 
-    # Full-length read fraction
-    # Preferred method: fraction of exonic-sense reads whose 3′ end falls
-    # within POLYA_SITE_PROXIMITY bp of an annotated polyA site.
-    # This is a direct measure of whether the molecule was captured from
-    # a genuine polyadenylation site, regardless of read length.
-    # Fallback: fraction of exonic-sense reads above a platform-specific
-    # minimum length threshold (used when no polyA site database is available).
+    # Strand-aware endpoint anchoring on the *same sampled read*.  A 3'-anchor
+    # alone is not full-length and no length-only fallback is used.
     polya_site_dict = getattr(result, "_polya_site_dict", None)
-    es_three_prime = getattr(result, "exonic_sense_three_prime", [])
-
-    if polya_site_dict and es_three_prime:
-        # polyA-site-anchored full-length fraction
-        from scnoisemeter.modules.intergenic_profiler import _near_polya_site
-        n_near = sum(
-            1 for contig, pos in es_three_prime
-            if _near_polya_site(polya_site_dict, contig, pos)
-        )
-        sm.full_length_read_frac = float(n_near / len(es_three_prime))
-        sm._polya_sites_used = True
-    else:
-        # Length-based fallback
-        fl_threshold = FULL_LENGTH_THRESHOLD.get(
-            platform, FULL_LENGTH_THRESHOLD["default"]
-        )
-        es_lengths = result.length_samples.get(ReadCategory.EXONIC_SENSE, [])
-        if es_lengths:
-            sm.full_length_read_frac = float(
-                sum(1 for L in es_lengths if L >= fl_threshold) / len(es_lengths)
-            )
-        sm._polya_sites_used = False
-
-    # --- 5'-anchored at TSS fraction (requires --tss-sites) ---
-    # Fraction of exonic-sense reads whose 5' mapping end falls within
-    # TSS_SITE_PROXIMITY bp of an annotated transcription start site.
-    # Combined with the 3'-anchored metric this provides a true full-length
-    # estimate: both ends anchored at known transcript boundaries.
     tss_site_dict   = getattr(result, "_tss_site_dict", None)
-    es_five_prime   = getattr(result, "exonic_sense_five_prime", [])
-    if tss_site_dict and es_five_prime:
+    endpoints = getattr(result, "exonic_sense_endpoints", [])
+    if endpoints and not unstranded:
         from scnoisemeter.modules.intergenic_profiler import _near_polya_site
         from scnoisemeter.constants import TSS_SITE_PROXIMITY
-        n_tss = sum(
-            1 for contig, pos in es_five_prime
-            if _near_polya_site(tss_site_dict, contig, pos,
-                                proximity=TSS_SITE_PROXIMITY)
-        )
-        sm.tss_anchored_frac = float(n_tss / len(es_five_prime))
-    else:
-        sm.tss_anchored_frac = None
+        three_hits = []
+        five_hits = []
+        for contig, strand, five_pos, three_pos, _read_key in endpoints:
+            three_hits.append(
+                bool(polya_site_dict) and _near_polya_site(
+                    polya_site_dict, contig, three_pos, strand=strand
+                )
+            )
+            five_hits.append(
+                bool(tss_site_dict) and _near_polya_site(
+                    tss_site_dict, contig, five_pos,
+                    proximity=TSS_SITE_PROXIMITY, strand=strand,
+                )
+            )
+        if polya_site_dict:
+            sm.three_prime_anchored_frac = float(np.mean(three_hits))
+        if tss_site_dict:
+            sm.five_prime_anchored_frac = float(np.mean(five_hits))
+            sm.tss_anchored_frac = sm.five_prime_anchored_frac
+        if polya_site_dict and tss_site_dict:
+            sm.both_ends_anchored_frac = float(np.mean([
+                a and b for a, b in zip(three_hits, five_hits)
+            ]))
+            sm.full_length_read_frac = sm.both_ends_anchored_frac
+    sm._polya_sites_used = bool(polya_site_dict)
 
-    # --- NUMT interval summary (requires --numt-bed) ---
-    # Reports the number of loaded NUMT intervals as metadata.
-    # Full per-read NUMT disambiguation requires dual-alignment and is
-    # deferred to a future version; for now we flag the presence of NUMT
-    # intervals in the report so users are aware.
+    # NUMT BED provenance only. Do not expose an interval count as a read
+    # fraction until per-read dual-alignment evidence is implemented.
     numt_intervals = getattr(result, "_numt_intervals", None)
     if numt_intervals:
-        sm.numt_read_frac = float(
-            sum(len(v) for v in numt_intervals.values())
-        )   # repurposed as interval count until dual-alignment is available
-    else:
-        sm.numt_read_frac = None
+        sm.n_numt_intervals_loaded = sum(len(v) for v in numt_intervals.values())
 
     ct = CellTable(df=cell_df, sample_name=sample_name)
     return sm, ct
@@ -423,7 +513,6 @@ def compute_length_stratification(
         fraction_of_bin   – count / total reads in this bin
         fraction_of_total – count / total reads across all bins
     """
-    import bisect
 
     # Estimate median from reservoir samples
     all_lengths = [L for lengths in length_samples.values() for L in lengths]
@@ -538,6 +627,8 @@ def compute_cluster_metrics(
         row = {"cluster": cluster, "n_cells": len(grp)}
 
         for col, out_name in [
+            ("broad_noncanonical_read_frac", "median_broad_noncanonical_read_frac"),
+            ("artifact_candidate_read_frac", "median_artifact_candidate_read_frac"),
             ("noise_read_frac",        "median_noise_read_frac"),
             ("noise_base_frac",        "median_noise_base_frac"),
             (f"read_frac_{ReadCategory.EXONIC_SENSE.value}",    "median_exonic_sense_frac"),
@@ -621,6 +712,8 @@ def to_multiqc_json(sm: SampleMetrics) -> dict:
       {"id": "scnoisemeter", "data": {sample_name: {...}}}
     """
     data = {
+        "broad_noncanonical_read_frac": round(sm.broad_noncanonical_read_frac, 4),
+        "artifact_candidate_read_frac": round(sm.artifact_candidate_read_frac, 4),
         "noise_read_frac":          round(sm.noise_read_frac,          4),
         "noise_base_frac":          round(sm.noise_base_frac,          4),
         "noise_read_frac_strict":   round(sm.noise_read_frac_strict,   4),
@@ -628,13 +721,18 @@ def to_multiqc_json(sm: SampleMetrics) -> dict:
         "strand_concordance":       round(sm.strand_concordance,       4),
         "chimeric_read_frac":       round(sm.chimeric_read_frac,       4),
         "multimapper_read_frac":    round(sm.multimapper_read_frac,    4),
+        "unmapped_read_frac":       round(sm.unmapped_read_frac,       4),
+        "low_mapq_read_frac":       round(sm.low_mapq_read_frac,       4),
         "n_cells":                  sm.n_cells,
         "n_reads_classified":       sm.n_reads_classified,
+        "n_records_total":          sm.n_records_total,
+        "n_alignments_classified":  sm.n_alignments_classified,
         "per_cell_noise_median":    round(sm.per_cell_noise_median,    4),
         "per_cell_noise_iqr":       round(sm.per_cell_noise_iqr,       4),
         "tso_invasion_frac":        round(sm.n_tso_invasion    / (sm.n_reads_classified or 1), 4),
         "polya_priming_frac":       round(sm.n_polya_priming   / (sm.n_reads_classified or 1), 4),
         "tso_concatemer_frac":      round(sm.n_tso_concatemer  / (sm.n_reads_classified or 1), 4),
+        "discordant_pair_frac":     round(sm.n_discordant_pair / (sm.n_reads_classified or 1), 4),
     }
     # Add per-category read fractions
     for cat_name, frac in sm.read_fracs.items():
@@ -642,5 +740,17 @@ def to_multiqc_json(sm: SampleMetrics) -> dict:
 
     if sm.full_length_read_frac is not None:
         data["full_length_read_frac"] = round(sm.full_length_read_frac, 4)
+    if sm.three_prime_anchored_frac is not None:
+        data["three_prime_anchored_frac"] = round(sm.three_prime_anchored_frac, 4)
+    if sm.five_prime_anchored_frac is not None:
+        data["five_prime_anchored_frac"] = round(sm.five_prime_anchored_frac, 4)
+    if sm.both_ends_anchored_frac is not None:
+        data["both_ends_anchored_frac"] = round(sm.both_ends_anchored_frac, 4)
+    if sm.mean_mapq is not None:
+        data["mean_mapq"] = round(sm.mean_mapq, 4)
+    if sm.mean_edit_distance is not None:
+        data["mean_edit_distance"] = round(sm.mean_edit_distance, 4)
+    if sm.softclip_base_frac is not None:
+        data["softclip_base_frac"] = round(sm.softclip_base_frac, 4)
 
     return {"id": "scnoisemeter", "data": {sm.sample_name: data}}

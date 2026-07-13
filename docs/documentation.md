@@ -1,916 +1,353 @@
-# scNoiseMeter Documentation
+# scNoiseMeter documentation
 
-Version 0.6.1
+Version 0.7.0 operational reference.
 
----
+This file documents installation, inputs, commands, options, outputs, and interpretation. The scientific rationale is in [whitepaper.md](whitepaper.md); the code map is in [methods_annotated.md](methods_annotated.md).
 
-## 1. Overview and Purpose
+## 1. Requirements
 
-scNoiseMeter quantifies technical noise in single-cell RNA-seq BAM files. It classifies every primary alignment into one of 16 mutually exclusive output categories (plus three pre-classification filter states) and reports per-sample and per-cell noise fractions, strand concordance, chimeric read rates, and artifact flag counts.
+- Python 3.9+
+- coordinate-sorted BAM
+- BAM index (`.bam.bai` or `.bai`)
+- matching GTF annotation
+- optional indexed reference FASTA for genomic-context and splice-motif checks
 
-The tool is platform-agnostic: it processes ONT, PacBio/Kinnex, short-read (Illumina, ElemBio) BAMs from 10x Genomics or BD Rhapsody kits, and Smart-seq / FLASH-seq plates (96- and 384-well). The same classification logic is used throughout, with platform-specific adjustments where the underlying biology differs.
+Install:
 
-Four subcommands are provided:
-
-- `run` — classify reads in a single BAM and produce QC metrics
-- `run-plate` — classify reads across a plate of Smart-seq / FLASH-seq wells and produce an aggregated plate report
-- `compare` — run on two BAMs (e.g. pre- and post-filter) and produce a side-by-side comparison
-- `discover` — scan a directory for BAM files, infer their parameters, and run `scnoisemeter run` on selected files
-
-The tool requires a coordinate-sorted, indexed BAM file aligned to human GRCh38/hg38, and a GENCODE GTF annotation. Both the GTF and a PolyASite 3.0 atlas are downloaded automatically on first use if not supplied explicitly.
-
-### What's new in 0.6
-
-- **User-configurable TSO** (`--tso`, `--tso-min-match`, `--no-polyg-tso`, and per-side `--tso-a`/`--tso-b` in `compare`), added in 0.5: supply the template-switch oligo your library actually used instead of the built-in 10x/PacBio defaults.
-- **Reverse-complement TSO matching (default-on).** TSO invasion now matches both the forward TSO and its reverse complement, so reads whose TSO end maps antisense are no longer missed. Changes existing `n_tso_invasion` counts (they can only increase).
-- **Strand-aware internal-priming (default-on).** `n_polya_priming` and the intergenic-locus polyA-context check now look upstream for a T-run on minus-strand reads/loci, not only downstream for an A-run on the plus strand. Previously minus-strand internal priming was under-counted.
-- **TSO concatemer metric** (`n_tso_concatemer`): reads containing more than one occurrence of the TSO or its reverse complement, per Chou et al. (bioRxiv 2025.10.06.680646). Surfaced in `read_metrics.tsv`, the MultiQC JSON (`tso_concatemer_frac`), and the report's artifact panel.
-
-Because the reverse-complement and strand-aware changes shift metric values for existing 10x/PacBio data, this is a minor version bump (0.6.0), not a patch.
-
-### What's new in 0.4
-
-- Vendor-neutral platform naming in all user-facing prose: short-read BAMs come from Illumina or ElemBio (AVITI) sequencers; 10x Genomics and BD Rhapsody are kit chemistries on top of those sequencers. Platform-enum values are unchanged.
-- 384-well plate support is explicit in docs and covered by unit tests for the sample-sheet parser (96- and 384-well geometries, both Sample_Name and PlateID/WellID input formats).
-- Simulation-based benchmark (`tests/benchmark/`) validates the classifier and per-cell noise metric against ground-truth labels. Exp 1 reaches 99.2% mean per-category accuracy across 8 read categories; Exp 2 reports per-cell noise fractions within ±0.01 of truth at every mixture level from 0 to 55% noise. Runs in under a minute from a GENCODE GTF and GRCh38 FASTA.
-- Every external URL in `annotation_fetcher.py` (GENCODE, PolyASite 3.0, PolyA_DB v4, FANTOM5, 10x whitelists) now supports a `SCNM_*_URL` environment-variable override. Use these when an upstream host or URL scheme changes, or behind a corporate mirror. PolyASite error messages name the exact probe template and point to the override.
-
-### What's new in 0.3
-
-- `run-plate` subcommand for Smart-seq / FLASH-seq plate data (96-well and 384-well).
-- Smart-seq platform support with unstranded noise definition (`exonic_antisense` excluded from noise) and platform-aware report messaging.
-- `--parallel-wells` for concurrent per-well processing; `--plate-id` to restrict processing to a subset of plates.
-- polyA and TSS site dictionaries cached to `~/.cache/scnoisemeter/` as compressed pickles, keyed on file metadata plus a hash of the first 64 KB. First load is ~35 s; subsequent loads are under 1 s.
-- Intergenic reclassification: reads at promoted `intergenic_hotspot` / `intergenic_novel` / `intergenic_repeat` loci now contribute to the correct category when computing per-cell and sample-level metrics. In 0.2.0 they were retained as `intergenic_sparse`, overstating the noise fraction by the share of reads in promoted `intergenic_novel` loci. Fixed in 0.3.1.
-- Sample-sheet handling: headerless CSVs are auto-detected using whole-token matching; BAM / sheet mismatches emit warnings instead of aborting.
-- Process-pool robustness: `BrokenProcessPool` (usually an OOM kill) is caught and reported with actionable guidance instead of causing a silent `exit 0`.
-
----
-
-## 2. Installation
-
-scNoiseMeter is installed from GitHub (it is not on PyPI):
-
-```
+```bash
 pip install git+https://github.com/FullLengthFanatic/scnoisemeter.git
+scnoisemeter --version
 ```
 
-On a shared server without admin rights, add `--user`. Or install from a clone (`pip install .`, or `pip install -e ".[dev]"` for an editable dev install with test tooling).
-
-Dependencies (installed automatically):
-
-- pysam >= 0.22
-- pyranges >= 0.0.129
-- pandas >= 2.0
-- numpy >= 1.24
-- click >= 8.1
-- plotly >= 5.18
-- scipy >= 1.11
-- tqdm >= 4.66
-
-The BAM must be coordinate-sorted and indexed before use:
-
-```
-samtools sort -o sorted.bam input.bam
-samtools index sorted.bam
-```
-
----
-
-## 3. Read Categories
-
-Every primary alignment receives exactly one category. The classification hierarchy is applied in the order listed; a read is assigned the first matching category.
-
-| Category | String value | Definition |
-|---|---|---|
-| `UNMAPPED` | `unmapped` | Read did not align. Excluded from all fractions. |
-| `SECONDARY` | `secondary` | SAM flag 0x100. Record is skipped entirely. |
-| `SUPPLEMENTARY` | `supplementary` | SAM flag 0x800. Record is skipped; the `SA` tag on the primary alignment is what the chimeric detector uses. |
-| `MULTIMAPPER` | `multimapper` | Primary alignment with NH tag > 1. Highest priority in the classification hierarchy, so any NH > 1 read is assigned this category regardless of its genomic context. |
-| `MITOCHONDRIAL` | `mitochondrial` | Maps to the mitochondrial contig (chrM, MT, chrMT, or mitochondrion). |
-| `CHIMERIC` | `chimeric` | SA tag present AND the split is inter-chromosomal, strand-discordant, or the same-strand intra-chromosomal distance exceeds the chimeric distance threshold (default 10,000 bp). For Illumina paired-end BAMs, also triggered when the absolute template length exceeds 1,000,000 bp. |
-| `EXONIC_SENSE` | `exonic_sense` | Overlaps at least one annotated exon base on the correct strand. |
-| `EXONIC_ANTISENSE` | `exonic_antisense` | Overlaps at least one annotated exon base on the wrong strand. |
-| `INTRONIC_JXNSPAN` | `intronic_jxnspan` | Maps within an intron but the CIGAR contains an N operation near a splice site (candidate intron-retention or non-consensus transcript). |
-| `INTRONIC_PURE` | `intronic_pure` | Maps entirely within an intron body with no junction signal. |
-| `INTRONIC_BOUNDARY` | `intronic_boundary` | Spans an exon–intron boundary without a splice operation in the CIGAR (candidate incomplete reverse transcription). |
-| `INTERGENIC_REPEAT` | `intergenic_repeat` | Intergenic read overlapping a RepeatMasker interval (requires `--repeats`). |
-| `INTERGENIC_HOTSPOT` | `intergenic_hotspot` | Intergenic monoexonic locus above threshold with a genomic A-run (>= 6 As within 20 bp downstream of the modal read 3' end) and more than 50 bp from any annotated polyA site. Likely internal priming. |
-| `INTERGENIC_NOVEL` | `intergenic_novel` | Intergenic locus above threshold with >= 80% strand consistency and >= 3 distinct barcodes, showing splice evidence (CIGAR N) and/or modal 3' end within 50 bp of an annotated polyA site. Candidate unannotated gene or extended 3' UTR. |
-| `INTERGENIC_SPARSE` | `intergenic_sparse` | Intergenic read at a locus below the adaptive barcode threshold. Likely noise. |
-| `AMBIGUOUS` | `ambiguous` | Overlaps a region shared by two or more genes where the gene types are not clearly distinguished by the sub-categories below. |
-| `AMBIGUOUS_COD_NCOD` | `ambiguous_cod_ncod` | Overlaps a shared region between a protein-coding gene and a non-coding gene (lncRNA, pseudogene, etc.). |
-| `AMBIGUOUS_COD_COD` | `ambiguous_cod_cod` | Overlaps a shared region between two protein-coding genes. |
-| `UNASSIGNED` | `unassigned` | CB tag absent or not on the barcode whitelist. These reads are counted in the denominator but not attributed to a cell. |
-
-Three categories — `UNMAPPED`, `SECONDARY`, `SUPPLEMENTARY` — are excluded from the `CATEGORY_ORDER` used for output columns and fraction computation. All other 16 categories appear in per-cell and per-sample output columns.
-
-**Noise definitions**
-
-Two noise levels are reported:
-
-*Conservative noise* (`noise_read_frac`, `noise_base_frac`) — includes reads that may represent genuine pre-mRNA capture. This is an upper bound on true noise:
-
-```
-EXONIC_ANTISENSE + INTRONIC_PURE + INTRONIC_BOUNDARY +
-INTERGENIC_SPARSE + INTERGENIC_REPEAT + INTERGENIC_HOTSPOT + CHIMERIC
-```
-
-*Strict noise* (`noise_read_frac_strict`, `noise_base_frac_strict`) — only unambiguous RT/PCR/sequencing artifacts. Excludes `INTRONIC_PURE` and `INTRONIC_BOUNDARY`. This is a lower bound:
-
-```
-EXONIC_ANTISENSE + INTERGENIC_SPARSE + INTERGENIC_REPEAT +
-INTERGENIC_HOTSPOT + CHIMERIC
-```
-
-The categories `INTRONIC_JXNSPAN`, `INTERGENIC_NOVEL`, `AMBIGUOUS`, `AMBIGUOUS_COD_NCOD`, and `AMBIGUOUS_COD_COD` are in neither noise set; their interpretation is ambiguous.
-
-*Unstranded mode.* When `--platform smartseq` is set (Smart-seq / FLASH-seq / Smart-seq3), `EXONIC_ANTISENSE` is dropped from both the conservative and strict noise sets. Unstranded libraries produce sense and antisense reads in roughly equal proportion by design, so counting antisense reads as noise would inflate the metric.
-
-**Adaptive intergenic threshold**
-
-Intergenic reads are initially classified as `INTERGENIC_SPARSE` by the first pass of the classifier. A second pass clusters them into loci and evaluates each locus with a Poisson significance test against the expected read rate across all intergenic bases. Loci that pass the threshold are promoted to `INTERGENIC_HOTSPOT`, `INTERGENIC_NOVEL`, or `INTERGENIC_REPEAT`, and their reads are moved out of `INTERGENIC_SPARSE` in each affected cell's counts before per-cell and sample-level metrics are computed. This ordering matters: `INTERGENIC_NOVEL` is counted as ambiguous (neither noise nor signal), while `INTERGENIC_SPARSE` is counted as noise, so promotion to novel reduces the reported noise fraction.
-
-Parameters:
-
-- Minimum distinct barcodes: max(3, 0.01% of total detected barcodes)
-- Minimum reads per locus: 5
-- Bonferroni-corrected p-value threshold: 0.01
-- Aggregation window: 500 bp
-
-The per-read side-table used for profiling is reservoir-sampled at 500,000 records per sample. For samples under that threshold the reclassification is exact; above it, reclassification is applied proportionally per barcode using the sampled records as an unbiased estimator of the true distribution.
-
----
-
-## 4. Artifact Flags
-
-Three artifact flags are computed per read and counted at the sample and per-cell level. They are not part of the classification hierarchy — a read carries the flag in addition to its category.
-
-### TSO invasion (`n_tso_invasion`)
-
-Detects reads whose soft-clipped bases (at either the 5′ or 3′ end) match a template-switching oligonucleotide (TSO) sequence. Detection requires at least 12 bp of match, and checks **both orientations**: the forward TSO and its reverse complement. This catches reads whose TSO end maps antisense, whose clip carries the reverse-complemented TSO.
-
-TSO sequences checked (defaults):
-
-- 10x Genomics v3/v4: `AAGCAGTGGTATCAACGCAGAGTACATGGG`
-- PacBio Kinnex / IsoSeq: `AAGCAGTGGTATCAACGCAGAGT`
-
-A poly-G tail of ≥ 6 bp in a soft-clip is also flagged as TSO-proximal (see `--no-polyg-tso` to disable for non-G-tailed chemistries).
-
-#### Custom TSO sequences
-
-TSO is a property of the library protocol, so you can tell scNoiseMeter exactly which oligo your sample used:
-
-- `--tso SEQ` supplies a custom TSO. Repeat the flag for more than one sequence. When given, it **replaces** the built-in 10x/PacBio defaults (it does not add to them), so detection reflects your protocol rather than mixing in oligos you did not use. Available in `run`, `discover`, and `run-plate`.
-- `--tso-min-match N` controls how many bases of the TSO must match. Detection looks for the first `N` bases of each TSO in the soft-clip, so a larger `N` is stricter and a smaller `N` is more permissive (default 12). If a TSO is shorter than `N`, the full sequence is used as the match requirement (a warning notes this). Sequences are validated to contain only `A`, `C`, `G`, `T`, `N`.
-- `--no-polyg-tso` disables the poly-G heuristic, leaving only TSO-sequence matches. The poly-G check (≥ 6 G's in a soft-clip) is independent of `--tso` and is on by default. Disable it when G-rich genomic regions or sequencing artifacts inflate the poly-G signal, or to count true TSO-sequence invasion in isolation. On adapter-trimmed pipelines (e.g. PacBio Kinnex after `lima`/`skera`) the TSO sequence has already been removed from soft-clips, so the metric is poly-G-only; run on pre-trim BAMs to capture the sequence signal.
-- In `compare`, `--tso-a` and `--tso-b` override the TSO per side, so two methods that used two different TSOs each get the correct sequence. A shared `--tso` acts as the default for both sides.
-
-Both the forward TSO and its reverse complement are matched automatically, so you do **not** need to pass the reverse complement as a second `--tso`. This matters for chemistries whose TSO is not self-complementary (e.g. the poly-T-tailed TSO used by UltraMarathonRT, where reads can map either sense).
-
-The TSO sequence(s) and the min-match used are recorded in the HTML report metadata table.
-
-Example:
+Prepare BAM:
 
 ```bash
-scnoisemeter run --bam sample.bam --gtf gencode.gtf \
-  --tso AAGCAGTGGTATCAACGCAGAGTACATGGG --tso-min-match 12 \
-  --output-dir out/
-
-scnoisemeter compare --bam-a methodA.bam --bam-b methodB.bam --gtf gencode.gtf \
-  --tso-a AAGCAGTGGTATCAACGCAGAGTACATGGG \
-  --tso-b GCAGTGGTATCAACGCAGAGTACTCTGCGTTGATACCAC \
-  --output-dir cmp/
+samtools sort -o sample.sorted.bam sample.bam
+samtools index sample.sorted.bam
 ```
 
-### Internal polyA priming (`n_polya_priming`)
+Automatic annotation downloads target human GRCh38. For other organisms, provide all resources explicitly and validate naming/coordinates.
 
-Detects reads whose transcript 3′ end abuts an A-run in the reference genome, indicating the read likely originated from internal priming on an A-rich region rather than the true polyA tail. The check is **strand-aware**:
-
-- Forward reads: look 20 bp **downstream** (higher coordinate) of `reference_end` for an A-run on the + strand.
-- Reverse reads: look 20 bp **upstream** (lower coordinate) of `reference_start` for a T-run on the + strand (which is an A-run in the transcript's orientation).
-- Minimum run length: 6 consecutive bases within the window.
-
-(Earlier versions checked only the + strand downstream, which under-counted minus-strand internal priming. The same strand-aware logic applies to the intergenic-locus polyA-context check that feeds `intergenic_hotspot` / `intergenic_novel`.)
-
-Requires a reference FASTA (`--reference`); without one this flag is not computed.
-
-### TSO concatemer (`n_tso_concatemer`)
-
-Counts reads containing **more than one occurrence** of a TSO sequence or its reverse complement, anywhere in the read (soft-clipped or aligned bases). These arise when template switching runs from one TSO onto another, producing TSO-TSO concatemers that should not carry biological signal. The definition follows Chou et al. (bioRxiv 2025.10.06.680646): concatemer reads ÷ total reads.
-
-- Uses the full configured `--tso` sequence(s) and their reverse complements (not the 12 bp prefix used for invasion).
-- Counting is non-overlapping and longest-first, so a shorter TSO that is a substring of a longer one (e.g. the PacBio TSO within the 10x TSO) is not double-counted at a single locus.
-- Like TSO invasion, this requires the TSO to still be present in the read, so run on **untrimmed** BAMs.
-- Surfaced as `n_tso_concatemer` in `read_metrics.tsv`, as `tso_concatemer_frac` in the MultiQC JSON, and as a bar in the report's artifact-flag panel.
-
-### Non-canonical junction (`n_noncanon_junction`)
-
-Detects reads with a CIGAR N operation (intron) whose donor–acceptor dinucleotide pair is not one of the three canonical splice site motifs:
-
-- GT–AG
-- GC–AG
-- AT–AC
-
-Requires a reference FASTA (`--reference`) for the dinucleotide lookup. Without a reference, this flag is not computed.
-
----
-
-## 5. Reported Metrics
-
-### Sample-wide scalar metrics (in `<sample>.read_metrics.tsv`)
-
-| Metric | Type | Definition |
-|---|---|---|
-| `n_reads_total` | int | Total reads in the BAM (mapped + unmapped, from index counters). |
-| `n_reads_classified` | int | Reads that received a classification category. Excludes UNMAPPED, SECONDARY, SUPPLEMENTARY. |
-| `n_reads_unassigned` | int | Reads classified as UNASSIGNED (CB absent or not on whitelist). |
-| `n_cells` | int | Number of distinct cell barcodes with ≥ 10 reads. Set to 1 in barcode-agnostic mode. |
-| `noise_read_frac` | float | Conservative noise fraction (reads). Denominator: n_reads_classified. |
-| `noise_base_frac` | float | Conservative noise fraction (aligned bases). |
-| `noise_read_frac_strict` | float | Strict noise fraction (reads). |
-| `noise_base_frac_strict` | float | Strict noise fraction (aligned bases). |
-| `strand_concordance` | float | exonic_sense / (exonic_sense + exonic_antisense). Values < 0.95 suggest strand-switching or a non-stranded library. |
-| `chimeric_read_frac` | float | Fraction of classified reads in the CHIMERIC category. |
-| `multimapper_read_frac` | float | Fraction of classified reads in the MULTIMAPPER category. |
-| `per_cell_noise_median` | float | Median per-cell conservative noise fraction across cells with ≥ 10 reads. |
-| `per_cell_noise_iqr` | float | Interquartile range of per-cell conservative noise fraction. |
-| `n_tso_invasion` | int | Number of reads with a TSO invasion flag. |
-| `n_polya_priming` | int | Number of reads with an internal polyA priming flag. |
-| `n_noncanon_junction` | int | Number of reads with a non-canonical splice junction flag. |
-| `read_frac_<category>` | float | Fraction of classified reads in each category (one row per category in CATEGORY_ORDER). |
-| `base_frac_<category>` | float | Fraction of classified aligned bases in each category. |
-| `full_length_read_frac` | float | Fraction of EXONIC_SENSE reads considered full-length. Present only when a polyA site database or `--polya-sites` is provided. Without a database, computed from a length threshold (ONT: 500 bp, PacBio: 1000 bp). |
-| `tss_anchored_frac` | float | Fraction of reads with 5′ end within 100 bp of an annotated TSS. Present only when `--tss-sites` is supplied. |
-| `numt_read_frac` | float | Fraction of MITOCHONDRIAL reads overlapping a NUMT interval. Present only when `--numt-bed` is supplied. |
-
-### Per-cell metrics (columns of `<sample>.cell_metrics.tsv`)
-
-| Column | Definition |
-|---|---|
-| `cell_barcode` | Cell barcode string (DataFrame index). |
-| `n_reads` | Total classified reads for this cell. |
-| `n_bases` | Total aligned bases for this cell. |
-| `read_frac_<category>` | Per-cell read fraction for each category in CATEGORY_ORDER. |
-| `base_frac_<category>` | Per-cell base fraction for each category. |
-| `umi_complexity_<category>` | unique UMIs / total reads for this cell and category. Only present when UMI tracking is active (default; disabled by `--no-umi-dedup`). |
-| `noise_read_frac` | Per-cell conservative noise read fraction. |
-| `noise_base_frac` | Per-cell conservative noise base fraction. |
-| `n_tso` | TSO invasion flag count for this cell. |
-| `n_polya` | Internal polyA priming flag count for this cell. |
-| `n_noncanon` | Non-canonical junction flag count for this cell. |
-
-Cells with fewer than 10 reads are excluded from the per-cell table.
-
----
-
-## 6. The `run` Subcommand
-
-Classifies reads in a single BAM and produces all output files.
-
-### Synopsis
-
-```
-scnoisemeter run [OPTIONS]
-```
-
-### Flags
-
-**Required:**
-
-| Flag | Type | Description |
-|---|---|---|
-| `--bam PATH` | path | Input BAM file. Must be coordinate-sorted and have a `.bai` index in the same directory. |
-| `--output-dir PATH` | path | Directory for output files. Created if it does not exist. |
-
-**Optional — input:**
-
-| Flag | Default | Description |
-|---|---|---|
-| `--sample-name TEXT` | BAM filename stem | Label used in output filenames and HTML report. |
-| `--gtf PATH` | auto-downloaded | GENCODE GTF annotation (plain or `.gz`). Takes precedence over `--gtf-version`. If omitted, the latest GENCODE human GTF is downloaded to `~/.cache/scnoisemeter/`. |
-| `--gtf-version INT` | none | GENCODE release to auto-download (e.g. `42`). Ignored when `--gtf` is set. Use `42` to match the PolyASite 3.0 atlas exactly. |
-| `--barcode-whitelist PATH` | none | File of valid corrected barcodes, one per line (plain text or `.gz`). Reads whose CB tag is not in this list are classified as UNASSIGNED. Distinct from `--cell-barcodes`. |
-| `--cell-barcodes PATH` | none | Called-cell barcode file (plain text or `.gz`, one per line). Reads whose CB tag is not in this list are skipped entirely and contribute to no metric. Trailing `-1` suffixes are stripped from both the file entries and the CB tags in the BAM. Compatible with Cell Ranger `filtered_feature_bc_matrix/barcodes.tsv.gz`. |
-| `--barcode-tag TEXT` | `CB` | BAM tag for the corrected cell barcode. |
-| `--umi-tag TEXT` | `UB` | BAM tag for the corrected UMI. |
-| `--chemistry [10x_v3\|10x_v4\|bd_rhapsody_wta\|custom]` | `10x_v3` | Library chemistry. Sets the expected barcode length. |
-| `--platform [ont\|pacbio\|illumina\|illumina_10x\|illumina_bd\|smartseq\|unknown]` | `auto` | Sequencing platform. `auto` detects from BAM header `@PG` records. `smartseq` is not auto-detected and must be set explicitly. |
-| `--pipeline-stage [raw\|pre_filter\|post_filter\|custom]` | `auto` | Processing stage. `auto` detects from header. |
-| `--repeats PATH` | none | RepeatMasker BED file (hg38). Required to classify reads as INTERGENIC_REPEAT. |
-| `--reference PATH` | none | Reference FASTA (`.fa` or `.fa.gz`, with `.fai` index). Required for polyA context checks and non-canonical junction detection. |
-| `--polya-sites PATH` | auto-downloaded | PolyA site BED file(s). Repeatable. Takes precedence over `--polya-db`. If omitted, a database is auto-downloaded according to `--polya-db`. |
-| `--polya-db [polyasite3\|polyadb4\|both]` | `polyasite3` | PolyA site database to auto-download when `--polya-sites` is not set. `polyasite3`: PolyASite 3.0 atlas (GENCODE v42, ~569k sites). `polyadb4`: PolyA_DB v4 (not tied to a GENCODE version, works with any GTF release). `both`: load both databases simultaneously. |
-| `--tss-sites PATH` | auto-downloaded | CAGE peak / TSS BED file(s). Repeatable. Takes precedence over `--tss-db`. If omitted, a database is auto-downloaded according to `--tss-db`. |
-| `--tss-db [fantom5\|none]` | `fantom5` | TSS database to auto-download when `--tss-sites` is not set. `fantom5`: FANTOM5 robust CAGE peaks (hg38, ~184k peaks). `none`: skip TSS anchoring entirely. |
-| `--numt-bed PATH` | none | NUMT BED file (nuclear mitochondrial DNA segments, hg38 coordinates). |
-| `--obs-metadata PATH` | none | Per-cell metadata TSV with `cell_barcode` and `cluster` columns. Enables per-cluster noise profiles. |
-| `--exclude-biotypes TEXT` | none | Gene biotypes to exclude from annotation. Repeatable. |
-
-**Optional — behaviour:**
-
-| Flag | Default | Description |
-|---|---|---|
-| `--chimeric-distance INT` | `10000` | Maximum same-strand intra-chromosomal SA distance (bp) below which a split alignment is not called chimeric. |
-| `--threads INT` | `4` | Parallel worker processes (one per chromosome). |
-| `--no-umi-dedup` | off | Skip UMI set tracking. Reduces memory for very large datasets; disables `umi_complexity_*` columns. |
-| `--no-cache` | off | Do not read or write the annotation index cache. |
-| `--offline` | off | Use only cached annotation files; never make network calls. Raises an error if the cache is empty. Ignored when `--gtf` and `--polya-sites` are supplied explicitly. |
-| `--verbose` / `-v` | off | Enable debug logging to stderr. |
-
-### Validation performed before processing
-
-- BAM index (`.bai`) must exist.
-- BAM must be coordinate-sorted (`@HD SO:coordinate`).
-- BAM must contain at least one aligned read.
-- Chromosome naming style (UCSC `chr1` vs Ensembl `1`) must match between BAM and GTF. Mismatch is fatal.
-- Chromosome lengths are compared against GRCh38 expected values. Mismatch is a warning.
-- If `--cell-barcodes` is supplied but the BAM has no CB tags (barcode-agnostic mode), the filter is ignored with a warning.
-- If `--cell-barcodes` filters out all reads, an error is raised.
-
-### Examples
+## 2. Minimal run
 
 ```bash
-# Minimal run (GTF and polyA atlas auto-downloaded)
 scnoisemeter run \
-  --bam sample.bam \
+  --bam sample.sorted.bam \
   --output-dir results/
+```
 
-# Full run with explicit annotation
+Recommended reproducible run:
+
+```bash
 scnoisemeter run \
-  --bam sample.bam \
+  --bam sample.sorted.bam \
+  --sample-name donor_01 \
   --gtf gencode.v45.annotation.gtf.gz \
-  --barcode-whitelist 3M-february-2018.txt \
-  --cell-barcodes filtered_feature_bc_matrix/barcodes.tsv.gz \
+  --reference GRCh38.primary_assembly.genome.fa \
+  --repeats hg38.repeatmasker.bed.gz \
+  --polya-sites polyasite.bed.gz \
+  --tss-sites fantom5.cage.bed.gz \
+  --cell-barcodes barcodes.tsv.gz \
   --platform ont \
-  --pipeline-stage post_filter \
-  --repeats rmsk.hg38.bed.gz \
-  --reference GRCh38.fa \
-  --polya-sites atlas.clusters.3.0.GRCh38.GENCODE_42.bed.gz \
-  --tss-sites hg38.cage_peak_phase1and2combined_ann.bed.gz \
-  --threads 16 \
-  --output-dir results/ \
-  --sample-name my_sample
-
-# Restrict analysis to called cells only
-scnoisemeter run \
-  --bam cellranger_output/possorted_genome_bam.bam \
-  --cell-barcodes cellranger_output/filtered_feature_bc_matrix/barcodes.tsv.gz \
+  --library-strand stranded \
+  --seed 42 \
+  --threads 8 \
   --output-dir results/
 ```
 
----
+## 3. Input semantics
 
-## 7. The `compare` Subcommand
+### BAM records
 
-Runs the full classification pipeline on two BAMs, computes chi-squared proportion tests for each read category, and produces a comparison report.
+All references with at least one indexed mapped record are processed, including mitochondrial and short references. Unmapped/secondary/supplementary records are not assigned a genomic category but remain visible in denominators and flag totals. QC-fail and duplicate flags are counted but do not by themselves exclude a mapped primary alignment. BAM index counters are alignment-record counts, not unique templates. Historical `n_reads_*` and `read_frac_*` names are retained, but paired mates count separately; precise `n_records_*` and `n_alignments_classified` aliases are also emitted.
 
-### Synopsis
+The default tags are:
 
-```
-scnoisemeter compare [OPTIONS]
-```
+- corrected cell barcode: `CB`;
+- corrected UMI: `UB`;
+- number of reported alignments: `NH`.
 
-### Flags
+Override the first two with `--barcode-tag` and `--umi-tag`.
 
-**Required:**
+### Barcode whitelist versus called cells
 
-| Flag | Type | Description |
-|---|---|---|
-| `--bam-a PATH` | path | BAM A (e.g. pre-filter / raw). |
-| `--bam-b PATH` | path | BAM B (e.g. post-filter). |
-| `--output-dir PATH` | path | Directory for output files. |
+`--barcode-whitelist` defines valid barcode sequences. A primary alignment with a missing/off-list barcode becomes `unassigned` and remains in sample metrics.
 
-**Optional — compare-specific:**
+`--cell-barcodes` defines called cells. Reads not in this set are dropped and do not affect metrics. Cell Ranger’s `filtered_feature_bc_matrix/barcodes.tsv.gz` is accepted; a trailing `-1` is normalized for matching.
 
-| Flag | Default | Description |
-|---|---|---|
-| `--label-a TEXT` | `sample_A` | Label for BAM A in reports and output filenames. |
-| `--label-b TEXT` | `sample_B` | Label for BAM B in reports and output filenames. |
-
-**Shared flags (same as `run`, excluding `--bam`, `--sample-name`, `--cell-barcodes`):**
-
-`--gtf`, `--gtf-version`, `--barcode-whitelist`, `--barcode-tag`, `--umi-tag`, `--chemistry`, `--platform`, `--pipeline-stage`, `--chimeric-distance`, `--repeats`, `--reference`, `--threads`, `--no-umi-dedup`, `--no-cache`, `--exclude-biotypes`, `--obs-metadata`, `--polya-sites`, `--polya-db`, `--tss-sites`, `--tss-db`, `--numt-bed`, `--offline`, `--verbose`
-
-A single annotation index is built once and shared between both BAM runs.
-
-### Statistical test
-
-For each read category, a chi-squared test is applied to the contingency table of read counts (category reads vs all other classified reads) for BAM A and BAM B. P-values are Bonferroni-corrected for the number of categories tested.
-
-### Examples
-
-```bash
-# Pre-filter vs post-filter comparison
-scnoisemeter compare \
-  --bam-a raw.bam \
-  --bam-b filtered.bam \
-  --gtf gencode.v45.annotation.gtf.gz \
-  --label-a pre_filter \
-  --label-b post_filter \
-  --threads 8 \
-  --output-dir compare_results/
-
-# With explicit labels and whitelist
-scnoisemeter compare \
-  --bam-a sample1.bam \
-  --bam-b sample2.bam \
-  --label-a sample1 \
-  --label-b sample2 \
-  --barcode-whitelist 3M-february-2018.txt \
-  --platform illumina_10x \
-  --output-dir compare_results/
-```
-
----
-
-## 7a. The `run-plate` Subcommand
-
-Classifies reads across a plate of Smart-seq / FLASH-seq wells and produces an aggregated plate-level report. Each well is processed independently and the per-well classified counts are merged into one `SampleResult` that feeds the plate-level metrics, intergenic profiler, and HTML report.
-
-### Synopsis
-
-```
-scnoisemeter run-plate [OPTIONS]
-```
-
-### Flags
-
-**Required:**
-
-| Flag | Type | Description |
-|---|---|---|
-| `--plate-dir PATH` | directory | Directory containing one subdirectory per well. |
-| `--output-dir PATH` | path | Root output directory. Each plate gets its own subdirectory. |
-
-**Plate-specific:**
-
-| Flag | Default | Description |
-|---|---|---|
-| `--sample-sheet PATH` | none | CSV mapping wells to metadata. Headerless sheets are auto-detected; a warning is issued suggesting a header row. BAM ↔ sheet mismatches emit warnings but do not abort the run. |
-| `--sequencer [illumina\|ont\|pacbio]` | `illumina` | Informs whether the i7 sequence is stored in reverse-complement. |
-| `--plate-id TEXT` | none | Repeatable. Restrict the run to the listed plate IDs. Useful for re-running a single plate without reprocessing the rest. |
-| `--parallel-wells INT` | `1` | Number of wells to process concurrently. Each worker is initialised once (annotation index + polyA/TSS dictionaries loaded per worker) and reused across all wells assigned to it. When `--parallel-wells N` > 1, the per-BAM thread pool is implicitly `max(1, --threads // N)`. |
-| `--platform smartseq` | — | Must be set explicitly for Smart-seq / FLASH-seq data. Selects unstranded noise and suppresses the expected "missing CB tag" warning. |
-
-Plus the shared flags from `run` (`--gtf`, `--gtf-version`, `--repeats`, `--reference`, `--polya-sites`, `--polya-db`, `--tss-sites`, `--tss-db`, `--chimeric-distance`, `--threads`, `--no-umi-dedup`, `--offline`, `--no-cache`, `--verbose`, etc.).
-
-### Folder layout
-
-`--plate-dir` must contain one subdirectory per well, named `<PlateID>_<WellID>`. Supported well IDs:
-
-- 96-well: rows A–H, columns 1–12 (e.g. `881_A1`, `881_H12`).
-- 384-well: rows A–P, columns 1–24 (e.g. `882_A1`, `882_P24`).
-
-Each subdirectory must hold one BAM (`.bam`) and its index (`.bam.bai` or `.bai`). Wells whose BAM lacks an index are skipped with a stderr warning and counted in the per-plate failure tally. If no well in a plate has an index, the plate is skipped entirely with a clear error message (instead of producing a silent empty result).
-
-### Behaviour
-
-1. Wells are discovered from folder names matching the `<PlateID>_<WellID>` regex and grouped by plate.
-2. If `--plate-id` is supplied, the plate set is filtered; unknown plate IDs emit a warning.
-3. For each plate, wells without a BAI index are filtered out; the remaining wells are dispatched.
-4. If `--parallel-wells` > 1, a `ProcessPoolExecutor` runs wells concurrently. Each worker initialises once: annotation index, polyA sites, TSS sites, and BAM chromosome style are all prepared up-front and shared across every well assigned to that worker.
-5. If a worker is killed by the OS (usually OOM) the pool is marked broken. scNoiseMeter catches `BrokenProcessPool` and raises a `ClickException` that reports how many wells completed and suggests reducing `--parallel-wells`. Prior to 0.3.1 this failure was silently swallowed and the run exited 0 with no outputs.
-6. Wells merge into a per-plate `SampleResult`. The intergenic profiler runs at the plate level and the resulting per-record reclassification is applied before plate metrics are computed.
-7. Per-plate outputs are written to `<output-dir>/<PlateID>/`: `<PlateID>.read_metrics.tsv`, `<PlateID>.per_well_metrics.tsv`, `<PlateID>.report.html`, `<PlateID>.intergenic_loci.tsv` (when applicable), and the usual `.multiqc.json` / `.length_distributions/` outputs.
-
-### Examples
-
-```bash
-# Plate with 8 wells processed concurrently
-scnoisemeter run-plate \
-  --plate-dir /data/smartseq/plate_881/ \
-  --sample-sheet plate_881.csv \
-  --platform smartseq \
-  --parallel-wells 8 \
-  --threads 16 \
-  --reference GRCh38.fa \
-  --output-dir results/plate_881/
-
-# Re-run a single plate from a directory that holds many
-scnoisemeter run-plate \
-  --plate-dir /data/smartseq/batch3/ \
-  --plate-id 885 \
-  --platform smartseq \
-  --output-dir results/batch3/
-```
-
-### Per-well output: `<PlateID>.per_well_metrics.tsv`
-
-One row per well processed. Columns: `well_id`, `plate_id`, `n_reads_total`, `n_reads_classified`, `noise_read_frac`, `strand_concordance`, `chimeric_read_frac`, plus any metadata columns resolved from the sample sheet.
-
----
-
-## 8. The `discover` Subcommand
-
-Scans a directory for `.bam` files, inspects each to infer platform and pipeline stage, presents a summary table, and runs `scnoisemeter run` on selected files.
-
-### Synopsis
-
-```
-scnoisemeter discover [OPTIONS]
-```
-
-### Flags
-
-**Required:**
-
-| Flag | Type | Description |
-|---|---|---|
-| `--bam-dir PATH` | directory | Directory to scan for `.bam` files. |
-| `--reference PATH` | path | Reference FASTA (`.fa` or `.fa.gz` with `.fai` index). |
-| `--output-dir PATH` | path | Root output directory. Each BAM gets its own subdirectory named after the BAM stem. |
-
-**Optional:**
-
-| Flag | Default | Description |
-|---|---|---|
-| `--gtf PATH` | auto-downloaded | GENCODE GTF. Auto-downloaded if omitted. Takes precedence over `--gtf-version`. |
-| `--gtf-version INT` | none | GENCODE release to auto-download (e.g. `42`). Ignored when `--gtf` is set. |
-| `--polya-sites PATH` | auto-downloaded | PolyA site BED file(s). Repeatable. Takes precedence over `--polya-db`. |
-| `--polya-db [polyasite3\|polyadb4\|both]` | `polyasite3` | PolyA site database to auto-download when `--polya-sites` is not set. |
-| `--tss-sites PATH` | auto-downloaded | TSS / CAGE peak BED file(s). Repeatable. Takes precedence over `--tss-db`. |
-| `--tss-db [fantom5\|none]` | `fantom5` | TSS database to auto-download when `--tss-sites` is not set. |
-| `--threads INT` | `4` | Parallel worker processes per BAM. |
-| `--run-all` | off | Non-interactive mode. All BAMs with fully inferable parameters are run automatically. BAMs with blocking issues (no index, wrong sort order, unknown platform) are skipped with a warning. |
-| `--offline` | off | Use only cached annotation files. |
-| `--verbose` / `-v` | off | Enable debug logging. |
-
-### Behaviour
-
-1. All `.bam` files in `--bam-dir` are inspected to infer platform, pipeline stage, and check for blocking issues (missing index, wrong sort order).
-2. A summary table is printed showing each BAM, its inferred platform, pipeline stage, and any issues.
-3. In interactive mode (default), the user selects which BAMs to process. BAMs with unknown platform trigger an interactive prompt.
-4. In `--run-all` mode, BAMs with blocking issues are skipped silently.
-5. The annotation index is built once and shared across all selected BAMs.
-6. Each BAM is run inline (no subprocess). Output goes to `<output-dir>/<bam-stem>/`.
-7. A summary table of successes and failures is printed at the end.
-
-### Examples
-
-```bash
-# Interactive discovery
-scnoisemeter discover \
-  --bam-dir /data/bams/ \
-  --reference GRCh38.fa \
-  --output-dir discover_results/
-
-# Non-interactive batch run
-scnoisemeter discover \
-  --bam-dir /data/bams/ \
-  --reference GRCh38.fa \
-  --gtf gencode.v45.annotation.gtf.gz \
-  --output-dir discover_results/ \
-  --threads 8 \
-  --run-all
-```
-
----
-
-## 9. Output Files
-
-### `run` outputs
-
-All files are written to `--output-dir`. `<sample>` is the value of `--sample-name`.
-
----
-
-#### `<sample>.read_metrics.tsv`
-
-Two-column tab-separated file: `metric` and `value`. One row per metric.
-
-Rows written (in order):
-
-| Row key | Description |
-|---|---|
-| `n_reads_total` | Total reads in BAM (from index counters). |
-| `n_reads_classified` | Reads with a category (excludes UNMAPPED, SECONDARY, SUPPLEMENTARY). |
-| `n_reads_unassigned` | Reads classified as UNASSIGNED. |
-| `n_cells` | Distinct barcodes with ≥ 10 reads. |
-| `noise_read_frac` | Conservative noise fraction (reads). |
-| `noise_base_frac` | Conservative noise fraction (bases). |
-| `strand_concordance` | exonic_sense / (exonic_sense + exonic_antisense). |
-| `chimeric_read_frac` | CHIMERIC read fraction. |
-| `multimapper_read_frac` | MULTIMAPPER read fraction. |
-| `per_cell_noise_median` | Median per-cell noise fraction. |
-| `per_cell_noise_iqr` | IQR of per-cell noise fraction. |
-| `n_tso_invasion` | TSO invasion flag count. |
-| `n_polya_priming` | Internal polyA priming flag count. |
-| `n_noncanon_junction` | Non-canonical junction flag count. |
-| `read_frac_<category>` | Read fraction per category (16 rows, CATEGORY_ORDER). |
-| `base_frac_<category>` | Base fraction per category (16 rows). |
-| `full_length_read_frac` | Full-length read fraction (present only when polyA sites are available). |
-
-Values are plain numbers (integers or floats with 6 decimal places for fractions).
-
----
-
-#### `<sample>.cell_metrics.tsv`
-
-Tab-separated file. Index column is `cell_barcode`. One row per cell with ≥ 10 reads.
-
-Columns:
-
-| Column | Description |
-|---|---|
-| `cell_barcode` | Corrected cell barcode string (index). |
-| `n_reads` | Total classified reads for this cell. |
-| `n_bases` | Total aligned bases for this cell. |
-| `read_frac_exonic_sense` | Fraction of this cell's reads in each category. One column per category in CATEGORY_ORDER. |
-| `read_frac_<category>` | (16 columns total, one per category in CATEGORY_ORDER) |
-| `base_frac_<category>` | Base fraction per category (16 columns). |
-| `umi_complexity_<category>` | unique UMIs / total reads for this cell and category (16 columns; absent when `--no-umi-dedup` is set). |
-| `noise_read_frac` | Per-cell conservative noise read fraction. |
-| `noise_base_frac` | Per-cell conservative noise base fraction. |
-| `n_tso` | TSO invasion flag count for this cell. |
-| `n_polya` | Internal polyA priming flag count for this cell. |
-| `n_noncanon` | Non-canonical junction flag count for this cell. |
-
-This file is not written when the sample is in barcode-agnostic mode and the DataFrame is empty.
-
----
-
-#### `<sample>.multiqc.json`
-
-MultiQC custom-content JSON. Contains a subset of scalar metrics formatted for ingestion by MultiQC's `custom_content` module.
-
----
-
-#### `<sample>.length_distributions/`
-
-Directory containing one TSV per read category that has at least one read with a recorded length. Filenames: `<category_value>.lengths.tsv`.
-
-Each file has a single column:
-
-| Column | Description |
-|---|---|
-| `read_length` | Length of one read (one row per sampled read). |
-
-Read lengths are collected by reservoir sampling; the sample size is bounded in memory. Not all reads are represented.
-
----
-
-#### `<sample>_length_stratified.tsv`
-
-Tab-separated. Rows represent the cross of length bin × read category.
-
-| Column | Description |
-|---|---|
-| `length_bin` | Length bin label (e.g. `<150`, `150–500`, `500–1000`, `1000–2000`, `2000–5000`, `>5000`). |
-| `category` | Read category string value. |
-| `count` | Number of reads in this cell of the cross-tabulation. |
-| `fraction_of_bin` | Fraction of reads in this length bin that belong to this category. |
-
-For Illumina short-read data, a comment line is prepended noting that all reads fall in the `<150 bp` bin.
-
-Bin breaks: 150, 500, 1000, 2000, 5000 bp. When median read length is ≥ 300 bp (long-read data), all six bins are reported. When median read length is < 300 bp (short-read data), the `<150` and `150–500` bins are merged into `<500`.
-
----
-
-#### `<sample>.intergenic_loci.tsv`
-
-Tab-separated. One row per intergenic locus characterised by the intergenic profiler. Only written if intergenic reads are present.
-
-| Column | Description |
-|---|---|
-| `contig` | Chromosome / contig name. |
-| `start` | Locus start coordinate (0-based). |
-| `end` | Locus end coordinate. |
-| `strand` | `+` or `-`. |
-| `n_reads` | Number of intergenic reads at this locus. |
-| `n_barcodes` | Number of distinct barcodes contributing reads. |
-| `has_splice_evidence` | Boolean. True if any read at this locus has a junction (N in CIGAR). |
-| `is_monoexonic` | Boolean. True if no read has a junction. |
-| `polya_run_downstream` | Boolean. True if an A-run ≥ 6 bp was found downstream of the locus. |
-| `near_polya_site` | Boolean. True if the locus is within 50 bp of an annotated polyA site. |
-| `poisson_pvalue_adj` | Bonferroni-corrected Poisson p-value for read enrichment vs background intergenic rate. |
-| `category` | Category assigned to this locus: `intergenic_hotspot`, `intergenic_novel`, `intergenic_repeat`, or `intergenic_sparse`. |
-
----
-
-#### `<sample>.cluster_metrics.tsv`
-
-Only written when `--obs-metadata` is supplied. Contains per-cluster aggregated noise metrics. The cluster column comes from the `cluster` column in the obs metadata TSV.
-
----
-
-#### `<sample>.report.html`
-
-Self-contained interactive HTML report using Plotly (pinned to version 2.35.2 from CDN, or embedded when `--offline` is set). Contains:
-
-- Sample metadata table (platform, pipeline stage, aligner, annotation versions)
-- Read category composition bar chart
-- Noise fraction summary
-- Per-cell noise violin (suppressed for barcode-agnostic samples)
-- Read-length distributions by category (long-read platforms only)
-- Noise by read length stratification (long-read platforms only)
-- Insert size distribution (Illumina only, when paired reads are present)
-- Per-cluster noise comparison (when `--obs-metadata` is supplied)
-- Intergenic loci table (when intergenic reads are present)
-- Warnings panel
-
----
-
-### `compare` outputs
-
-All written to `--output-dir`.
-
----
-
-#### `comparison.metrics.tsv`
-
-Tab-separated. Side-by-side scalar metrics for both samples.
-
-| Column | Description |
-|---|---|
-| `metric` | Metric name (same keys as `<sample>.read_metrics.tsv`). |
-| `<label_a>` | Value for BAM A. |
-| `<label_b>` | Value for BAM B. |
-| `delta` | `<label_b>` − `<label_a>`. |
-
-Only numeric metrics (int and float fields) from `SampleMetrics` are included.
-
----
-
-#### `comparison.stats.tsv`
-
-Tab-separated. One row per read category.
-
-| Column | Description |
-|---|---|
-| `category` | Read category string value. |
-| `frac_<label_a>` | Read fraction for BAM A. |
-| `frac_<label_b>` | Read fraction for BAM B. |
-| `delta` | `frac_<label_b>` − `frac_<label_a>`. |
-| `chi2` | Chi-squared statistic from the contingency table test. |
-| `p_value` | Uncorrected p-value. |
-| `p_adjusted` | Bonferroni-corrected p-value (clipped at 1.0). |
-
----
-
-#### `comparison.report.html`
-
-Interactive HTML comparison report. Contains:
-
-- Side-by-side read category composition bar charts
-- Noise fraction comparison bars
-- Per-cell noise violin (suppressed when either sample is barcode-agnostic, i.e. `n_cells == 1`)
-- Length distribution overlays
-- Statistical test results table
-- Warnings panel
-
----
-
-## 10. Annotation Caching and Auto-Download
-
-### Cache location
-
-All automatically downloaded annotation files and parsed site dictionaries are stored in `~/.cache/scnoisemeter/`. Subsequent runs reuse cached files without any network call. Pass `--offline` to enforce cache-only mode; the tool raises an error if a required file is absent from the cache.
-
-Three independent caches live in that directory:
-
-1. **Annotation index** — parsed GTF stored as a compressed pickle next to the source GTF file.
-2. **polyA site dict** — `.scnoisemeter_polya_<hash>.pkl.gz`, one per unique set of polyA BED inputs.
-3. **TSS / CAGE site dict** — `.scnoisemeter_tss_<hash>.pkl.gz`, same scheme.
-
-The polyA and TSS caches are keyed on the source file path, mtime, size, a hash of the first 64 KB of each file, and the BAM chromosome-naming style (UCSC vs Ensembl). The head-bytes hash guards against in-place edits that preserve mtime. If any component of the key changes, a new cache entry is written. First load takes ~35 s for the 569k-site PolyASite 3.0 atlas; subsequent loads are under 1 s. In `run-plate` with `--parallel-wells` > 1, each worker loads the cache once in its initialiser and reuses it across every well assigned to that worker.
+Without a whitelist or CB tag, reads pool under `NO_BARCODE`; sample-level metrics still work, but per-cell metrics do not. Plate mode converts that sentinel to a well identifier before aggregation.
 
 ### GTF
 
-On first run with no `--gtf` or `--gtf-version`, the latest GENCODE human GTF is downloaded from the GENCODE FTP. The parsed annotation index (pyranges intervals, intron complement, intergenic regions) is cached alongside the GTF as a compressed pickle; rebuilding it from a large GTF takes roughly 60 seconds, so repeated runs benefit significantly from this cache. Pass `--no-cache` to force a rebuild.
+`--gtf` accepts plain or gzipped GTF. If omitted, a GENCODE annotation is cached automatically. `--gtf-version N` selects a release. Chromosome naming must match the BAM (`chr1` versus `1`). Annotation cache identity includes metadata and a content-head hash.
 
-To pin a specific GENCODE release:
+### Reference FASTA
+
+`--reference` enables:
+
+- strand-aware internal polyA-context flags;
+- donor-plus-acceptor splice-motif checks;
+- intergenic hotspot context.
+
+The FASTA must match the BAM assembly and have an `.fai` index.
+
+### Repeat, polyA, TSS, and NUMT resources
+
+- `--repeats`: BED3+ repeat intervals used for `intergenic_repeat`.
+- `--polya-sites`: repeatable BED3+; strand in column 6 is preserved.
+- `--tss-sites`: repeatable BED3+; strand in column 6 is preserved.
+- `--numt-bed`: records the loaded NUMT interval count as provenance only. It does not produce a NUMT read fraction.
+
+BED coordinates are zero-based, half-open; midpoint is used for end-site resources. Unknown strand (`.` or missing column 6) can match either read orientation.
+
+## 4. Common options
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--platform` | `auto` | `ont`, `pacbio`, `illumina`, `illumina_10x`, `illumina_bd`, `smartseq`, or `unknown` |
+| `--library-strand` | `auto` | `stranded` or `unstranded`; explicit is preferred |
+| `--pipeline-stage` | `auto` | `raw`, `pre_filter`, `post_filter`, or `custom` metadata |
+| `--threads` | 4 | chromosome workers within a BAM |
+| `--seed` | none | deterministic reservoir sampling given identical threads/input |
+| `--no-cache` | off | rebuild annotation index |
+| `--offline` | off | forbid downloads and require cached/provided resources |
+| `--exclude-biotypes` | none | repeatable gene biotype exclusion |
+| `--obs-metadata` | none | per-cell cluster metadata for cluster summaries |
+| `--no-umi-tracking` | off | disable UMI-string sets to reduce memory; `--no-umi-dedup` is a legacy alias |
+
+`--chimeric-distance` is accepted only for backward compatibility. Same-strand genomic distance is not used to call a chimera.
+
+### Platform inference
+
+Auto-detection uses header pipeline hints. It intentionally does not assert:
+
+- minimap2 = ONT;
+- bare STAR = Smart-seq.
+
+Minimap2 alone becomes `unknown`; bare STAR becomes generic `illumina`. Explicit platform and strandedness avoid silent assay assumptions.
+
+### TSO options
+
+`--tso SEQUENCE` is repeatable and replaces the protocol-aware motif default. Only A/C/G/T/N is accepted. `--tso-min-match` sets the prefix length. `--no-polyg-tso` disables the 10x-specific poly-G shortcut.
+
+CLI defaults:
+
+| Platform context | Motif default |
+|---|---|
+| ONT or 10x | 10x TSO |
+| PacBio or Smart-seq | SMART/PacBio TSO |
+| Generic Illumina, BD, unknown | none; provide `--tso` if applicable |
+
+The classifier API retains historical behavior when `tso_sequences=None`; pass `[]` to disable sequence matching programmatically.
+
+## 5. `run`
 
 ```bash
-scnoisemeter run --bam sample.bam --gtf-version 42 --output-dir results/
+scnoisemeter run --bam INPUT --output-dir DIRECTORY [COMMON OPTIONS]
 ```
 
-To supply a local file (disables all auto-download for the GTF):
+Additional options:
+
+- `--sample-name`: output prefix;
+- `--tagged-bam PATH`: optional indexed BAM copy with final category in local SAM tag `sn`;
+- `--cell-barcodes`: called-cell filter;
+- `--barcode-whitelist` or `--whitelist-db`;
+- `--barcode-tag`, `--umi-tag`;
+- `--chemistry`: barcode-length expectation metadata.
+
+The command validates coordinate sort order, BAM index counts, chromosome naming, annotation/reference compatibility, and low read counts before writing the report.
+
+`--tagged-bam` preserves every input record and tags only classified mapped-primary alignments. It retains exact read assignments in memory and performs a second input pass. Final intergenic tags are looked up from the fixed-window locus table, including when aggregate reclassification used a reservoir.
+
+## 6. `compare`
 
 ```bash
-scnoisemeter run --bam sample.bam --gtf gencode.v45.annotation.gtf.gz --output-dir results/
+scnoisemeter compare \
+  --bam-a raw.bam \
+  --bam-b filtered.bam \
+  --label-a raw \
+  --label-b filtered \
+  --output-dir comparison/
 ```
 
-### PolyA site databases
+`--tso-a` and `--tso-b` override shared `--tso` independently.
 
-Two databases are supported, selected with `--polya-db`:
+Comparison outputs are dependent-data aware:
 
-| Database | Flag value | Source | Genome | Notes |
-|---|---|---|---|---|
-| PolyASite 3.0 | `polyasite3` (default) | polyasite.unibas.ch | hg38 / GENCODE v42 | ~569k sites; tied to GENCODE v42 |
-| PolyA_DB v4 | `polyadb4` | exon.njms.rutgers.edu | hg38 | Not tied to a GENCODE version; works with any GTF release |
+- stable read keys are query name plus `/1`, `/2`, or `/0`;
+- retention is exact set intersection by category in A;
+- transition counts use shared keys;
+- sample fractions are descriptive;
+- paired-cell median differences use cells shared by both BAMs and a fixed-seed 1,000-resample percentile bootstrap.
 
-Use `both` to load both databases simultaneously. When `--polya-sites` is provided explicitly, `--polya-db` is ignored.
+No independent read-count chi-square p-values are produced. If query names were changed by a pipeline, exact matching will be low; inspect `comparison.matching.tsv` before interpreting retention.
 
-The PolyASite 3.0 atlas is distributed as a BED6 file. PolyA_DB v4 is distributed as a ZIP archive; scNoiseMeter downloads and converts it to BED3 format on first use and caches the result.
+## 7. `discover`
 
-**Version mismatch.** The current PolyASite 3.0 atlas is built on GENCODE v42. Auto-downloading the latest GTF (currently v49) produces a seven-version gap; the tool warns when the difference exceeds five major releases. Two ways to resolve this:
+```bash
+scnoisemeter discover \
+  --bam-dir /data/bams \
+  --reference GRCh38.fa \
+  --output-dir batch_results/ \
+  --run-all
+```
 
-- Pass `--gtf-version 42` to auto-download GENCODE v42, matching the PolyASite 3.0 atlas exactly.
-- Pass `--polya-db polyadb4` to switch to PolyA_DB v4, which is not tied to a GENCODE version and works with any GTF release.
+Without `--run-all`, discovery displays inferred metadata and prompts for a subset. The annotation and site resources are reused across BAMs. Inference warnings should be resolved with explicit settings when protocol details are known.
 
-### TSS / CAGE peak databases
+## 8. `run-plate`
 
-Two options are supported, selected with `--tss-db`:
+```bash
+scnoisemeter run-plate \
+  --plate-dir /data/plate \
+  --sample-sheet plate.csv \
+  --platform smartseq \
+  --library-strand unstranded \
+  --parallel-wells 8 \
+  --threads 16 \
+  --output-dir plate_results/
+```
 
-| Database | Flag value | Source | Notes |
-|---|---|---|---|
-| FANTOM5 | `fantom5` (default) | fantom.gsc.riken.jp | hg38 robust CAGE peaks, ~184k peaks, BED6 format |
-| None | `none` | — | Disables TSS anchoring; `tss_anchored_frac` will not be reported |
+Expected well layout is `<PlateID>_<WellID>` with rows A–H for 96-well and A–P for 384-well plates. The sample sheet can add index and arbitrary metadata. Missing BAM indexes are reported and skipped.
 
-When `--tss-sites` is provided explicitly, `--tss-db` is ignored.
+`--parallel-wells` controls concurrent wells; total `--threads` is divided across workers. If a worker is killed, the command reports progress and suggests reducing parallelism.
 
----
+Barcode-free well results are relabeled to `<PlateID>_<WellID>` before merging. Counts, flags, alignment summaries, UMI sets, intergenic records, endpoints, and comparison assignments follow that relabel.
 
-## 11. Platform-Specific Notes
+## 9. Output denominators
 
-### ONT
+| Quantity | Denominator |
+|---|---|
+| `read_frac_<category>` | classified mapped-primary alignments |
+| `base_frac_<category>` | classified aligned reference bases |
+| `unmapped_read_frac` | mapped + unmapped BAM-index records |
+| artifact flag fractions in MultiQC | classified mapped-primary alignments |
+| per-cell fractions | classified reads/bases for that retained cell |
+| endpoint fractions | reservoir-sampled exonic-sense reads with the required atlas |
+| intergenic Poisson rate | sampled intergenic records / exact non-mitochondrial BAM-contig complement of GTF gene bodies |
 
-- Platform auto-detected from `minimap2` `@PG` record in the BAM header.
-- Chimeric detection uses the SA tag with the default intra-chromosomal distance threshold (10,000 bp). Split alignments within this distance on the same strand are treated as legitimate splices.
-- Full-length read fraction fallback threshold: 500 bp (when no polyA site database is provided).
-- Read-length distribution and noise-by-length charts are included in the HTML report.
-- No insert size chart.
+`n_reads_processed` can include records later skipped by classification or called-cell filtering. Use output denominator fields, not log progress counts, for reporting.
 
-### PacBio / Kinnex
+## 10. `read_metrics.tsv`
 
-- Platform auto-detected from `pbmm2` `@PG` record.
-- Chimeric detection uses the SA tag, same logic as ONT.
-- The PacBio TSO (`AAGCAGTGGTATCAACGCAGAGT`) is used for TSO invasion detection.
-- Full-length read fraction fallback threshold: 1000 bp.
-- Read-length distribution and noise-by-length charts are included in the HTML report.
-- No insert size chart.
+The two-column sample table contains:
 
-### 10x Genomics and BD Rhapsody (short-read: Illumina, ElemBio)
+### Record counts
 
-- Platform auto-detected from `STAR`, `STARsolo`, or `cellranger` `@PG` records. Short-read BAMs from Illumina or ElemBio (AVITI) sequencers are handled identically; the distinction is kit chemistry, not sequencer vendor.
-- Chimeric detection uses paired-end mode: a read pair is chimeric if it is inter-chromosomal, strand-discordant, or has `abs(template_length)` ≥ 1,000,000 bp.
-- Read-length distribution and noise-by-length charts are suppressed (all reads are the same short length).
-- Insert size distribution chart is shown when properly paired reads are present (collected by reservoir sampling from read1 of each proper pair, with `0 < abs(template_length) < 2000`).
-- The `_length_stratified.tsv` file contains a note that all reads fall in the `<150 bp` bin.
-- `illumina_10x` and `illumina_bd` are treated identically to `illumina` in all classification logic; the distinction affects only BAM header auto-detection.
+- `n_records_total`, `n_records_mapped`, `n_records_unmapped`, `n_alignments_classified`;
+- historical aliases `n_reads_total`, `n_reads_mapped`, `n_reads_unmapped`;
+- `n_primary_mapped`, `n_secondary`, `n_supplementary`;
+- `n_qcfail`, `n_duplicate`;
+- `n_reads_classified`, `n_reads_unassigned`, `n_cells`.
 
-### Smart-seq / FLASH-seq / Smart-seq3
+### Aggregate composition
 
-- **Not auto-detected.** Must be set with `--platform smartseq` (or via `run-plate`, which requires it explicitly for plate workflows).
-- Paired-end chimeric detection (same logic as Illumina) is used when template_length is populated.
-- **Unstranded noise definition.** `exonic_antisense` is excluded from both conservative and strict noise sets because unstranded libraries produce sense and antisense reads in roughly equal proportion by design. Including antisense would inflate the noise fraction by a constant that depends only on library construction, not on actual noise.
-- **Missing CB tag is expected.** One BAM = one cell; the `CB` tag is typically absent. The usual "low CB tag fraction" warning is suppressed for Smart-seq.
-- **Per-cell metrics and `n_cells`** report `N/A` in single-well HTML reports; the plate-level report aggregates across wells.
-- **Strand concordance** is expected to be ~50 % in unstranded data. The HTML report annotates this rather than flagging it as poor quality.
-- **TSS / polyA anchoring** still computes, but the interpretation changes: unstranded reads near an annotated polyA site are informative of transcript ends on either strand. The report surfaces this caveat.
-- Read-length distribution and noise-by-length charts are shown when reads are long enough (Smart-seq3 produces mixed lengths; traditional Smart-seq2 is short-read).
+- `broad_noncanonical_read_frac`, `broad_noncanonical_base_frac`;
+- `artifact_candidate_read_frac`, `artifact_candidate_base_frac`;
+- deprecated aliases `noise_read_frac`, `noise_base_frac`, `noise_read_frac_strict`, `noise_base_frac_strict`.
 
-### Barcode-agnostic mode
+### Alignment/location
 
-Activated when fewer than 50% of sampled reads (10,000 reads sampled from the BAM) carry the corrected barcode tag (`CB` by default). In this mode:
+- `strand_concordance` = sense / (sense + antisense), missing when neither exists;
+- `chimeric_read_frac`, `multimapper_read_frac`, `unmapped_read_frac`;
+- `low_mapq_read_frac`, `mean_mapq`, optional `mean_edit_distance`, optional `softclip_base_frac`;
+- every `read_frac_<category>` and `base_frac_<category>`.
 
-- All reads are aggregated under the sentinel barcode `NO_BARCODE`.
-- `n_cells` is set to 1.
-- Per-cell metrics are not meaningful; the cell_metrics TSV will contain one row.
-- A warning is emitted to stderr.
-- If `--cell-barcodes` is supplied in barcode-agnostic mode, the filter is ignored with a warning.
-- In `compare` reports, the per-cell violin is suppressed when either sample has `n_cells == 1`, and a warning is appended to the report.
+### Flags
 
----
+- `n_tso_invasion`;
+- `n_tso_concatemer`;
+- `n_polya_priming`;
+- `n_noncanon_junction`;
+- `n_discordant_pair`;
+- `n_low_mapq`.
 
-## 12. Known Caveats and Limitations
+### Ends and provenance
 
-**Genome / annotation:**
+- optional `three_prime_anchored_frac`;
+- optional `five_prime_anchored_frac`;
+- optional `both_ends_anchored_frac`;
+- deprecated `full_length_read_frac` equal to both-end anchoring;
+- optional `n_numt_intervals_loaded`.
 
-- Only human GRCh38/hg38 is supported. The chromosome length validation uses hardcoded GRCh38 expected lengths. Other species will produce length mismatch warnings.
-- The GENCODE GTF and PolyASite 3.0 atlas must use the same chromosome naming convention (UCSC or Ensembl). Mismatches between BAM and GTF chromosome names cause a fatal error.
-- If the GTF and polyA atlas differ by more than 5 GENCODE major versions, a warning is issued. Genes with 3′ UTRs annotated between the two versions may have reduced polyA anchoring scores. To resolve: pass `--gtf-version 42` to match the PolyASite 3.0 atlas exactly, or pass `--polya-db polyadb4` to switch to PolyA_DB v4, which is version-agnostic.
+## 11. `cell_metrics.tsv`
 
-**Read classification:**
+Only non-sentinel cells with at least 10 classified reads are included. Columns include:
 
-- Only primary alignments are classified. Secondary (flag 0x100) and supplementary (flag 0x800) alignments are skipped; the `SA` tag on the primary alignment is what the chimeric detector parses.
-- `MULTIMAPPER` is defined as NH tag > 1 on the primary alignment record. It is the highest priority in the classification hierarchy; reads without an NH tag are not flagged as multimappers.
-- `INTRONIC_PURE` and `INTRONIC_BOUNDARY` cannot be distinguished from genuine pre-mRNA capture at the read level. They are included in conservative noise but excluded from strict noise. Their presence does not necessarily indicate an artifact.
-- `INTERGENIC_NOVEL` requires >= 80% strand consistency, >= 3 distinct barcodes, and either splice evidence (CIGAR N) or proximity (<= 50 bp) to an annotated polyA site. It flags candidate loci for review; it does not confirm the existence of an unannotated gene.
-- `INTERGENIC_REPEAT` classification requires a RepeatMasker BED file (`--repeats`). Without it, repeat-overlapping intergenic reads fall into INTERGENIC_HOTSPOT or INTERGENIC_SPARSE.
-- Non-canonical junction detection requires a reference FASTA (`--reference`). Without it, `n_noncanon_junction` is 0 regardless of the actual data.
+- `n_reads`, `n_bases`;
+- category read/base fractions;
+- broad and artifact-candidate fractions plus legacy aliases;
+- flag counts and low-MAPQ rate;
+- mean MAPQ, optional mean edit distance, softclip-base fraction;
+- `umi_sequence_diversity_<category>`;
+- deprecated identical `umi_complexity_<category>` aliases.
 
-**Barcode handling:**
+UMI sequence diversity is not gene-aware molecule complexity. Missing values can mean no reads/UMIs, tracking disabled, or exact membership unavailable after sampled intergenic reclassification.
 
-- The tool reads corrected barcodes from the `CB` tag (or the tag specified by `--barcode-tag`). Raw uncorrected barcodes (`CR` tag) are not used for classification.
-- Trailing `-1` suffixes are stripped from both the `--cell-barcodes` file and the CB tags in the BAM, so Cell Ranger output is normalised automatically. Other suffix conventions are not handled.
-- In barcode-agnostic mode, per-cell noise values are not meaningful.
+## 12. `intergenic_loci.tsv`
 
-**Chimeric detection:**
+Columns:
 
-- The default chimeric distance threshold of 10,000 bp may flag very long transcripts (> 10 kb) that have legitimate split alignments as chimeric. For datasets with very long transcripts (e.g. PacBio full-length mRNA), consider increasing `--chimeric-distance`.
-- For Illumina paired-end data, the 1,000,000 bp insert size threshold for chimeric calling is fixed and cannot be adjusted from the command line.
+| Column | Meaning |
+|---|---|
+| `contig`, `start`, `end` | fixed 500 bp window |
+| `strand` | dominant strand |
+| `strand_fraction` | fraction on dominant strand |
+| `n_reads` | sampled records in window |
+| `n_barcodes` | real barcodes, excluding sentinel/missing |
+| `has_splice_evidence` | any record has CIGAR `N` |
+| `is_monoexonic` | no record has CIGAR `N` |
+| `polya_run_downstream` | strand-aware genomic A/T-run evidence |
+| `near_polya_site` | dominant-strand site proximity |
+| `repeat_overlap_fraction` | aligned-span fraction overlapping repeats |
+| `poisson_pvalue` | raw global-rate tail probability |
+| `poisson_pvalue_adj` | Bonferroni result across all possible windows |
+| `category` | final intergenic interpretation |
 
-**Performance:**
+This table contains sampled support if more than 500,000 intergenic records were seen.
 
-- The annotation index is built per run. For large GTF files, this takes several minutes on first use. The cache (`--no-cache` disables it) stores the parsed index to avoid rebuilding on subsequent runs with the same GTF.
-- Parallelism is at the chromosome level (`--threads`). Chromosomes are processed independently. Small contigs (alt, patch) are each dispatched as separate workers, which may cause imbalance for heavily fragmented reference assemblies.
-- UMI tracking (`umi_complexity_*` columns) stores a set of UMI strings per cell per category. For very large datasets, this can consume significant memory. Use `--no-umi-dedup` to disable it.
-- Read-length and insert-size sampling use reservoir sampling (Algorithm R). Not all reads are represented in the length distribution TSVs or insert size charts.
+## 13. Comparison files
 
-**Statistical:**
+### `comparison.metrics.tsv`
 
-- The chi-squared test in `compare` is applied to the contingency table of read counts. It is not a paired test; it does not account for the fact that BAM B may be a strict subset of BAM A (e.g. post-filter ⊆ pre-filter). Interpret p-values accordingly.
-- The adaptive intergenic threshold uses Bonferroni correction across all intergenic loci. In samples with many sparse intergenic reads, this correction is conservative and may suppress detection of low-coverage novel loci.
-- Per-cell noise statistics (median, IQR) are computed only over cells with ≥ 10 reads. The threshold is fixed.
+Scalar metric values for A and B plus B−A.
+
+### `comparison.stats.tsv`
+
+For each category: sample fraction A/B, fraction delta, paired-cell count, paired-cell median delta, and 95% bootstrap interval.
+
+### `comparison.retention.tsv`
+
+For each A category: initial keys, keys present in B, retained in the same category, retained in another category, and retention fractions.
+
+### `comparison.transitions.tsv`
+
+Counts of category A → category B among shared keys.
+
+### `comparison.matching.tsv`
+
+Overall A/B key counts, shared keys, A-only, and B-only.
+
+## 14. Caching and reproducibility
+
+Default cache directory is `~/.cache/scnoisemeter`. Annotation, polyA, and TSS caches are separately fingerprinted. `--offline` prevents network access. `--no-cache` affects annotation-index reuse.
+
+`--seed` controls read-length, insert-size, endpoint, and intergenic reservoir selection. Reservoirs are merged using seen-record weights. Identical seed, inputs, software, and thread count make tabular sampling reproducible; generated HTML may contain non-deterministic Plotly element identifiers.
+
+For archival work, preserve explicit input files or checksums, command line, version/commit, seed, and output denominators.
+
+## 15. Interpretation checklist
+
+Before calling a preparation “noisy,” ask:
+
+1. Was `--library-strand` correct?
+2. Did BAM and GTF use the same assembly/naming?
+3. Were called cells supplied consistently?
+4. Was the actual TSO configured?
+5. Were repeat and reference resources present?
+6. Is the aggregate driven by intronic biology, unresolved intergenic enrichment, or positive artifact evidence?
+7. For comparison, were enough read keys and cells shared?
+8. Was intergenic reclassification exact or reservoir-estimated?
+9. Are endpoint atlases tissue/protocol appropriate?
+10. Is an orthogonal tool needed (ambient RNA, doublet, fusion, or isoform QC)?
+
+Use component categories and evidence flags in reports. Do not describe `broad_noncanonical_*` as a measured contamination fraction.

@@ -55,7 +55,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import pickle
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -68,7 +67,7 @@ from scnoisemeter.constants import MITO_CONTIG_NAMES
 logger = logging.getLogger(__name__)
 
 # Bump this when the interval build logic changes so stale caches are invalidated
-_CACHE_VERSION = "v7"
+_CACHE_VERSION = "v8"
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +119,7 @@ class AnnotationIndex:
     intergenic:          pr.PyRanges
     repeats:             Optional[pr.PyRanges]
     splice_sites:        dict  # contig → set[tuple[int, str]]
+    splice_junctions:    dict  # contig → set[tuple[start, end, strand]]
     gtf_path:            Path
     repeats_path:        Optional[Path]
 
@@ -272,12 +272,18 @@ def _build(
 
     # Merge strand-specific shared sets — kept separate by type
     def _merge_strands(pr_a, pr_b):
+        """Concatenate strand-specific intervals without erasing Strand.
+
+        The classifier filters these records by read strand.  A global
+        ``merge()`` here used to combine + and - records and made an overlap
+        on either strand ambiguous for every read.
+        """
         df = pd.concat(
             [pr_a.df if not pr_a.df.empty else pd.DataFrame(),
              pr_b.df if not pr_b.df.empty else pd.DataFrame()],
             ignore_index=True
         )
-        return pr.PyRanges(df).merge() if not df.empty else pr.PyRanges()
+        return pr.PyRanges(df) if not df.empty else pr.PyRanges()
 
     gene_shared_cod_cod  = _merge_strands(shared_cod_cod_plus,  shared_cod_cod_minus)
     gene_shared_cod_ncod = _merge_strands(shared_cod_ncod_plus, shared_cod_ncod_minus)
@@ -298,6 +304,7 @@ def _build(
     # ------------------------------------------------------------------
     logger.info("  Extracting splice sites …")
     splice_sites = _extract_splice_sites(exon_df)
+    splice_junctions = _extract_splice_junctions(exon_df)
 
     # ------------------------------------------------------------------
     # 9. RepeatMasker (optional)
@@ -323,6 +330,7 @@ def _build(
         intergenic=intergenic,
         repeats=repeats,
         splice_sites=splice_sites,
+        splice_junctions=splice_junctions,
         gtf_path=gtf_path,
         repeats_path=repeats_path,
     )
@@ -549,6 +557,38 @@ def _extract_splice_sites(exon_df: pd.DataFrame) -> dict:
     return sites
 
 
+def _extract_splice_junctions(exon_df: pd.DataFrame) -> dict:
+    """Return exact annotated introns derived from adjacent transcript exons.
+
+    A set of isolated exon boundaries cannot establish that both ends of a
+    read junction belong to the same annotated transcript.  Exact
+    ``(intron_start, intron_end, strand)`` tuples avoid accepting a novel
+    acceptor merely because its donor happens to be annotated elsewhere.
+    """
+    if "transcript_id" not in exon_df.columns:
+        return {}
+
+    junctions: dict[str, set] = {}
+    required = ["Chromosome", "Start", "End", "Strand", "transcript_id"]
+    sub = exon_df[required].dropna(subset=["transcript_id"]).drop_duplicates()
+    for (_chrom, _strand, _tx), grp in sub.groupby(
+        ["Chromosome", "Strand", "transcript_id"], observed=False
+    ):
+        exons = sorted(
+            (int(row.Start), int(row.End))
+            for row in grp.itertuples(index=False)
+        )
+        if len(exons) < 2:
+            continue
+        dest = junctions.setdefault(str(_chrom), set())
+        for left, right in zip(exons, exons[1:]):
+            intron_start = left[1]
+            intron_end = right[0]
+            if intron_end > intron_start:
+                dest.add((intron_start, intron_end, str(_strand)))
+    return junctions
+
+
 # ---------------------------------------------------------------------------
 # Helper: load RepeatMasker BED
 # ---------------------------------------------------------------------------
@@ -596,12 +636,10 @@ def _manual_complement(gene_bodies_df: pd.DataFrame) -> pr.PyRanges:
     via its residual fallback (any bases not in exons or introns are assigned
     INTERGENIC_SPARSE) so query correctness is unaffected.
 
-    This object is used only as the denominator in the Poisson background model
-    (compute_intergenic_bases). Excluding the post-last-gene tail introduces a
-    small systematic underestimate of intergenic bases, which makes the Poisson
-    test slightly conservative. The previous implementation added a sentinel
-    End=2_000_000_000 per chromosome, inflating the denominator by ~24× and
-    causing the test to flag almost every concentrated intergenic locus.
+    This object is a fallback denominator for callers that do not supply BAM
+    contig lengths. Normal CLI workflows compute the exact complement through
+    the end of each BAM reference. The previous implementation added a sentinel
+    End=2_000_000_000 per chromosome, strongly inflating the denominator.
     """
     if gene_bodies_df.empty:
         return pr.PyRanges()
@@ -652,9 +690,25 @@ def _cache_path(
     --repeats invalidates the cache; otherwise a prior run without repeats
     would silently hide the repeats layer from a subsequent run.
     """
-    repeats_key = str(repeats_path.resolve()) if repeats_path else ""
+    def _fingerprint(path: Optional[Path]) -> str:
+        if path is None:
+            return ""
+        try:
+            st = path.stat()
+            with open(path, "rb") as fh:
+                head = fh.read(65536)
+            return (
+                f"{path.resolve()}:{st.st_size}:{st.st_mtime_ns}:"
+                f"{hashlib.md5(head).hexdigest()[:12]}"
+            )
+        except OSError:
+            return str(path.resolve())
+
+    repeats_key = _fingerprint(repeats_path)
+    gtf_key = _fingerprint(gtf_path)
     key = (
         f"{_CACHE_VERSION}"
+        f":{gtf_key}"
         f":{':'.join(sorted(exclude_biotypes))}"
         f":{repeats_key}"
     )

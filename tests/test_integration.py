@@ -53,10 +53,7 @@ def pipeline_result(tiny_bam, annotation_index, bam_meta):
     Run the full pipeline on the tiny BAM.
 
     threads=1 keeps the test single-process.
-    contigs=["chr1"] is passed explicitly because _select_contigs uses a
-    1 Mb minimum — chr1 at GRCh38 length passes, but being explicit avoids
-    any version-dependent filtering changes breaking the fixture.
-    chrM is added automatically by run_pipeline via the mito-contig path.
+    All mapped contigs are discovered from the BAM index, including chrM.
     """
     return run_pipeline(
         tiny_bam,
@@ -64,7 +61,7 @@ def pipeline_result(tiny_bam, annotation_index, bam_meta):
         bam_meta,
         threads=1,
         store_umis=True,
-        contigs=["chr1"],
+        store_read_assignments=True,
     )
 
 
@@ -154,16 +151,27 @@ class TestAnnotationIndex:
             "_manual_complement fix not applied"
         )
 
+    def test_exact_intergenic_denominator_uses_contig_lengths(self, annotation_index):
+        from scnoisemeter.modules.intergenic_profiler import compute_intergenic_bases
+
+        by_contig = compute_intergenic_bases(
+            annotation_index,
+            by_contig=True,
+            contig_lengths={"chr1": 40_000, "chrM": 16_569},
+        )
+        # GTF gene spans are 5,001 bp and 10,001 bp after 1-based conversion.
+        assert by_contig == {"chr1": 24_998}
+
 
 # ---------------------------------------------------------------------------
 # BAM inspection
 # ---------------------------------------------------------------------------
 
 class TestBamInspection:
-    def test_platform_detected_as_ont(self, bam_meta):
-        """minimap2 @PG record should resolve to ONT platform."""
+    def test_minimap2_alone_does_not_invent_platform(self, bam_meta):
+        """minimap2 is used for ONT, PacBio and short-read workflows."""
         from scnoisemeter.constants import Platform
-        assert bam_meta.platform == Platform.ONT
+        assert bam_meta.platform == Platform.UNKNOWN
 
     def test_barcode_aware(self, bam_meta):
         """All but possibly one read carry CB tags → barcode_aware=True."""
@@ -203,7 +211,7 @@ class TestPipelineExecution:
 
     def test_chimeric_classified(self, pipeline_result):
         n = _total_reads_for_category(pipeline_result, ReadCategory.CHIMERIC)
-        assert n >= 1, "Expected at least one CHIMERIC read (SA tag, 48 kbp gap)"
+        assert n >= 1, "Expected at least one CHIMERIC read (inter-contig SA tag)"
 
     def test_intronic_classified(self, pipeline_result):
         pure = _total_reads_for_category(pipeline_result, ReadCategory.INTRONIC_PURE)
@@ -225,6 +233,20 @@ class TestPipelineExecution:
     def test_mitochondrial_classified(self, pipeline_result):
         n = _total_reads_for_category(pipeline_result, ReadCategory.MITOCHONDRIAL)
         assert n >= 1, "Expected at least one MITOCHONDRIAL read"
+
+    def test_optional_category_tagged_bam(self, tiny_bam, pipeline_result, tmp_path):
+        import pysam
+
+        from scnoisemeter.cli import _write_category_tagged_bam
+
+        output = tmp_path / "tagged.bam"
+        _write_category_tagged_bam(tiny_bam, output, pipeline_result, [])
+        assert output.exists()
+        assert Path(str(output) + ".bai").exists()
+        with pysam.AlignmentFile(str(output), "rb") as bam:
+            tagged = {read.query_name: read.get_tag("sn") for read in bam}
+        assert tagged["read_chimeric"] == ReadCategory.CHIMERIC.value
+        assert tagged["read_mito"] == ReadCategory.MITOCHONDRIAL.value
 
     def test_no_spurious_supplementary_counted(self, pipeline_result):
         """SUPPLEMENTARY reads must not appear in read_counts."""
@@ -268,6 +290,51 @@ class TestMetrics:
 
     def test_chimeric_frac_positive(self, sample_metrics):
         assert sample_metrics.chimeric_read_frac > 0.0
+
+    def test_alignment_quality_aggregates(self, sample_metrics):
+        assert sample_metrics.mean_mapq == pytest.approx(60.0)
+        assert sample_metrics.mean_edit_distance is None
+        assert sample_metrics.softclip_base_frac == pytest.approx(0.0)
+        assert sample_metrics.low_mapq_read_frac == pytest.approx(0.0)
+
+    def test_compare_outputs_use_exact_read_keys(
+        self, sample_metrics, cell_table, pipeline_result, tmp_path
+    ):
+        from dataclasses import replace
+        from types import SimpleNamespace
+
+        import pandas as pd
+
+        from scnoisemeter.cli import _write_compare_outputs
+
+        assignments_a = dict(pipeline_result.read_assignments)
+        removed_key = next(iter(assignments_a))
+        assignments_b = {
+            key: value for key, value in assignments_a.items()
+            if key != removed_key
+        }
+        result_a = SimpleNamespace(
+            read_assignments=assignments_a, length_samples={}
+        )
+        result_b = SimpleNamespace(
+            read_assignments=assignments_b, length_samples={}
+        )
+        metrics_a = replace(sample_metrics, sample_name="A")
+        metrics_b = replace(sample_metrics, sample_name="B")
+        _write_compare_outputs(
+            {
+                "A": (metrics_a, cell_table, result_a),
+                "B": (metrics_b, cell_table, result_b),
+            },
+            tmp_path,
+            "A",
+            "B",
+        )
+        matching = pd.read_csv(tmp_path / "comparison.matching.tsv", sep="\t")
+        assert matching.loc[0, "n_only_a"] == 1
+        assert matching.loc[0, "n_shared"] == len(assignments_b)
+        assert (tmp_path / "comparison.transitions.tsv").exists()
+        assert (tmp_path / "comparison.stats.tsv").exists()
 
     def test_multimapper_frac_positive(self, sample_metrics):
         assert sample_metrics.multimapper_read_frac > 0.0

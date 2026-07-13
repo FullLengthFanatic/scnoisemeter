@@ -198,6 +198,7 @@ class TestCase3AllUnmapped:
                 "--gtf", str(gtf_file),
                 "--platform", "ont",
                 "--pipeline-stage", "post_filter",
+                "--tss-db", "none",
                 "--output-dir", str(tmp_path / "out"),
             ])
 
@@ -289,6 +290,7 @@ class TestCase4TinyBAM:
                 "--gtf", str(gtf_file),
                 "--platform", "ont",
                 "--pipeline-stage", "post_filter",
+                "--tss-db", "none",
                 "--output-dir", str(tmp_path / "out"),
             ])
 

@@ -1,135 +1,163 @@
-# scNoiseMeter: a white paper
+# scNoiseMeter: white paper
 
-**Platform-agnostic, per-read classification of technical noise in single-cell RNA-seq.**
+**A barcode-aware alignment artifact and read-distribution QC framework for single-cell RNA-seq**
 
-Version 0.6.0. Written for readers who work with RNA-seq data and want to understand what the tool measures and why it is built the way it is. For the line-by-line implementation, see [methods_annotated.md](methods_annotated.md).
+Version 0.7.0. This document explains the scientific position of scNoiseMeter. For implementation details see [methods_annotated.md](methods_annotated.md); for command and output reference see [documentation.md](documentation.md).
 
----
+## Abstract
 
-## 1. The problem
+RNA-seq alignments outside an annotated, sense exonic model are frequently described as “noise.” That shorthand is useful operationally but scientifically unsafe. Intronic RNA supports transcriptional dynamics; antisense transcription may be regulated; intergenic signal may represent incomplete annotation; split alignments may represent real fusions; and mitochondrial signal varies with biology as well as sample quality. A BAM alone rarely identifies a causal mechanism.
 
-Single-cell RNA-seq libraries carry a substantial fraction of reads that do not represent a real, full-length, correctly-stranded mRNA molecule from the cell they are assigned to. The usual suspects: intronic reads from pre-mRNA or incomplete reverse transcription, antisense reads from strand-switching, reads landing in intergenic space, chimeras from template switching or ligation, internal priming on genomic A-runs, template-switching-oligo (TSO) artifacts, and ambient or multi-gene-ambiguous signal.
+scNoiseMeter therefore treats technical-noise analysis as an evidence-labeling and composition problem. Every mapped primary alignment receives one mutually exclusive location/alignment category, its aligned reference bases are partitioned without double-counting, and independent context flags record evidence such as internal priming, TSO sequence, non-canonical splice boundaries, low mapping confidence, or pair discordance. Results are aggregated by sample, cell, cluster, read length, or plate well.
 
-Most QC tools collapse all of this into one number, a single "% mapped to transcriptome" or "% intronic". That number tells you something is wrong but not what, and it gives you no handle on whether a given cell, a given read-length bin, or a given locus is the source. It also tends to be tied to one platform's aligner and one assay's conventions.
+The tool reports a broad non-canonical composition and a narrower artifact-candidate composition. Neither is presented as an estimate of contamination. The framework is designed to be auditable and comparable across long-read, droplet short-read, and plate protocols while remaining explicit about assay-specific assumptions.
 
-scNoiseMeter takes a different stance. It reads a coordinate-sorted BAM plus a GTF and assigns **every primary alignment to exactly one of 16 mutually-exclusive categories**, then layers independent sequence-level artifact flags on top. The same logic runs on long-read (ONT, PacBio/Kinnex) and short-read (Illumina, Element/AVITI; 10x or BD Rhapsody kits) and on plate-based Smart-seq / FLASH-seq, with the few genuinely platform-dependent rules switched automatically. The output is a mechanistic breakdown of noise, per sample, per cell, and per cluster, not a single scalar.
+## 1. Scientific motivation
 
----
+No single alignment category is synonymous with a technical artifact.
 
-## 2. The core idea
+- Intronic signal can contain nascent RNA. The distinction between spliced and unspliced RNA is the basis of [RNA velocity](https://www.nature.com/articles/s41586-018-0414-6), and bulk work has also shown that intronic and exonic reads carry distinct regulatory information.
+- Internal oligo(dT) priming is a real, systematic bias across bulk and single-cell data, especially near genomic A-rich sequence ([Svoboda et al., 2022](https://academic.oup.com/nargab/article/4/2/lqac035/6592171)).
+- Long-read transcript models require post-alignment curation of junctions, ends, and artifact evidence; [SQANTI3](https://www.nature.com/articles/s41592-024-02229-2) operates at the transcript-model level.
+- Ambient RNA tools such as [SoupX](https://academic.oup.com/gigascience/article/9/12/giaa151/6049831) estimate contamination from count-matrix and empty-droplet evidence. An alignment-category tool cannot reproduce that inference from mapped location alone.
+- Large benchmarking efforts such as [LRGASP](https://www.nature.com/articles/s41592-024-02298-3) demonstrate that long-read transcript reconstruction and quantification depend on both protocol and analysis method.
 
-Three design choices define the tool.
+This motivates a narrower claim: scNoiseMeter describes alignment composition and flags candidate artifacts. It does not infer that every non-exonic read is technical, nor does it remove molecules.
 
-**Per-read, mutually-exclusive classification.** Each primary alignment gets one category by a fixed priority hierarchy (first matching rule wins). In parallel, the tool tallies *aligned bases* per category, so a long read that straddles an exon and an intron contributes to both at base resolution even though its single read-level label is decided by plurality vote. Read-level labels drive per-cell QC; base-level fractions are the finer benchmarking metric.
+## 2. Design principles
 
-**Two noise definitions, not one.** Some categories are unambiguous artifacts (intergenic sparse, chimeric, antisense in a stranded library). Others (intronic reads with no junction) cannot be told apart from genuine pre-mRNA capture at the read level. So the tool reports a **conservative** noise fraction (upper bound, includes the intronic-pure subtypes) and a **strict** noise fraction (lower bound, only unambiguous artifacts). For unstranded protocols it drops antisense from both, because sense and antisense arrive in roughly equal proportion by design.
+### 2.1 Separate observation from interpretation
 
-**Statistics where heuristics are not enough.** Intergenic reads are not all equal. A handful scattered across the genome is background; a tight cluster supported by many cells is either a real unannotated transcript or an internal-priming hotspot. scNoiseMeter resolves this with a second pass that clusters intergenic reads into loci and scores each against a Poisson background, rather than calling everything intergenic "noise".
+The primary categories describe what is observed: mitochondrial mapping, multimapping, exonic orientation, intronic structure, same-strand gene ambiguity, intergenic enrichment, or split-alignment evidence. Independent flags describe additional evidence. Causal terms are reserved for cases with a specific context signature and are still qualified as candidates.
 
----
+### 2.2 Preserve exact denominators
 
-## 3. The classification logic
+The BAM index supplies mapped and unmapped totals. Primary, secondary, supplementary, QC-fail, and duplicate counts are reported separately. Genomic category fractions use classified mapped-primary alignments. Unmapped fraction uses the full mapped-plus-unmapped BAM-index denominator.
 
-Reads are tested in this order. The order matters: it is a priority hierarchy, and the first rule that fires assigns the category.
+At base level, every aligned reference block is split at annotation boundaries. Exactly one category wins each atomic interval. This prevents the former failure mode where overlapping exons, introns, or genes counted the same base multiple times.
 
-1. **Skip filters.** Unmapped, secondary (`0x100`), and supplementary (`0x800`) records are not classified. The supplementary record's `SA` tag is still read off the primary alignment for chimera detection.
-2. **Barcode gate.** With a barcode whitelist, a read whose `CB` tag is missing or off-list becomes `unassigned`. With no whitelist and no `CB`, the tool runs in barcode-agnostic mode and pools everything under one sentinel barcode, so it still produces sample-level noise metrics on BAMs that carry no cell barcodes.
-3. **Multimapper.** `NH > 1` on the primary alignment. Aligner-agnostic, so it works the same on minimap2, STAR, pbmm2.
-4. **Mitochondrial.** Maps to `chrM` / `MT` / `chrMT` / `mitochondrion`.
-5. **Chimeric.** From the `SA` tag: inter-chromosomal, strand-discordant, or same-strand at a distance above the threshold (default 10 kb). For paired-end short-read and Smart-seq, a fallback uses mate mapping and insert size when no `SA` tag is present.
-6. **Genomic location** (the remaining reads), decided by overlapping the read's aligned blocks against the annotation:
-   - `exonic_sense` / `exonic_antisense`: overlaps an annotated exon on the correct / wrong strand.
-   - `intronic_jxnspan`: intronic with a `CIGAR N` (a real splice gap), candidate intron retention or a non-canonical junction.
-   - `intronic_boundary`: spans an exon-intron edge with no splice gap, the signature of incomplete RT.
-   - `intronic_pure`: entirely inside an intron body.
-   - `intergenic_sparse`: no gene-body overlap (the default before the second pass promotes it).
-   - `ambiguous_cod_cod` / `ambiguous_cod_ncod` / `ambiguous`: the read sits in a region shared by two protein-coding genes, by a coding and a non-coding gene, or by genes the tool cannot otherwise resolve.
+### 2.3 Keep strand as evidence
 
-The signal category is `exonic_sense`. Everything else is either noise, ambiguous, or (for the intronic and intergenic-novel cases) deliberately left out of the noise sets because it may be biology.
+Opposite-strand genes are not automatically ambiguous. Ambiguity is formed from same-strand shared gene regions, while exonic sense and antisense are classified relative to read orientation. Users can state `stranded` or `unstranded`; automatic inference is intentionally conservative because aligner names do not identify library strandedness.
 
-### Why the intronic split
+### 2.4 Avoid pseudo-replication
 
-A 3' assay should produce exonic reads ending at the polyA site. Intronic reads happen for real reasons (nuclear pre-mRNA, intron retention) and for technical reasons (RT that stalled, internal priming inside an intron). The tool cannot fully separate these per read, so instead of guessing it records the *shape* of the evidence: a junction-spanning intronic read (`intronic_jxnspan`) is treated as plausibly real and kept out of noise; a read that crosses an exon-intron boundary with no splice (`intronic_boundary`) or sits purely in an intron (`intronic_pure`) goes into conservative noise but not strict noise. The reader gets both bounds and decides.
+Pre/post-filter BAMs are dependent, and individual reads are nested within molecules and cells. scNoiseMeter does not apply an independent-samples chi-square test to read counts. It matches read keys exactly for retention/transitions and uses cells as paired units for a bootstrap interval on median per-cell differences.
 
-### Why the intergenic second pass
+### 2.5 Make missing evidence explicit
 
-After the first pass labels intergenic reads `intergenic_sparse`, a second pass clusters them into loci (single-linkage within 500 bp on the same strand) and tests each locus against a Poisson model whose rate is the genome-wide intergenic read density. Loci that clear a Bonferroni-corrected p-value plus minimum read and barcode support are promoted:
+Endpoint anchoring is absent when the required atlas is absent. `NM` summaries are absent when the tag is unavailable. UMI sequence diversity is absent for categories whose exact UMI membership cannot be reconstructed after reservoir-based intergenic reclassification. Missing is preferable to a fabricated proxy.
 
-- **`intergenic_hotspot`**: monoexonic and sitting on a genomic A-run just past its 3' end. This is the internal-priming signature, oligo-dT or the RT priming off an A-rich stretch in the genome instead of a real tail.
-- **`intergenic_novel`**: strand-consistent, multi-cell, and anchored by either a splice junction or proximity to an annotated polyA site. A candidate unannotated transcript, reported as ambiguous rather than noise.
-- **`intergenic_repeat`**: overlaps a RepeatMasker interval (only when a repeats BED is supplied).
+## 3. Classification model
 
-A locus that is significant but fits neither the hotspot nor the novel rule defaults to hotspot, on the principle that over-flagging an artifact is safer than over-claiming a new gene. Because promoted reads leave the sparse bucket before noise is computed, calling a locus `intergenic_novel` actually lowers the reported noise fraction.
+Unmapped, secondary, and supplementary records are counted but not assigned genomic categories. A mapped primary read then passes through:
 
-### Sequence-level artifact flags
+1. barcode/whitelist gate;
+2. multimapper evidence;
+3. mitochondrial contig check;
+4. split/pair chimera evidence;
+5. atomic annotation overlap;
+6. intergenic second-pass refinement.
 
-Separate from the category, every classified read can carry independent flags. These are not categories because a read can be, say, exonic-sense and still show a TSO artifact; the flags annotate, they do not relabel.
+The resulting 17 categories are listed in the README and operational documentation.
 
-- **TSO invasion.** The 10x and PacBio TSOs (or a user-supplied sequence) matched against the read's soft-clips, in both forward and reverse-complement orientation (so a TSO end that mapped antisense is still caught), plus a poly-G heuristic for the 10x TSO's G-rich tail.
-- **TSO concatemer.** More than one TSO occurrence in a single read, the signature of template switching running from one TSO onto another. The metric follows Chou et al. (bioRxiv 2025.10.06.680646).
-- **Internal polyA priming.** A genomic A-run within 20 bp downstream of a forward read's 3' end (or a T-run upstream of a reverse read's 3' end). Strand-aware, and it needs a reference FASTA.
-- **Non-canonical junction.** A `CIGAR N` whose donor dinucleotide is not GT-AG / GC-AG / AT-AC and is not in the annotation. Also needs a reference FASTA.
+### Chimeric evidence
 
----
+The `SA` tag is interpreted structurally. Inter-contig and strand-discordant splits are candidates. Same-contig, same-strand splits are candidates only when aligned query order is incompatible with genomic order. Genomic distance alone is not evidence because RNA alignments routinely span long introns. This is consistent with the general role of splice-aware aligners such as [STAR](https://academic.oup.com/bioinformatics/article/29/1/15/272537), which detect both splice junctions and chimeric transcripts.
 
-## 4. Platform-agnostic by design
+For paired cDNA alignments, inter-contig mates or an extreme template length can produce a chimeric candidate. A missing or improper mate produces a discordance flag, not an automatic chimera. Real fusions and technical chimeras remain inseparable without additional biological evidence.
 
-The same classifier runs everywhere. What changes between platforms is auto-detected from the BAM header (`@PG` aligner plus pipeline hints) and then drives a small set of switches:
+Recent work on long-read foldback and chimera artifacts further supports treating orientation/order as evidence rather than using a fixed genomic gap ([Breakinator](https://link.springer.com/article/10.1186/s12864-025-12492-y)).
 
-- **Strandedness.** Stranded kits (10x, BD, ONT, PacBio) count antisense as noise. Smart-seq / FLASH-seq are unstranded, so antisense is excluded from the noise sets. This one is *not* auto-detected: Smart-seq must be set with `--platform smartseq`, because a STAR-aligned plate BAM otherwise looks like 10x.
-- **Chimera logic.** Long reads use the `SA`-tag distance rule; paired-end short-read and Smart-seq add the mate/insert-size fallback.
-- **Read-length views.** Length-stratified charts are shown for long reads and suppressed for short-read kits where every read is sub-150 bp; insert-size distributions are shown for paired-end data instead.
-- **Full-length estimate.** With a polyA-site atlas, "full length" means the 3' end sits at an annotated polyA site. Without one, it falls back to a platform-specific length threshold.
+### Splice evidence
 
-Annotation (GENCODE GTF, PolyASite 3.0 or PolyA_DB v4, FANTOM5 CAGE) is auto-downloaded and cached on first use, so the minimal invocation is just a BAM and an output directory.
+CIGAR `N` operations are converted to exact `(donor boundary, acceptor boundary)` pairs. Exact transcript junctions extracted from the GTF are accepted. Otherwise both donor and acceptor dinucleotides are checked in transcript orientation against GT–AG, GC–AG, and AT–AC. A donor-only test would overcall canonicality; a position-only set could incorrectly combine donor and acceptor from different transcripts.
 
----
+### Intergenic evidence
 
-## 5. What you get out
+The second pass assigns strand-correct 3′ coordinates to predefined 500 bp windows. BAM reference lengths and the union of GTF gene bodies define the complete non-mitochondrial intergenic complement, including sequence after the final annotated gene. A global intergenic read-density model supplies a Poisson tail probability. The correction includes every possible window, not only windows observed to contain a read. The model is deliberately described as a global-rate enrichment screen; unlike a mature peak caller, it has no local-background, GC, or mappability correction.
 
-| Output | Content |
-|---|---|
-| `read_metrics.tsv` | Sample-wide fractions, conservative and strict noise, strand concordance, chimeric/multimapper rates, artifact-flag counts |
-| `cell_metrics.tsv` | Per-cell breakdown for every cell with >= 10 reads, including per-category UMI complexity |
-| `intergenic_loci.tsv` | Each characterized locus with its Poisson-adjusted p-value and the features that drove its call |
-| `_length_stratified.tsv` | Category composition by read-length bin |
-| `multiqc.json` | MultiQC-ready scalars |
-| `report.html` | Interactive Plotly report |
+Enriched windows are interpreted by independent evidence:
 
-Four subcommands cover the workflows: `run` (one BAM), `run-plate` (a 96- or 384-well Smart-seq / FLASH-seq plate), `compare` (two BAMs, e.g. pre- vs post-filter, with per-category chi-squared tests), and `discover` (scan a directory, infer parameters, batch-run). A `--obs-metadata` cluster file adds per-cluster noise profiles.
+- repeat-derived: at least half of sampled aligned span overlaps repeat intervals;
+- internal-priming hotspot candidate: monoexonic, strand-aware genomic polyA-run context, and not near a strand-matched annotated polyA site;
+- candidate novel transcript: dominant-strand support, multiple real barcodes, and either splice or annotated polyA-end support;
+- enriched unresolved: significant but lacking the evidence above.
 
----
+Calling the last group “enriched” rather than “hotspot” avoids converting statistical enrichment into a causal artifact label.
 
-## 6. Where it sits relative to existing tools
+## 4. Aggregate metrics
 
-scNoiseMeter is not an ambient-RNA remover, an empty-droplet caller, a doublet detector, or an isoform-QC tool. It is a per-alignment, mechanistic noise classifier, and it is most useful as a diagnostic layer alongside those tools rather than a replacement for any of them.
+### Broad non-canonical composition
 
-- **Aligner built-in metrics (Cell Ranger, STARsolo)** report four broad read classes (exonic / intronic / intergenic / antisense) as sample-level fractions. scNoiseMeter splits these into 16 mechanistic categories, reports them per cell, and adds locus scoring and sequence-artifact flags that the aligners do not.
-- **Bulk RNA-seq QC (RNA-SeQC, Picard CollectRnaSeqMetrics)** count bases by region for bulk libraries. scNoiseMeter is single-cell-aware (per-cell and per-cluster) and read-resolved.
-- **Ambient-RNA removal (SoupX, DecontX, CellBender)** estimate and subtract a single contamination fraction per cell from the count matrix. scNoiseMeter does not remove anything; it classifies reads so you can see the mechanism (internal priming vs TSO invasion vs intergenic), and it works from the BAM, not the matrix.
-- **Empty droplets (DropletUtils emptyDrops) and doublets (Scrublet, DoubletFinder)** answer "is this barcode a real cell?" scNoiseMeter answers "within the real cells, what kind of noise is in their reads?" The two are complementary upstream and downstream of each other.
-- **Long-read isoform QC (SQANTI3, pigeon, FLAMES, FLAIR, IsoQuant, TALON)** validate *assembled isoforms* and flag intra-priming and RT-switching post-assembly. scNoiseMeter operates pre-assembly on individual alignments, so it can feed cleaner reads into those pipelines, and its TSO-invasion and TSO-concatemer detection has no direct equivalent there.
-- **Long-read run QC (LongQC, NanoPlot, pycoQC)** summarize yield, length, and quality. scNoiseMeter is orthogonal: it classifies artifact type, not run quality.
+The broad set contains exonic antisense (unless unstranded), intronic pure/boundary, sparse/repeat/enriched/hotspot intergenic reads, and chimeric alignments. It is useful for comparing preparations or filters but can include real biology.
 
-### Strengths
+### Artifact-candidate composition
 
-- One tool, one taxonomy, across long- and short-read and plate-based assays.
-- Per-read and per-base resolution, aggregated to per-cell and per-cluster.
-- A statistical model for intergenic loci instead of a flat "intergenic = noise" rule.
-- Dedicated, configurable TSO and internal-priming detection, including the TSO-concatemer metric from the uMRT literature.
-- Two principled noise bounds rather than one fragile number.
+The narrow set contains internal-priming hotspot candidates and chimeric candidates. Even this is not ground truth: A-rich contexts can coincide with real ends and chimeric evidence can represent real fusions.
 
-### Honest limitations
+The old `noise_*` and `noise_*_strict` fields remain compatibility aliases during the 0.7 transition. New work should use the descriptive names.
 
-- It classifies; it does not correct or remove reads.
-- `intronic_pure` and `intronic_boundary` cannot be separated from genuine pre-mRNA at the read level, which is exactly why they appear in conservative but not strict noise.
-- Chimeric calls mix technical chimeras with real gene fusions; interpretation needs biological context.
-- The intergenic Poisson model assumes a homogeneous background, which is an approximation near highly transcribed regions.
-- Human GRCh38/hg38 only; other genomes warn but are not supported.
-- It has not been benchmarked against a sorted or spike-in ground truth, an open problem shared by every tool in this space.
+### UMI sequence diversity
 
----
+Unique UMI strings divided by reads measures sequence diversity within a cell/category. It is not molecule complexity because scNoiseMeter does not group UMIs by gene or genomic molecule and does not correct sequencing errors. Both the accurate name and a deprecated `umi_complexity_*` alias are emitted.
 
-## 7. Tuning
+### Endpoint anchoring
 
-Every threshold lives in one file, `scnoisemeter/constants.py`, and the common ones are exposed as CLI flags (`--chimeric-distance`, `--tso`, `--tso-min-match`, `--no-polyg-tso`, `--platform`, and the annotation flags). The detailed companion document maps each rule to its exact code location and says what to change to alter its behavior. See [methods_annotated.md](methods_annotated.md).
+Read length alone is not evidence of transcript completeness. A long genomic alignment may start late, end early, include retained introns, or cross a fusion. scNoiseMeter instead measures strand-matched proximity to a TSS/CAGE atlas and a polyA atlas on the same read. A `both_ends_anchored_frac` is reported only when both resources exist. The deprecated `full_length_read_frac` is exactly this same-read both-end fraction, never a length fallback.
+
+This conservative position is consistent with work emphasizing the difficulty of assigning trustworthy long-read transcript starts and ends and with cap/3′-end-enriched approaches such as [CapTrap-seq](https://www.nature.com/articles/s41467-024-49523-3).
+
+## 5. Protocol handling
+
+Sequencer, aligner, library chemistry, and strandedness are different concepts. Minimap2 is used beyond ONT; STAR is used beyond Smart-seq; a 10x library can be sequenced on different short-read instruments. Auto-detection uses explicit pipeline hints when available and otherwise returns generic or unknown states with warnings.
+
+TSO sequence screening also follows protocol evidence. The CLI uses a 10x motif for ONT/10x contexts, a SMART/PacBio motif for PacBio/Smart-seq, and no motif for generic/unknown inputs unless the user supplies `--tso`. Approximate matching tolerates one substitution at the molecularly appropriate soft-clipped end. The poly-G shortcut is restricted to the built-in 10x motif.
+
+Unstranded libraries suppress orientation-dependent endpoint metrics and remove exonic antisense from the broad composition. Explicit `--library-strand` is recommended.
+
+## 6. Novelty and relationship to existing tools
+
+The individual ingredients are established: genomic partitioning, splice motif checks, internal-priming context, endpoint atlases, per-cell summaries, and split-alignment evidence. The useful novelty is their integration at the individual-alignment level with a common taxonomy and exact read/base accounting across droplet, long-read, and plate workflows.
+
+scNoiseMeter complements rather than replaces:
+
+- aligner summaries (mapping and broad genomic regions);
+- ambient-RNA models such as SoupX, DecontX, and CellBender;
+- cell-calling and doublet detection;
+- isoform-model QC such as SQANTI3 and pigeon;
+- run-level long-read QC;
+- fusion callers, which apply gene-level evidence and filtering beyond an `SA` tag.
+
+The fixed-window intergenic screen, same-read two-end anchoring, exact pre/post read retention, and separation of descriptive composition from artifact-candidate evidence are the most distinctive elements of version 0.7. They should still be externally benchmarked.
+
+## 7. Validation status and limitations
+
+The test suite covers category invariants, overlapping annotation, strand-aware ambiguity, exact splice boundaries and motifs, reservoir merging, site-strand loading, plate relabeling, comparison matching, and an end-to-end synthetic BAM/GTF path. CI runs supported Python versions.
+
+Important remaining limitations are:
+
+- no experimentally sorted positive/negative ground truth across protocols;
+- no local/mappability model for intergenic enrichment;
+- no gene-aware molecule deduplication;
+- no read-level NUMT inference from competing alignments;
+- no distinction between real fusions and technical chimeras;
+- no correction/removal of reads;
+- automatic reference downloads currently focus on GRCh38.
+
+Accordingly, scNoiseMeter should be used for QC, method comparison, and hypothesis generation. Candidate artifact reads or loci should be validated with orthogonal evidence before exclusion or biological interpretation.
+
+## 8. Reproducible reporting
+
+A defensible methods section should state:
+
+- scNoiseMeter version/commit;
+- BAM generation and filtering stage;
+- GTF, genome, repeat, polyA, and TSS resource versions;
+- platform and library strandedness supplied to the CLI;
+- barcode/UMI tags, whitelist, and called-cell filter;
+- custom TSO sequence and whether poly-G checking was enabled;
+- seed, thread count, and whether intergenic reclassification was reservoir-estimated;
+- which denominator and aggregate metric was reported.
+
+Do not relabel `broad_noncanonical_read_frac` as percent contamination. Report its component categories and the narrower artifact-candidate composition alongside it.

@@ -11,6 +11,7 @@ pass significance thresholds into more informative sub-categories:
   INTERGENIC_REPEAT   → overlaps RepeatMasker annotation
   INTERGENIC_HOTSPOT  → passes threshold but shows internal-priming signature
   INTERGENIC_NOVEL    → passes threshold, strand-consistent, polyA-site-proximal
+  INTERGENIC_ENRICHED → passes threshold without more specific evidence
 
 The Poisson background model
 -----------------------------
@@ -22,40 +23,39 @@ For a window of size W bp, the expected count is lambda * W.
 A locus is "significant" if its observed count has Poisson p < alpha
 (Bonferroni-corrected for the number of windows tested).
 
-This is conceptually identical to MACS2 peak calling and is well-validated
-for this type of sparse signal-above-background problem.
+This is a simple global-rate enrichment screen, not a replacement for a peak
+caller: it has no local-background or mappability model.
 
 Hotspot classification heuristics (rule-based, no ML)
 ------------------------------------------------------
-A locus is called INTERGENIC_HOTSPOT (internal priming artifact) if ALL of:
+A window is called INTERGENIC_HOTSPOT (internal-priming candidate) if ALL of:
   1. Monoexonic: all reads lack CIGAR N (no splice junctions)
-  2. A-rich 3′ context: ≥ POLYA_RUN_MIN_LENGTH As within POLYA_CONTEXT_WINDOW
-     bp downstream of the modal read 3′ end in the reference
+  2. Strand-aware A/T-rich 3′ context within POLYA_CONTEXT_WINDOW bp of the
+     modal read 3′ end in the reference
   3. NOT within POLYA_SITE_PROXIMITY bp of an annotated polyA site (otherwise
      routed to INTERGENIC_NOVEL when strand-consistent with enough barcodes)
 
-A locus is called INTERGENIC_NOVEL if ALL of:
+A window is called INTERGENIC_NOVEL if ALL of:
   1. Passes the Poisson significance threshold
   2. Strong strand consistency (≥ 80% reads on one strand)
   3. ≥ MIN_NOVEL_DISTINCT_BARCODES distinct cell barcodes
   4. At least one read has a CIGAR N (splice evidence) OR is within
      POLYA_SITE_PROXIMITY of an annotated polyA site
 
-Everything else that passes the threshold but satisfies neither rule set
-is reported as INTERGENIC_HOTSPOT (conservative default — flag for review).
+Everything else that passes the threshold but satisfies neither rule set is
+reported as INTERGENIC_ENRICHED, which deliberately makes no causal claim.
 
 Locus definition
 ----------------
-Reads are grouped into loci by merging overlapping read alignments on
-the same strand within INTERGENIC_LOCUS_WINDOW bp of each other.
-This is a simple single-linkage clustering and is fast enough to run
-on the intergenic read subset.
+Reads are assigned by their strand-correct 3' coordinate to pre-defined,
+non-overlapping INTERGENIC_LOCUS_WINDOW-bp genomic windows. Strand consistency
+is measured after assignment and is therefore independent evidence.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -68,6 +68,7 @@ from scnoisemeter.constants import (
     ADAPTIVE_MIN_READS,
     ADAPTIVE_PVALUE_THRESHOLD,
     INTERGENIC_LOCUS_WINDOW,
+    INTERGENIC_REPEAT_MIN_FRACTION,
     POLYA_CONTEXT_WINDOW,
     POLYA_RUN_MIN_LENGTH,
     POLYA_SITE_PROXIMITY,
@@ -118,6 +119,8 @@ class IntergenicLocus:
     near_polya_site:     bool
     poisson_pvalue:      float
     poisson_pvalue_adj:  float
+    strand_fraction:     float = 0.0
+    repeat_overlap_fraction: float = 0.0
     category:            ReadCategory = ReadCategory.INTERGENIC_SPARSE
 
 
@@ -135,6 +138,10 @@ class IntergenicReadRecord:
     cell_barcode:  str
     has_junction:  bool     # any CIGAR N present
     three_prime:   int      # reference_end (used for polyA context check)
+    n_bases:       int = 0
+    umi:           str = ""
+    read_length:   int = 0
+    read_key:      str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -143,13 +150,14 @@ class IntergenicReadRecord:
 
 def profile_intergenic_loci(
     records: list[IntergenicReadRecord],
-    total_intergenic_bases: int,
+    total_intergenic_bases: int | dict,
     total_barcodes: int,
     *,
     reference=None,           # pysam.FastaFile, optional
     polya_sites: Optional[dict] = None,  # contig → sorted list of positions
     repeat_intervals: Optional[dict] = None,  # contig → list of (start, end)
     alpha: float = ADAPTIVE_PVALUE_THRESHOLD,
+    n_test_windows: Optional[int] = None,
 ) -> tuple[list[IntergenicLocus], list]:
     """
     Profile intergenic reads and classify their loci.
@@ -175,6 +183,9 @@ def profile_intergenic_loci(
         RepeatMasker.  Used to flag INTERGENIC_REPEAT loci.
     alpha:
         Bonferroni-corrected significance threshold.
+    n_test_windows:
+        Pre-defined genome-window correction denominator. CLI workflows pass
+        every non-mitochondrial BAM window, a conservative upper bound.
 
     Returns
     -------
@@ -193,7 +204,8 @@ def profile_intergenic_loci(
         return [], []
 
     # ------------------------------------------------------------------
-    # 1. Group reads into loci by single-linkage clustering per contig/strand
+    # 1. Group reads into fixed, pre-defined 3'-end windows. Strand is not part
+    #    of the key: it is measured inside each window as independent evidence.
     # ------------------------------------------------------------------
     logger.info("  Clustering %d intergenic reads into loci …", len(records))
     locus_assignments = _cluster_reads(records)   # record_idx → locus_id
@@ -208,11 +220,16 @@ def profile_intergenic_loci(
     # 2. Compute Poisson background rate
     # ------------------------------------------------------------------
     total_intergenic_reads = len(records)
-    if total_intergenic_bases <= 0:
+    total_bases_value = (
+        sum(total_intergenic_bases.values())
+        if isinstance(total_intergenic_bases, dict)
+        else int(total_intergenic_bases)
+    )
+    if total_bases_value <= 0:
         logger.warning("total_intergenic_bases is 0 — Poisson background cannot be computed.")
         background_rate = 0.0
     else:
-        background_rate = total_intergenic_reads / total_intergenic_bases
+        background_rate = total_intergenic_reads / total_bases_value
 
     # ------------------------------------------------------------------
     # 3. Minimum barcode threshold (adaptive)
@@ -227,7 +244,17 @@ def profile_intergenic_loci(
     # ------------------------------------------------------------------
     loci: list[IntergenicLocus] = []
     record_categories: list[ReadCategory] = [ReadCategory.INTERGENIC_SPARSE] * len(records)
-    n_tests = n_loci  # Bonferroni denominator
+    # Correct for all fixed intergenic windows, including empty windows. Using
+    # only observed, data-derived loci made the original p-values selective.
+    if n_test_windows is not None:
+        n_tests = max(1, int(n_test_windows))
+    elif isinstance(total_intergenic_bases, dict):
+        n_tests = max(1, sum(
+            int(np.ceil(max(0, bases) / INTERGENIC_LOCUS_WINDOW))
+            for bases in total_intergenic_bases.values()
+        ))
+    else:
+        n_tests = max(1, int(np.ceil(total_bases_value / INTERGENIC_LOCUS_WINDOW)))
 
     for locus_id, indices in locus_groups.items():
         locus_records = [records[i] for i in indices]
@@ -246,12 +273,23 @@ def profile_intergenic_loci(
             for i in indices:
                 record_categories[i] = locus.category
 
-    n_novel   = sum(1 for l in loci if l.category == ReadCategory.INTERGENIC_NOVEL)
-    n_hotspot = sum(1 for l in loci if l.category == ReadCategory.INTERGENIC_HOTSPOT)
-    n_repeat  = sum(1 for l in loci if l.category == ReadCategory.INTERGENIC_REPEAT)
+    n_novel = sum(
+        1 for locus in loci if locus.category == ReadCategory.INTERGENIC_NOVEL
+    )
+    n_hotspot = sum(
+        1 for locus in loci if locus.category == ReadCategory.INTERGENIC_HOTSPOT
+    )
+    n_repeat = sum(
+        1 for locus in loci if locus.category == ReadCategory.INTERGENIC_REPEAT
+    )
+    n_enriched = sum(
+        1 for locus in loci if locus.category == ReadCategory.INTERGENIC_ENRICHED
+    )
     logger.info(
-        "  Intergenic loci: %d novel candidates, %d hotspots, %d repeat-derived, %d sparse",
-        n_novel, n_hotspot, n_repeat, n_loci - n_novel - n_hotspot - n_repeat,
+        "  Intergenic windows: %d transcript candidates, %d hotspots, "
+        "%d repeat-derived, %d enriched-unresolved, %d sparse",
+        n_novel, n_hotspot, n_repeat, n_enriched,
+        n_loci - n_novel - n_hotspot - n_repeat - n_enriched,
     )
 
     return loci, record_categories
@@ -275,8 +313,9 @@ def _score_locus(
 ) -> IntergenicLocus:
 
     contig  = records[0].contig
-    start   = min(r.start for r in records)
-    end     = max(r.end   for r in records)
+    modal_end = _modal_three_prime(records)
+    start = (modal_end // INTERGENIC_LOCUS_WINDOW) * INTERGENIC_LOCUS_WINDOW
+    end = start + INTERGENIC_LOCUS_WINDOW
     n_reads = len(records)
 
     # Strand consistency
@@ -287,27 +326,27 @@ def _score_locus(
     strand_consistent = strand_frac >= STRAND_CONSISTENCY_MIN
 
     # Distinct barcodes
-    n_barcodes = len({r.cell_barcode for r in records})
+    n_barcodes = len({
+        r.cell_barcode for r in records
+        if r.cell_barcode not in {"", "NO_BARCODE"}
+    })
 
     # Splice evidence
     has_junction   = any(r.has_junction for r in records)
     is_monoexonic  = not has_junction
 
     # Poisson significance
-    locus_width  = max(end - start, 1)
-    expected     = background_rate * locus_width
-    raw_pvalue   = 1.0 - poisson.cdf(n_reads - 1, expected) if expected > 0 else 1.0
+    expected     = background_rate * INTERGENIC_LOCUS_WINDOW
+    raw_pvalue   = float(poisson.sf(n_reads - 1, expected)) if expected > 0 else 1.0
     adj_pvalue   = min(raw_pvalue * n_tests, 1.0)   # Bonferroni
     significant  = (
         adj_pvalue < alpha
         and n_reads >= ADAPTIVE_MIN_READS
-        and n_barcodes >= min_barcodes
     )
 
     # PolyA context check (requires reference)
     polya_run_downstream = False
     if reference is not None:
-        modal_end = _modal_three_prime(records)
         polya_run_downstream = _check_polya_context(
             reference, contig, modal_end, strand=dominant_strand
         )
@@ -315,13 +354,17 @@ def _score_locus(
     # Annotated polyA site proximity
     near_polya = False
     if polya_sites is not None:
-        modal_end = _modal_three_prime(records)
-        near_polya = _near_polya_site(polya_sites, contig, modal_end)
+        near_polya = _near_polya_site(
+            polya_sites, contig, modal_end, strand=dominant_strand
+        )
 
     # RepeatMasker overlap
-    overlaps_repeat = False
+    repeat_fraction = 0.0
     if repeat_intervals is not None:
-        overlaps_repeat = _overlaps_repeats(repeat_intervals, contig, start, end)
+        repeat_fraction = _repeat_overlap_fraction(
+            repeat_intervals, contig, records
+        )
+    overlaps_repeat = repeat_fraction >= INTERGENIC_REPEAT_MIN_FRACTION
 
     # ------------------------------------------------------------------
     # Classification decision tree
@@ -339,9 +382,7 @@ def _score_locus(
         category = ReadCategory.INTERGENIC_NOVEL
 
     else:
-        # Significant but ambiguous — conservative default: flag as hotspot
-        # (better to over-flag artifacts than over-claim novel genes)
-        category = ReadCategory.INTERGENIC_HOTSPOT
+        category = ReadCategory.INTERGENIC_ENRICHED
 
     return IntergenicLocus(
         contig=contig,
@@ -356,6 +397,8 @@ def _score_locus(
         near_polya_site=near_polya,
         poisson_pvalue=raw_pvalue,
         poisson_pvalue_adj=adj_pvalue,
+        strand_fraction=strand_frac,
+        repeat_overlap_fraction=repeat_fraction,
         category=category,
     )
 
@@ -400,53 +443,28 @@ def _is_novel_gene(
 
 
 # ---------------------------------------------------------------------------
-# Read clustering (single-linkage, by contig + strand + proximity)
+# Fixed-window assignment
 # ---------------------------------------------------------------------------
 
 def _cluster_reads(records: list[IntergenicReadRecord]) -> list[int]:
-    """
-    Assign each read to a locus ID using single-linkage clustering.
+    """Assign reads to fixed genomic 3'-end windows.
 
-    Two reads are in the same locus if they are on the same contig + strand
-    and their genomic intervals overlap or are within INTERGENIC_LOCUS_WINDOW bp.
-
-    Returns a list of locus IDs (integers), one per record, in the same order
-    as the input records list.
-
-    Algorithm: sort by (contig, strand, start), then sweep with a running
-    maximum end position to detect adjacency.  O(n log n).
+    Fixed windows are defined before observing read density, avoiding the
+    selective p-values produced by testing single-linkage clusters discovered
+    from the same reads.  Strand is deliberately excluded from the key so the
+    dominant-strand fraction remains independent evidence.
     """
     if not records:
         return []
 
-    # Sort order: contig, strand, start
-    order = sorted(
-        range(len(records)),
-        key=lambda i: (records[i].contig, records[i].strand, records[i].start),
-    )
-
-    locus_ids = [0] * len(records)
-    current_locus = 0
-    current_end = -1
-    current_contig = ""
-    current_strand = ""
-
-    for idx in order:
-        r = records[idx]
-        if (
-            r.contig != current_contig
-            or r.strand != current_strand
-            or r.start > current_end + INTERGENIC_LOCUS_WINDOW
-        ):
-            current_locus += 1
-            current_end = r.end
-            current_contig = r.contig
-            current_strand = r.strand
-        else:
-            current_end = max(current_end, r.end)
-        locus_ids[idx] = current_locus
-
-    return locus_ids
+    keys = [
+        (r.contig, int(r.three_prime) // INTERGENIC_LOCUS_WINDOW)
+        for r in records
+    ]
+    key_to_id = {
+        key: idx + 1 for idx, key in enumerate(sorted(set(keys)))
+    }
+    return [key_to_id[key] for key in keys]
 
 
 # ---------------------------------------------------------------------------
@@ -498,6 +516,7 @@ def _near_polya_site(
     contig: str,
     position: int,
     proximity: int = None,
+    strand: Optional[str] = None,
 ) -> bool:
     """
     Return True if *position* is within *proximity* bp of any annotated site
@@ -512,15 +531,21 @@ def _near_polya_site(
     import bisect
     if proximity is None:
         proximity = POLYA_SITE_PROXIMITY
-    sites = polya_sites.get(contig)
-    if not sites:
-        return False
+    keys = [contig]  # legacy BED3/cache representation
+    if strand in {"+", "-"}:
+        keys = [(contig, strand), (contig, "."), contig]
+    elif strand is None:
+        keys = [(contig, "+"), (contig, "-"), (contig, "."), contig]
 
-    idx = bisect.bisect_left(sites, position)
-    for candidate_idx in [idx - 1, idx]:
-        if 0 <= candidate_idx < len(sites):
-            if abs(sites[candidate_idx] - position) <= proximity:
-                return True
+    for key in keys:
+        sites = polya_sites.get(key)
+        if not sites:
+            continue
+        idx = bisect.bisect_left(sites, position)
+        for candidate_idx in [idx - 1, idx]:
+            if 0 <= candidate_idx < len(sites):
+                if abs(sites[candidate_idx] - position) <= proximity:
+                    return True
     return False
 
 
@@ -544,18 +569,101 @@ def _overlaps_repeats(
     return False
 
 
+def _repeat_overlap_fraction(
+    repeat_intervals: dict,
+    contig: str,
+    records: list[IntergenicReadRecord],
+) -> float:
+    """Fraction of sampled aligned record span overlapping repeat union."""
+    ivls = repeat_intervals.get(contig, [])
+    if not ivls or not records:
+        return 0.0
+    overlap = 0
+    total = 0
+    for record in records:
+        start, end = int(record.start), int(record.end)
+        width = max(end - start, 0)
+        total += width
+        covered_end = start
+        for ivl_start, ivl_end in sorted(ivls):
+            if ivl_start >= end:
+                break
+            lo, hi = max(start, ivl_start), min(end, ivl_end)
+            if hi > lo:
+                lo = max(lo, covered_end)
+                if hi > lo:
+                    overlap += hi - lo
+                    covered_end = hi
+    return overlap / total if total else 0.0
+
+
 # ---------------------------------------------------------------------------
 # Utility: compute total intergenic base-pairs from AnnotationIndex
 # ---------------------------------------------------------------------------
 
-def compute_intergenic_bases(index) -> int:
+def compute_intergenic_bases(
+    index,
+    *,
+    by_contig: bool = False,
+    contig_lengths: Optional[dict[str, int]] = None,
+) -> int | dict:
     """
-    Sum the total number of intergenic base-pairs from an AnnotationIndex.
-    Used as the Poisson background denominator.
+    Sum intergenic base-pairs for the Poisson background denominator.
+
+    When BAM contig lengths are supplied, the denominator is the exact
+    complement of the union of gene bodies from coordinate 0 to each contig
+    end. Without them, the annotation's between-gene gaps are used as a
+    compatibility fallback.
     """
+    if contig_lengths:
+        from scnoisemeter.constants import MITO_CONTIG_NAMES
+
+        frames = []
+        for attr in ("gene_bodies_plus", "gene_bodies_minus"):
+            obj = getattr(index, attr, None)
+            if obj is not None and not obj.df.empty:
+                frames.append(obj.df[["Chromosome", "Start", "End"]])
+        genes = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(
+            columns=["Chromosome", "Start", "End"]
+        )
+        genes_by_contig = {
+            str(chrom): sorted(
+                (int(row.Start), int(row.End))
+                for row in grp.itertuples(index=False)
+            )
+            for chrom, grp in genes.groupby("Chromosome", observed=False)
+        }
+        result = {}
+        for contig, raw_length in contig_lengths.items():
+            if contig in MITO_CONTIG_NAMES:
+                continue
+            length = max(0, int(raw_length))
+            covered = 0
+            current_start = current_end = None
+            for start, end in genes_by_contig.get(str(contig), []):
+                start, end = max(0, start), min(length, end)
+                if end <= start:
+                    continue
+                if current_start is None:
+                    current_start, current_end = start, end
+                elif start > current_end:
+                    covered += current_end - current_start
+                    current_start, current_end = start, end
+                else:
+                    current_end = max(current_end, end)
+            if current_start is not None:
+                covered += current_end - current_start
+            result[str(contig)] = max(0, length - covered)
+        return result if by_contig else sum(result.values())
+
     if index.intergenic is None or index.intergenic.df.empty:
-        return 0
+        return {} if by_contig else 0
     df = index.intergenic.df
+    if by_contig:
+        widths = (df["End"] - df["Start"]).groupby(
+            df["Chromosome"], observed=False
+        ).sum()
+        return {str(chrom): int(width) for chrom, width in widths.items()}
     return int((df["End"] - df["Start"]).sum())
 
 
@@ -571,12 +679,25 @@ def extract_intergenic_records(sample_result) -> list[IntergenicReadRecord]:
     (a list of 7-tuples written by the pipeline worker) into typed
     IntergenicReadRecord objects for the profiler.
 
-    Each tuple is: (contig, start, end, strand, cb, has_junction, three_prime)
+    Current tuples contain:
+      (contig, start, end, strand, cb, has_junction, three_prime,
+       n_bases, umi, read_length, read_key)
+
+    The legacy seven-field format is accepted for backwards compatibility.
     """
     records = []
     for rec in getattr(sample_result, "intergenic_reads", []):
         try:
-            contig, start, end, strand, cb, has_junction, three_prime = rec
+            if len(rec) == 7:
+                contig, start, end, strand, cb, has_junction, three_prime = rec
+                n_bases, umi, read_length, read_key = (
+                    int(end) - int(start), "", int(end) - int(start), ""
+                )
+            else:
+                (
+                    contig, start, end, strand, cb, has_junction, three_prime,
+                    n_bases, umi, read_length, read_key,
+                ) = rec
             records.append(IntergenicReadRecord(
                 contig=contig,
                 start=int(start),
@@ -585,6 +706,10 @@ def extract_intergenic_records(sample_result) -> list[IntergenicReadRecord]:
                 cell_barcode=str(cb),
                 has_junction=bool(has_junction),
                 three_prime=int(three_prime),
+                n_bases=int(n_bases),
+                umi=str(umi),
+                read_length=int(read_length),
+                read_key=str(read_key),
             ))
         except (ValueError, TypeError) as exc:
             logger.debug("Skipping malformed intergenic record: %s", exc)
