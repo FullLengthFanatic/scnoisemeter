@@ -638,7 +638,7 @@ def _intergenic_loci_plots(intergenic_loci: list) -> "list[go.Figure]":
     }
     cat_labels = {
         ReadCategory.INTERGENIC_HOTSPOT: "Internal priming hotspot",
-        ReadCategory.INTERGENIC_NOVEL:   "Candidate novel gene",
+        ReadCategory.INTERGENIC_NOVEL:   "Candidate unannotated transcript",
         ReadCategory.INTERGENIC_ENRICHED:"Enriched, unresolved",
         ReadCategory.INTERGENIC_REPEAT:  "Repeat-derived",
         ReadCategory.INTERGENIC_SPARSE:  "Sparse (below threshold)",
