@@ -17,8 +17,6 @@ being inspected.  All real analysis stays in the core pipeline.
 from __future__ import annotations
 
 import logging
-import os
-import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path

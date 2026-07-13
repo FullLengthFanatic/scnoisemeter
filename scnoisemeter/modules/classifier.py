@@ -45,10 +45,12 @@ from __future__ import annotations
 
 import re
 from bisect import bisect_left
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import pysam
+
+from scnoisemeter.modules.annotation import AnnotationIndex
 
 from scnoisemeter.constants import (
     BamTag,
@@ -69,7 +71,6 @@ from scnoisemeter.constants import (
 # Import new sub-categories (defined in constants but also referenced directly)
 _AMBIGUOUS_COD_COD  = ReadCategory.AMBIGUOUS_COD_COD
 _AMBIGUOUS_COD_NCOD = ReadCategory.AMBIGUOUS_COD_NCOD
-from scnoisemeter.modules.annotation import AnnotationIndex
 
 
 _COMPLEMENT = str.maketrans("ACGTN", "TGCAN")
@@ -131,10 +132,17 @@ class ReadResult:
     is_polya_priming:       bool
     has_noncanonical_junction: bool
     is_tso_concatemer:      bool
+    has_junction:           bool
+    is_discordant_pair:     bool
     contig:                 str
     pos:                    int
     is_reverse:             bool
     read_length:            int
+    aligned_reference_bases: int
+    mapq:                   int
+    edit_distance:          Optional[int] = None
+    softclip_bases:         int = 0
+    query_bases:            int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -159,13 +167,13 @@ class ReadClassifier:
     whitelist : set[str] | None
         Set of valid corrected barcodes.  None = accept all CB values.
     chimeric_distance : int
-        Maximum intra-chromosomal same-strand split-alignment distance (bp)
-        below which an SA-tag split is treated as a legitimate splice.
+        Deprecated compatibility argument. Genomic distance alone is not
+        evidence of a chimera because transcript introns can be long.
     paired_end_chimeric : bool
         When True, supplement SA-tag chimeric detection with paired-end logic:
         a pair is chimeric if the mates map to different chromosomes, same
-        chromosome with insert size > ILLUMINA_CHIMERIC_INSERT_SIZE, or one
-        mate is unmapped (discordant).  Activate for --platform illumina*.
+        chromosome with insert size > ILLUMINA_CHIMERIC_INSERT_SIZE. Orphan
+        and improper pairs are retained as independent discordance flags.
     tso_sequences : list[str]
         TSO sequences to check for in soft-clipped 5′ bases.
     tso_min_match : int
@@ -200,7 +208,15 @@ class ReadClassifier:
         self.whitelist = whitelist
         self.chimeric_distance = chimeric_distance
         self.paired_end_chimeric = paired_end_chimeric
-        self.tso_sequences = tso_sequences or [TSO_10X, TSO_PACBIO]
+        # ``None`` preserves the programmatic API's historical defaults;
+        # an explicit empty list disables motif matching.  The CLI supplies
+        # platform-aware defaults so unrelated chemistries are not screened
+        # against every built-in oligo.
+        self.tso_sequences = (
+            [TSO_10X, TSO_PACBIO]
+            if tso_sequences is None
+            else list(tso_sequences)
+        )
         self.tso_min_match = tso_min_match
         self.tso_check_polyg = tso_check_polyg
         self.reference = reference
@@ -261,6 +277,8 @@ class ReadClassifier:
         # --- Extract barcode / UMI ---
         cb, umi = self._get_tags(read)
 
+        aligned_reference_bases = _aligned_reference_bases(read)
+
         # --- Barcode validation ---
         # Three cases:
         # 1. CB present and on whitelist (or no whitelist) → proceed normally
@@ -274,21 +292,12 @@ class ReadClassifier:
         if not cb:
             if self.whitelist is not None:
                 # Whitelist provided but CB absent — truly unassigned
-                return ReadResult(
-                    query_name=read.query_name or "",
-                    cell_barcode="",
-                    umi=umi,
-                    category=ReadCategory.UNASSIGNED,
-                    base_counts={ReadCategory.UNASSIGNED: read.query_alignment_length or 0},
-                    is_multimapper=False,
-                    is_tso_invasion=False,
-                    is_polya_priming=False,
-                    has_noncanonical_junction=False,
-                    is_tso_concatemer=False,
-                    contig=read.reference_name or "",
-                    pos=read.reference_start or 0,
-                    is_reverse=read.is_reverse,
-                    read_length=read.query_alignment_length or 0,
+                return self._decorate_independent_flags(
+                    read,
+                    self._make_result(
+                        read, "", umi, ReadCategory.UNASSIGNED,
+                        {ReadCategory.UNASSIGNED: aligned_reference_bases}, False,
+                    ),
                 )
             else:
                 # No whitelist and no CB — barcode-agnostic mode
@@ -296,65 +305,65 @@ class ReadClassifier:
                 cb = "NO_BARCODE"
         elif self.whitelist is not None and cb not in self.whitelist:
             # CB present but not valid
-            return ReadResult(
-                query_name=read.query_name or "",
-                cell_barcode=cb,
-                umi=umi,
-                category=ReadCategory.UNASSIGNED,
-                base_counts={ReadCategory.UNASSIGNED: read.query_alignment_length or 0},
-                is_multimapper=False,
-                is_tso_invasion=False,
-                is_polya_priming=False,
-                has_noncanonical_junction=False,
-                is_tso_concatemer=False,
-                contig=read.reference_name or "",
-                pos=read.reference_start or 0,
-                is_reverse=read.is_reverse,
-                read_length=read.query_alignment_length or 0,
+            return self._decorate_independent_flags(
+                read,
+                self._make_result(
+                    read, cb, umi, ReadCategory.UNASSIGNED,
+                    {ReadCategory.UNASSIGNED: aligned_reference_bases}, False,
+                ),
             )
-
-        # TSO concatemer is independent of read category (checked on every
-        # classified read, matching the paper's raw-read definition).
-        is_concat = self._check_tso_concatemer(read)
 
         # --- Multimapper (NH > 1) — highest priority per README hierarchy ---
         if self._is_multimapper(read):
-            return self._make_result(
+            return self._decorate_independent_flags(read, self._make_result(
                 read, cb, umi,
                 ReadCategory.MULTIMAPPER,
-                {ReadCategory.MULTIMAPPER: read.query_alignment_length or 0},
+                {ReadCategory.MULTIMAPPER: aligned_reference_bases},
                 True,
-                is_tso_concatemer=is_concat,
-            )
+            ))
 
         # --- Mitochondrial ---
         contig = read.reference_name or ""
         if contig in MITO_CONTIG_NAMES:
             category = ReadCategory.MITOCHONDRIAL
-            base_counts = {ReadCategory.MITOCHONDRIAL: read.query_alignment_length or 0}
-            return self._make_result(read, cb, umi, category, base_counts, False,
-                                     is_tso_concatemer=is_concat)
+            base_counts = {ReadCategory.MITOCHONDRIAL: aligned_reference_bases}
+            return self._decorate_independent_flags(read, self._make_result(
+                read, cb, umi, category, base_counts, False,
+            ))
 
         # --- Chimeric ---
         is_chimeric, _ = self._check_chimeric(read)
         if is_chimeric:
             category = ReadCategory.CHIMERIC
-            base_counts = {ReadCategory.CHIMERIC: read.query_alignment_length or 0}
-            return self._make_result(read, cb, umi, category, base_counts, False,
-                                     is_tso_concatemer=is_concat)
-
-        # --- Artifact flags (TSO, polyA) ---
-        is_tso   = self._check_tso_invasion(read)
-        is_polya = self._check_polya_priming(read)
+            base_counts = {ReadCategory.CHIMERIC: aligned_reference_bases}
+            return self._decorate_independent_flags(read, self._make_result(
+                read, cb, umi, category, base_counts, False,
+            ))
 
         # --- Genomic classification ---
         category, base_counts, has_noncano = self._classify_by_intervals(read)
 
-        result = self._make_result(read, cb, umi, category, base_counts, False,
-                                   is_tso_concatemer=is_concat)
-        result.is_tso_invasion           = is_tso
-        result.is_polya_priming          = is_polya
-        result.has_noncanonical_junction = has_noncano
+        result = self._make_result(read, cb, umi, category, base_counts, False)
+        return self._decorate_independent_flags(
+            read, result, has_noncanonical=has_noncano
+        )
+
+    def _decorate_independent_flags(
+        self,
+        read: pysam.AlignedSegment,
+        result: ReadResult,
+        *,
+        has_noncanonical: Optional[bool] = None,
+    ) -> ReadResult:
+        """Attach evidence flags independently of the primary category."""
+        result.is_tso_concatemer = self._check_tso_concatemer(read)
+        result.is_tso_invasion = self._check_tso_invasion(read)
+        result.is_polya_priming = self._check_polya_priming(read)
+        result.is_discordant_pair = self._is_discordant_pair(read)
+        result.has_noncanonical_junction = (
+            self._has_noncanonical_junction(read)
+            if has_noncanonical is None else has_noncanonical
+        )
         return result
 
     # ------------------------------------------------------------------
@@ -372,9 +381,19 @@ class ReadClassifier:
 
     @staticmethod
     def _is_multimapper(read: pysam.AlignedSegment) -> bool:
-        """Primary criterion: NH > 1 (aligner-agnostic)."""
+        """Detect explicit evidence that a primary alignment is non-unique.
+
+        ``NH`` is preferred when present.  It is optional in SAM and absent
+        from standard minimap2 output, so MAPQ=0 and a non-empty XA tag are
+        conservative fallbacks.  We deliberately do not infer multi-mapping
+        from a low but non-zero MAPQ because scales are aligner-specific.
+        """
         if read.has_tag(BamTag.NH):
             return int(read.get_tag(BamTag.NH)) > 1
+        if int(read.mapping_quality or 0) == 0:
+            return True
+        if read.has_tag("XA"):
+            return bool(str(read.get_tag("XA")).strip())
         return False
 
     # ------------------------------------------------------------------
@@ -392,15 +411,21 @@ class ReadClassifier:
         1. SA-tag path (long-read and any BAM with split alignments):
            SA tag present AND any of:
              a) SA contig ≠ primary contig  (inter-chromosomal)
-             b) SA strand ≠ primary strand  (strand-discordant)
-             c) Same contig + same strand, but distance > chimeric_distance
+             b) SA strand ≠ primary strand  (foldback / strand-discordant)
+             c) Query order is incompatible with genomic order.
+
+           A same-contig, same-strand distance is *not* sufficient evidence:
+           genomic distance includes introns and can be very large for a
+           perfectly legitimate RNA molecule.
 
         2. Paired-end path (active only when self.paired_end_chimeric is True):
            Evaluates FLAG bits + RNEXT/PNEXT when no SA tag is present.
            A pair is chimeric if:
-             a) One mate is unmapped while the other is mapped (discordant)
-             b) Mates map to different chromosomes (inter-chromosomal)
-             c) Same chromosome but |TLEN| > ILLUMINA_CHIMERIC_INSERT_SIZE
+             a) Mates map to different chromosomes (inter-chromosomal)
+             b) Same chromosome but |TLEN| > ILLUMINA_CHIMERIC_INSERT_SIZE
+
+           Orphan and improper pairs are reported through the independent
+           discordant-pair flag; they are not by themselves chimeras.
         """
         if read.has_tag(BamTag.SA):
             sa_str = read.get_tag(BamTag.SA)
@@ -428,13 +453,26 @@ class ReadClassifier:
                 if sa_strand != primary_strand:
                     return True, f"strand-discordant SA on {sa_contig}"
 
-                # Same contig, same strand, but too far
-                distance = abs(sa_pos - primary_pos)
-                if distance > self.chimeric_distance:
-                    return True, (
-                        f"same-strand SA on {sa_contig} at distance {distance} bp "
-                        f"> threshold {self.chimeric_distance} bp"
+                # Same-contig / same-strand: use query-vs-genomic order, not
+                # genomic distance. SA POS is 1-based; convert to 0-based.
+                sa_start = max(sa_pos - 1, 0)
+                sa_cigar = parts[3] if len(parts) > 3 else ""
+                primary_cigar = read.cigarstring
+                if not isinstance(primary_cigar, str):
+                    primary_cigar = ""
+                primary_q = _query_interval_from_cigar(primary_cigar)
+                sa_q = _query_interval_from_cigar(sa_cigar)
+                if primary_q and sa_q and primary_q[0] != sa_q[0]:
+                    primary_first = primary_q[0] < sa_q[0]
+                    genome_forward = primary_pos <= sa_start
+                    expected_forward = primary_strand == "+"
+                    order_ok = (
+                        genome_forward == expected_forward
+                        if primary_first
+                        else genome_forward != expected_forward
                     )
+                    if not order_ok:
+                        return True, "same-contig SA with incompatible query/genomic order"
             return False, None
 
         # No SA tag — fall back to paired-end logic when enabled
@@ -462,9 +500,9 @@ class ReadClassifier:
         if not (read.flag & SamFlag.PAIRED):
             return False, None
 
-        # (a) Discordant: mate unmapped while this read is mapped
+        # An orphan mate is discordant but is not evidence of a chimera.
         if read.flag & SamFlag.MATE_UNMAPPED:
-            return True, "discordant pair: mate is unmapped"
+            return False, None
 
         # Need RNEXT to be available
         next_ref = read.next_reference_name
@@ -490,6 +528,15 @@ class ReadClassifier:
 
         return False, None
 
+    @staticmethod
+    def _is_discordant_pair(read: pysam.AlignedSegment) -> bool:
+        """Return whether a mapped paired record lacks ordinary pair support."""
+        if not (read.flag & SamFlag.PAIRED):
+            return False
+        if read.flag & SamFlag.MATE_UNMAPPED:
+            return True
+        return not bool(read.flag & SamFlag.PROPER_PAIR)
+
     # ------------------------------------------------------------------
     # TSO invasion detection
     # ------------------------------------------------------------------
@@ -511,22 +558,17 @@ class ReadClassifier:
         if not cigar:
             return False
 
-        # 5′ soft clip: cigar op 4 (S) at the start, accounting for strand
-        # For a reverse-strand read, pysam reverses the sequence but NOT the
-        # cigar — the first cigar tuple still corresponds to the 5′ end of
-        # the read as aligned (which is the 3′ end of the molecule).
-        # We check both ends for safety.
+        # The TSO is at the left soft clip for a forward alignment and the
+        # right soft clip for a reverse alignment.  Checking both ends inflated
+        # false positives from poly(A), adapters and random terminal sequence.
         clip_seqs = []
-
-        if cigar[0][0] == 4:   # 5′ clip
+        seq = read.query_sequence
+        if not read.is_reverse and cigar[0][0] == 4:
             clip_len = cigar[0][1]
-            seq = read.query_sequence
             if seq and clip_len > 0:
                 clip_seqs.append(seq[:clip_len])
-
-        if len(cigar) > 1 and cigar[-1][0] == 4:  # 3′ clip
+        elif read.is_reverse and cigar[-1][0] == 4:
             clip_len = cigar[-1][1]
-            seq = read.query_sequence
             if seq and clip_len > 0:
                 clip_seqs.append(seq[-clip_len:])
 
@@ -539,7 +581,8 @@ class ReadClassifier:
 
             # TSO sequence check (forward + reverse-complement prefixes)
             for tso_check in self._tso_match_prefixes:
-                if tso_check in clip_upper:
+                max_mismatches = 1 if len(tso_check) >= 12 else 0
+                if _contains_approx(clip_upper, tso_check, max_mismatches):
                     return True
 
         return False
@@ -549,21 +592,32 @@ class ReadClassifier:
         Check whether the read contains more than one occurrence of a TSO
         sequence or its reverse complement (a template-switch concatemer).
 
-        Matches the full TSO sequence(s), counting non-overlapping hits across
-        the whole read (soft-clipped and aligned bases).  Mirrors the metric in
-        Chou et al. (bioRxiv 2025.10.06.680646): reads with > 1 TSO-or-revcomp
-        occurrence divided by total reads.
+        Matches full TSO sequence(s) with a modest substitution tolerance,
+        counting non-overlapping hits across the whole read.  Exact matching
+        alone has poor sensitivity on error-prone long reads.
         """
         if self._tso_concat_pattern is None:
             return False
         seq = read.query_sequence
         if not seq:
             return False
-        n = 0
-        for _ in self._tso_concat_pattern.finditer(seq.upper()):
-            n += 1
-            if n > 1:
-                return True
+        motifs = sorted(
+            {s.upper() for s in self.tso_sequences}
+            | {_revcomp(s) for s in self.tso_sequences},
+            key=len,
+            reverse=True,
+        )
+        hits: list[tuple[int, int]] = []
+        upper = seq.upper()
+        for motif in motifs:
+            max_mm = max(1, int(round(len(motif) * 0.10)))
+            for start in _approx_match_starts(upper, motif, max_mm):
+                end = start + len(motif)
+                if any(not (end <= a or start >= b) for a, b in hits):
+                    continue
+                hits.append((start, end))
+                if len(hits) > 1:
+                    return True
         return False
 
     # ------------------------------------------------------------------
@@ -646,80 +700,16 @@ class ReadClassifier:
         intervals = self._get_contig_intervals(contig, strand)
 
         base_counts: dict[ReadCategory, int] = {}
-        has_noncanonical = False
+        has_noncanonical = self._has_noncanonical_junction(read)
 
         for block_start, block_end in blocks:
-            block_len = block_end - block_start
-
-            # --- Base-level tally across all categories ---
-            # For each block, compute how many bases fall into each category.
-            # Shared/ambiguous bases are counted precisely; the remainder is
-            # classified by the standard hierarchy.  This prevents long reads
-            # that partially span a shared region from being entirely flagged
-            # as ambiguous.
-
-            # Coding-vs-coding shared: genuinely ambiguous
-            n_shared_cc = _bases_in(intervals["shared_cod_cod"], block_start, block_end)
-            if n_shared_cc > 0:
-                _add_bases(base_counts, ReadCategory.AMBIGUOUS_COD_COD, n_shared_cc)
-
-            # Coding-vs-noncoding shared: sub-classifiable ambiguous
-            n_shared_cn = _bases_in(intervals["shared_cod_ncod"], block_start, block_end)
-            if n_shared_cn > 0:
-                _add_bases(base_counts, ReadCategory.AMBIGUOUS_COD_NCOD, n_shared_cn)
-
-            n_shared = n_shared_cc + n_shared_cn
-
-            # Remaining bases after removing shared portion
-            remaining = block_len - n_shared
-            if remaining <= 0:
-                continue
-
-            # For the non-shared portion, apply the standard hierarchy
-            n_exon_sense = _bases_in(intervals["exon_sense"], block_start, block_end)
-            # Subtract shared bases already counted (avoid double-counting)
-            n_exon_sense = max(0, n_exon_sense - n_shared)
-            if n_exon_sense > 0:
-                _add_bases(base_counts, ReadCategory.EXONIC_SENSE, n_exon_sense)
-                remaining -= n_exon_sense
-
-            if remaining <= 0:
-                continue
-
-            n_exon_anti = _bases_in(intervals["exon_anti"], block_start, block_end)
-            n_exon_anti = max(0, n_exon_anti - n_shared)
-            if n_exon_anti > 0:
-                _add_bases(base_counts, ReadCategory.EXONIC_ANTISENSE, n_exon_anti)
-                remaining -= n_exon_anti
-
-            if remaining <= 0:
-                continue
-
-            n_intron_sense = _bases_in(intervals["intron_sense"], block_start, block_end)
-            n_intron_anti  = _bases_in(intervals["intron_anti"],  block_start, block_end)
-            n_intronic = max(0, (n_intron_sense + n_intron_anti) - n_shared)
-            n_intronic = min(n_intronic, remaining)
-            if n_intronic > 0:
-                _add_bases(base_counts, ReadCategory.INTRONIC_PURE, n_intronic)
-                remaining -= n_intronic
-
-            if remaining > 0:
-                _add_bases(base_counts, ReadCategory.INTERGENIC_SPARSE, remaining)
+            block_counts = _partition_block(intervals, block_start, block_end)
+            for cat, n_bases in block_counts.items():
+                _add_bases(base_counts, cat, n_bases)
 
         # --- Junction-spanning intronic sub-classification ---
-        cigar_jxn_positions = _get_jxn_positions(read)
-        if cigar_jxn_positions:
-            known_sites = self.index.splice_sites.get(contig, set())
-            for jxn_pos in cigar_jxn_positions:
-                if (jxn_pos, strand) not in known_sites:
-                    # Novel junction: check canonicality if reference available
-                    if self.reference is not None:
-                        canon = _check_junction_canonicality(
-                            self.reference, contig, jxn_pos, strand
-                        )
-                        if not canon:
-                            has_noncanonical = True
-
+        cigar_junctions = _get_junctions(read)
+        if cigar_junctions:
             # If intronic bases exist and read has junctions → reclassify
             # intronic bases as INTRONIC_JXNSPAN
             if ReadCategory.INTRONIC_PURE in base_counts:
@@ -732,18 +722,57 @@ class ReadClassifier:
         if (
             ReadCategory.EXONIC_SENSE in base_counts
             and ReadCategory.INTRONIC_PURE in base_counts
-            and not cigar_jxn_positions
+            and not cigar_junctions
         ):
             n_intronic = base_counts.pop(ReadCategory.INTRONIC_PURE)
             _add_bases(base_counts, ReadCategory.INTRONIC_BOUNDARY, n_intronic)
 
         if not base_counts:
-            base_counts[ReadCategory.AMBIGUOUS] = read.query_alignment_length or 0
+            base_counts[ReadCategory.AMBIGUOUS] = _aligned_reference_bases(read)
+
+        expected_bases = _aligned_reference_bases(read)
+        observed_bases = sum(base_counts.values())
+        if observed_bases != expected_bases:
+            # This should be unreachable because _partition_block is exhaustive.
+            # Keep the invariant exact even for malformed CIGAR/block output.
+            delta = expected_bases - observed_bases
+            if delta > 0:
+                _add_bases(base_counts, ReadCategory.AMBIGUOUS, delta)
+            elif delta < 0:
+                raise AssertionError(
+                    f"base classification exceeded aligned bases for {read.query_name}: "
+                    f"{observed_bases} > {expected_bases}"
+                )
 
         # --- Plurality vote for read-level category ---
-        category = max(base_counts, key=lambda c: base_counts[c])
+        category = _plurality_category(base_counts)
 
         return category, base_counts, has_noncanonical
+
+    def _has_noncanonical_junction(self, read: pysam.AlignedSegment) -> bool:
+        """Evaluate exact annotation and both splice motifs for every junction."""
+        junctions = _get_junctions(read)
+        if not junctions or self.reference is None:
+            return False
+        contig = read.reference_name or ""
+        strand = "-" if read.is_reverse else "+"
+        known_junctions = getattr(self.index, "splice_junctions", {}).get(
+            contig, set()
+        )
+        known_sites = self.index.splice_sites.get(contig, set())
+        for jxn_start, jxn_end in junctions:
+            exact_known = (jxn_start, jxn_end, strand) in known_junctions
+            # Compatibility fallback for old cached/mocked indexes.
+            if not known_junctions:
+                exact_known = (
+                    (jxn_start, strand) in known_sites
+                    and (jxn_end, strand) in known_sites
+                )
+            if not exact_known and not _check_junction_canonicality(
+                self.reference, contig, jxn_start, jxn_end, strand
+            ):
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Contig interval cache
@@ -762,16 +791,18 @@ class ReadClassifier:
         if cache_key in self._contig_cache:
             return self._contig_cache[cache_key]
 
-        anti = "-" if strand == "+" else "+"
-
         result = {
             "exon_sense":        _extract_intervals(self.index.exons_plus  if strand == "+" else self.index.exons_minus,  contig),
             "exon_anti":         _extract_intervals(self.index.exons_minus  if strand == "+" else self.index.exons_plus,   contig),
             "intron_sense":      _extract_intervals(self.index.introns_plus if strand == "+" else self.index.introns_minus, contig),
             "intron_anti":       _extract_intervals(self.index.introns_minus if strand == "+" else self.index.introns_plus, contig),
             # strand-aware shared: only same-strand overlaps are truly ambiguous
-            "shared_cod_cod":    _extract_intervals(self.index.gene_shared_cod_cod,  contig),
-            "shared_cod_ncod":   _extract_intervals(self.index.gene_shared_cod_ncod, contig),
+            "shared_cod_cod":    _extract_intervals(
+                self.index.gene_shared_cod_cod, contig, strand=strand
+            ),
+            "shared_cod_ncod":   _extract_intervals(
+                self.index.gene_shared_cod_ncod, contig, strand=strand
+            ),
         }
         self._contig_cache[cache_key] = result
         return result
@@ -801,10 +832,17 @@ class ReadClassifier:
             is_polya_priming=False,
             has_noncanonical_junction=False,
             is_tso_concatemer=is_tso_concatemer,
+            has_junction=bool(_get_junctions(read)),
+            is_discordant_pair=False,
             contig=read.reference_name or "",
             pos=read.reference_start or 0,
             is_reverse=read.is_reverse,
             read_length=read.query_alignment_length or 0,
+            aligned_reference_bases=_aligned_reference_bases(read),
+            mapq=int(read.mapping_quality or 0),
+            edit_distance=_edit_distance(read),
+            softclip_bases=_softclip_bases(read),
+            query_bases=int(read.query_length or read.infer_read_length() or 0),
         )
 
 
@@ -812,7 +850,7 @@ class ReadClassifier:
 # Interval utility functions (pure functions, no state)
 # ---------------------------------------------------------------------------
 
-def _extract_intervals(pr_obj, contig: str) -> tuple:
+def _extract_intervals(pr_obj, contig: str, strand: Optional[str] = None) -> tuple:
     """
     Extract sorted (start, end) tuples for a contig from a PyRanges.
 
@@ -825,9 +863,13 @@ def _extract_intervals(pr_obj, contig: str) -> tuple:
         return ([], [])
     df = pr_obj.df
     sub = df[df["Chromosome"] == contig]
+    if strand is not None and "Strand" in sub.columns:
+        sub = sub[sub["Strand"] == strand]
     if sub.empty:
         return ([], [])
-    intervals = sorted(zip(sub["Start"].tolist(), sub["End"].tolist()))
+    intervals = _merge_interval_list(
+        sorted(zip(sub["Start"].tolist(), sub["End"].tolist()))
+    )
     prefix_max_end: list[int] = []
     curr_max = 0
     for _, ivl_end in intervals:
@@ -835,6 +877,30 @@ def _extract_intervals(pr_obj, contig: str) -> tuple:
             curr_max = ivl_end
         prefix_max_end.append(curr_max)
     return (intervals, prefix_max_end)
+
+
+def _merge_interval_list(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Return the union of a sorted interval list.
+
+    GTF records are merged per gene upstream, so different genes can still
+    overlap.  Counting those records independently double-counted bases and
+    could make category totals exceed the aligned length.
+    """
+    if not intervals:
+        return []
+    merged: list[tuple[int, int]] = []
+    cur_start, cur_end = map(int, intervals[0])
+    for start, end in intervals[1:]:
+        start, end = int(start), int(end)
+        if end <= start:
+            continue
+        if start <= cur_end:
+            cur_end = max(cur_end, end)
+        else:
+            merged.append((cur_start, cur_end))
+            cur_start, cur_end = start, end
+    merged.append((cur_start, cur_end))
+    return merged
 
 
 def _overlaps_any(interval_data: tuple, start: int, end: int) -> bool:
@@ -888,46 +954,192 @@ def _add_bases(counts: dict, category: ReadCategory, n: int) -> None:
     counts[category] = counts.get(category, 0) + n
 
 
+_BASE_CATEGORY_PRIORITY = [
+    ("shared_cod_cod", ReadCategory.AMBIGUOUS_COD_COD),
+    ("shared_cod_ncod", ReadCategory.AMBIGUOUS_COD_NCOD),
+    ("exon_sense", ReadCategory.EXONIC_SENSE),
+    ("exon_anti", ReadCategory.EXONIC_ANTISENSE),
+    ("intron_sense", ReadCategory.INTRONIC_PURE),
+    ("intron_anti", ReadCategory.INTRONIC_PURE),
+]
+
+_READ_TIEBREAK_PRIORITY = [
+    ReadCategory.AMBIGUOUS_COD_COD,
+    ReadCategory.AMBIGUOUS_COD_NCOD,
+    ReadCategory.EXONIC_SENSE,
+    ReadCategory.EXONIC_ANTISENSE,
+    ReadCategory.INTRONIC_JXNSPAN,
+    ReadCategory.INTRONIC_BOUNDARY,
+    ReadCategory.INTRONIC_PURE,
+    ReadCategory.INTERGENIC_SPARSE,
+    ReadCategory.AMBIGUOUS,
+]
+
+
+def _overlapping_intervals(interval_data: tuple, start: int, end: int) -> list:
+    """Return clipped union intervals overlapping ``[start, end)``."""
+    intervals, prefix_max_end = interval_data
+    if not intervals:
+        return []
+    idx = bisect_left(intervals, (end,))
+    out = []
+    for i in range(idx - 1, -1, -1):
+        if prefix_max_end[i] <= start:
+            break
+        ivl_start, ivl_end = intervals[i]
+        lo, hi = max(start, ivl_start), min(end, ivl_end)
+        if hi > lo:
+            out.append((lo, hi))
+    return out
+
+
+def _partition_block(intervals: dict, start: int, end: int) -> dict:
+    """Partition one aligned reference block into disjoint categories.
+
+    The sweep operates on atomic segments induced by all annotation interval
+    boundaries.  At each segment exactly one category wins according to the
+    explicit hierarchy above, guaranteeing that output bases sum to the block
+    length even at complex multi-gene overlaps.
+    """
+    if end <= start:
+        return {}
+    events: dict[int, list[tuple[int, str]]] = {}
+    for key, _category in _BASE_CATEGORY_PRIORITY:
+        for lo, hi in _overlapping_intervals(intervals[key], start, end):
+            events.setdefault(lo, []).append((1, key))
+            events.setdefault(hi, []).append((-1, key))
+
+    points = sorted({start, end, *events.keys()})
+    active: dict[str, int] = {}
+    counts: dict[ReadCategory, int] = {}
+    for i, pos in enumerate(points[:-1]):
+        # Half-open intervals ending at pos are removed before starts at pos.
+        for delta, key in sorted(events.get(pos, []), key=lambda x: x[0]):
+            active[key] = active.get(key, 0) + delta
+            if active[key] <= 0:
+                active.pop(key, None)
+        next_pos = points[i + 1]
+        if next_pos <= pos:
+            continue
+        category = ReadCategory.INTERGENIC_SPARSE
+        for key, candidate in _BASE_CATEGORY_PRIORITY:
+            if active.get(key, 0) > 0:
+                category = candidate
+                break
+        _add_bases(counts, category, next_pos - pos)
+    return counts
+
+
+def _plurality_category(base_counts: dict[ReadCategory, int]) -> ReadCategory:
+    """Return the largest base category with deterministic tie-breaking."""
+    rank = {cat: i for i, cat in enumerate(_READ_TIEBREAK_PRIORITY)}
+    return max(
+        base_counts,
+        key=lambda cat: (base_counts[cat], -rank.get(cat, len(rank))),
+    )
+
+
+def _aligned_reference_bases(read: pysam.AlignedSegment) -> int:
+    """Number of reference bases covered by aligned blocks, consistently."""
+    try:
+        return sum(max(0, int(end) - int(start)) for start, end in read.get_blocks())
+    except Exception:
+        return int(read.query_alignment_length or 0)
+
+
+def _edit_distance(read: pysam.AlignedSegment) -> Optional[int]:
+    """Return NM when present; absence is distinct from zero edits."""
+    try:
+        return int(read.get_tag("NM")) if read.has_tag("NM") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _softclip_bases(read: pysam.AlignedSegment) -> int:
+    try:
+        return sum(length for op, length in (read.cigartuples or []) if op == 4)
+    except Exception:
+        return 0
+
+
+def _query_interval_from_cigar(cigar: str) -> Optional[tuple[int, int]]:
+    """Approximate aligned query interval from a SAM CIGAR string."""
+    if not cigar:
+        return None
+    tokens = re.findall(r"(\d+)([MIDNSHP=X])", cigar)
+    if not tokens:
+        return None
+    leading = int(tokens[0][0]) if tokens[0][1] in {"S", "H"} else 0
+    aligned = sum(int(n) for n, op in tokens if op in {"M", "I", "=", "X"})
+    return (leading, leading + aligned)
+
+
+def _approx_match_starts(sequence: str, motif: str, max_mismatches: int) -> list[int]:
+    """Return substitution-tolerant motif starts (no indel model)."""
+    if not motif or len(sequence) < len(motif):
+        return []
+    starts = []
+    width = len(motif)
+    for start in range(len(sequence) - width + 1):
+        mismatches = 0
+        for a, b in zip(sequence[start:start + width], motif):
+            if a != b:
+                mismatches += 1
+                if mismatches > max_mismatches:
+                    break
+        if mismatches <= max_mismatches:
+            starts.append(start)
+    return starts
+
+
+def _contains_approx(sequence: str, motif: str, max_mismatches: int) -> bool:
+    return bool(_approx_match_starts(sequence, motif, max_mismatches))
+
+
+def _get_junctions(read: pysam.AlignedSegment) -> list[tuple[int, int]]:
+    """Return exact ``(intron_start, intron_end)`` CIGAR-N intervals."""
+    junctions = []
+    if not read.cigartuples:
+        return junctions
+    pos = read.reference_start or 0
+    for op, length in read.cigartuples:
+        if op == 3:
+            junctions.append((pos, pos + length))
+        if op in (0, 2, 3, 7, 8):
+            pos += length
+    return junctions
+
+
 def _get_jxn_positions(read: pysam.AlignedSegment) -> list:
     """
     Return the list of intron start positions (0-based) inferred from
     CIGAR N operations (splice junctions).
     """
-    positions = []
-    if not read.cigartuples:
-        return positions
-    pos = read.reference_start or 0
-    for op, length in read.cigartuples:
-        if op == 3:   # N = skip (intron)
-            positions.append(pos)
-        if op in (0, 2, 3, 7, 8):   # ops that consume reference
-            pos += length
-    return positions
+    return [start for start, _end in _get_junctions(read)]
 
 
 def _check_junction_canonicality(
     reference: pysam.FastaFile,
     contig: str,
     jxn_start: int,
+    jxn_end: int,
     strand: str,
 ) -> bool:
     """
-    Fetch the donor dinucleotide at jxn_start and check for GT-AG / GC-AG /
-    AT-AC canonicality.
+    Fetch both donor and acceptor dinucleotides and check GT-AG / GC-AG /
+    AT-AC canonicality in transcript orientation.
 
     Returns True if canonical, False otherwise.
     """
     try:
-        donor    = reference.fetch(contig, jxn_start,     jxn_start + 2).upper()
-        # We can't easily get the acceptor without knowing intron length,
-        # so we check donor only here; acceptor check can be added later.
-        if strand == "-":
-            # Complement the dinucleotide for reverse-strand genes
-            complement = str.maketrans("ACGT", "TGCA")
-            donor = donor.translate(complement)[::-1]
-        for don, acc in CANONICAL_SPLICE_SITES:
-            if donor == don:
-                return True
-        return False
+        if jxn_end - jxn_start < 4:
+            return False
+        if strand == "+":
+            donor = reference.fetch(contig, jxn_start, jxn_start + 2).upper()
+            acceptor = reference.fetch(contig, jxn_end - 2, jxn_end).upper()
+        else:
+            donor = _revcomp(reference.fetch(contig, jxn_end - 2, jxn_end))
+            acceptor = _revcomp(reference.fetch(contig, jxn_start, jxn_start + 2))
+        return (donor, acceptor) in CANONICAL_SPLICE_SITES
     except (ValueError, KeyError):
         return True   # Can't check → don't penalise

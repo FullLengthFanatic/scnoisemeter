@@ -22,7 +22,7 @@ Memory model
 Per-cell counts are plain dicts-of-dicts, never storing individual reads.
 This keeps memory proportional to n_cells × n_categories, not n_reads.
 
-UMI sets are stored per cell per category to compute UMI complexity ratios.
+UMI sets are stored per cell per category to compute UMI sequence-diversity ratios.
 For large experiments (100k cells) this is ~100k × 17 categories × avg_set_size.
 At 10 UMIs/cell/category (generous), that's 17M small Python sets = ~1–2 GB.
 An optional --no-umi-dedup flag discards UMI sets to reduce memory.
@@ -45,6 +45,20 @@ from multiprocessing import Pool
 from pathlib import Path
 from typing import Optional
 
+import pysam
+
+from scnoisemeter.constants import (
+    DEFAULT_CHIMERIC_DISTANCE,
+    DEFAULT_THREADS,
+    LENGTH_BIN_BREAKS,
+    LOW_MAPQ_THRESHOLD,
+    ReadCategory,
+    TSO_MIN_MATCH_LENGTH,
+)
+from scnoisemeter.modules.annotation import AnnotationIndex
+from scnoisemeter.modules.classifier import ReadClassifier
+from scnoisemeter.utils.bam_inspector import BamMetadata
+
 
 # ---------------------------------------------------------------------------
 # Picklable defaultdict factory functions
@@ -58,7 +72,24 @@ def _dd_set():
     return defaultdict(set)
 
 def _dd_flags():
-    return {"tso": 0, "polya": 0, "noncanon": 0, "tso_concat": 0}
+    return {
+        "tso": 0,
+        "polya": 0,
+        "noncanon": 0,
+        "tso_concat": 0,
+        "discordant_pair": 0,
+        "low_mapq": 0,
+    }
+
+
+def _dd_alignment():
+    return {
+        "mapq_sum": 0,
+        "nm_sum": 0,
+        "nm_observed": 0,
+        "softclip_bases": 0,
+        "query_bases": 0,
+    }
 
 
 class _Reservoir(list):
@@ -88,20 +119,9 @@ def _make_insert_size_reservoir():
 def _make_position_reservoir():
     return _Reservoir(MAX_LENGTH_SAMPLE)
 
-import pysam
 
-from scnoisemeter.constants import (
-    BamTag,
-    DEFAULT_CHIMERIC_DISTANCE,
-    DEFAULT_THREADS,
-    LENGTH_BIN_BREAKS,
-    MITO_CONTIG_NAMES,
-    ReadCategory,
-    TSO_MIN_MATCH_LENGTH,
-)
-from scnoisemeter.modules.annotation import AnnotationIndex
-from scnoisemeter.modules.classifier import ReadClassifier
-from scnoisemeter.utils.bam_inspector import BamMetadata
+def _make_endpoint_reservoir():
+    return _Reservoir(MAX_LENGTH_SAMPLE)
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +141,12 @@ def _get_length_bin(read_length: int) -> int:
       5 → ≥5000 bp
     """
     return bisect.bisect_right(LENGTH_BIN_BREAKS, read_length)
+
+
+def _read_key(read: pysam.AlignedSegment) -> str:
+    """Stable key that distinguishes the two primary mates of a template."""
+    suffix = "/1" if read.is_read1 else "/2" if read.is_read2 else "/0"
+    return f"{read.query_name or ''}{suffix}"
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +173,7 @@ class ContigResult:
 
     # artifact_flags[cb] = {"tso": int, "polya": int, "noncanon": int, "tso_concat": int}
     artifact_flags: dict = field(default_factory=lambda: defaultdict(_dd_flags))
+    alignment_sums: dict = field(default_factory=lambda: defaultdict(_dd_alignment))
 
     # length_samples[category] = list of read lengths (reservoir sample)
     length_samples: dict = field(default_factory=lambda: defaultdict(_dd_list))
@@ -163,21 +190,32 @@ class ContigResult:
     insert_size_noise:  list = field(default_factory=_make_insert_size_reservoir)
 
     # intergenic_reads: lightweight side-table for intergenic profiler
-    # Each entry: (contig, start, end, strand, cb, has_junction, three_prime)
+    # Each entry additionally carries aligned bases, UMI, length and read key
+    # so every downstream aggregate can be reclassified consistently.
     intergenic_reads: list = field(default_factory=_make_intergenic_reservoir)
 
     # exonic_sense_three_prime: reservoir-sampled 3′ end positions of
-    # exonic-sense reads, used for polyA-site-anchored full-length fraction
+    # exonic-sense reads, used for the polyA-site-anchored fraction
     exonic_sense_three_prime: list = field(default_factory=_make_position_reservoir)
 
     # exonic_sense_five_prime: reservoir-sampled 5′ start positions of
-    # exonic-sense reads, used for TSS/CAGE-anchored full-length fraction
+    # exonic-sense reads, used for the TSS/CAGE-anchored fraction
     exonic_sense_five_prime: list = field(default_factory=_make_position_reservoir)
+    # Unified per-read endpoints: (contig, strand, five_prime, three_prime, read_key)
+    exonic_sense_endpoints: list = field(default_factory=_make_endpoint_reservoir)
+
+    # Optional read_key -> (category, cell barcode), populated for compare.
+    read_assignments: dict = field(default_factory=dict)
 
     # Total reads processed (for progress / logging)
     n_reads_processed: int = 0
     n_reads_skipped:   int = 0
     n_reads_skipped_not_called_cell: int = 0
+    n_primary_mapped: int = 0
+    n_secondary: int = 0
+    n_supplementary: int = 0
+    n_qcfail: int = 0
+    n_duplicate: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +237,7 @@ class SampleResult:
     base_counts:    dict = field(default_factory=lambda: defaultdict(_dd_int))
     umi_sets:       dict = field(default_factory=lambda: defaultdict(_dd_set))
     artifact_flags: dict = field(default_factory=lambda: defaultdict(_dd_flags))
+    alignment_sums: dict = field(default_factory=lambda: defaultdict(_dd_alignment))
     length_samples: dict = field(default_factory=lambda: defaultdict(_dd_list))
 
     # length_bin_counts[category][bin_idx] = exact read count per length bin
@@ -210,11 +249,21 @@ class SampleResult:
     intergenic_reads: list = field(default_factory=_make_intergenic_reservoir)
     exonic_sense_three_prime: list = field(default_factory=_make_position_reservoir)
     exonic_sense_five_prime:  list = field(default_factory=_make_position_reservoir)
+    exonic_sense_endpoints:    list = field(default_factory=_make_endpoint_reservoir)
+    read_assignments: dict = field(default_factory=dict)
+    umi_tracking_enabled: bool = True
 
     n_reads_total:     int = 0
     n_reads_processed: int = 0
     n_reads_skipped:   int = 0
     n_reads_skipped_not_called_cell: int = 0
+    n_reads_mapped_index: int = 0
+    n_reads_unmapped: int = 0
+    n_primary_mapped: int = 0
+    n_secondary: int = 0
+    n_supplementary: int = 0
+    n_qcfail: int = 0
+    n_duplicate: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +293,7 @@ def _contig_worker(args: dict) -> ContigResult:
     tso_sequences       = args.get("tso_sequences")
     tso_min_match       = args.get("tso_min_match", TSO_MIN_MATCH_LENGTH)
     tso_check_polyg     = args.get("tso_check_polyg", True)
+    store_read_assignments = args.get("store_read_assignments", False)
 
     if worker_seed is not None:
         random.seed(worker_seed)
@@ -277,6 +327,17 @@ def _contig_worker(args: dict) -> ContigResult:
             for read in bam.fetch(fetch_contig):
                 result.n_reads_processed += 1
 
+                if read.flag & 0x200:
+                    result.n_qcfail += 1
+                if read.flag & 0x400:
+                    result.n_duplicate += 1
+                if read.is_secondary:
+                    result.n_secondary += 1
+                elif read.is_supplementary:
+                    result.n_supplementary += 1
+                elif not read.is_unmapped:
+                    result.n_primary_mapped += 1
+
                 res = classifier.classify(read)
                 if res is None:
                     result.n_reads_skipped += 1
@@ -284,6 +345,7 @@ def _contig_worker(args: dict) -> ContigResult:
 
                 cb  = res.cell_barcode
                 cat = res.category
+                read_key = _read_key(read)
 
                 # --cell-barcodes filter: skip reads not from called cells.
                 # Normalise by stripping the trailing -1 suffix that Cell Ranger
@@ -299,6 +361,8 @@ def _contig_worker(args: dict) -> ContigResult:
 
                 # Read-level counts
                 result.read_counts[cb][cat] += 1
+                if store_read_assignments:
+                    result.read_assignments[read_key] = (cat, cb)
 
                 # Base-level counts
                 for bc_cat, n in res.base_counts.items():
@@ -317,6 +381,18 @@ def _contig_worker(args: dict) -> ContigResult:
                     result.artifact_flags[cb]["noncanon"] += 1
                 if res.is_tso_concatemer:
                     result.artifact_flags[cb]["tso_concat"] += 1
+                if res.is_discordant_pair:
+                    result.artifact_flags[cb]["discordant_pair"] += 1
+                if res.mapq < LOW_MAPQ_THRESHOLD:
+                    result.artifact_flags[cb]["low_mapq"] += 1
+
+                alignment = result.alignment_sums[cb]
+                alignment["mapq_sum"] += res.mapq
+                if res.edit_distance is not None:
+                    alignment["nm_sum"] += res.edit_distance
+                    alignment["nm_observed"] += 1
+                alignment["softclip_bases"] += res.softclip_bases
+                alignment["query_bases"] += res.query_bases
 
                 # Read-length reservoir sample
                 _reservoir_add(
@@ -344,15 +420,19 @@ def _contig_worker(args: dict) -> ContigResult:
                            ReadCategory.INTERGENIC_REPEAT):
                     ref_end = read.reference_end or (res.pos + res.read_length)
                     three_prime = res.pos if res.is_reverse else ref_end
-                    result.intergenic_reads.append((
+                    _reservoir_add(result.intergenic_reads, (
                         res.contig,
                         res.pos,
                         ref_end,
                         "-" if res.is_reverse else "+",
                         cb,
-                        res.has_noncanonical_junction,
+                        res.has_junction,
                         three_prime,
-                    ))
+                        res.aligned_reference_bases,
+                        res.umi,
+                        res.read_length,
+                        read_key,
+                    ), 500_000)
 
                 # Store strand-correct 3′ and 5′ ends of exonic-sense reads.
                 #
@@ -391,6 +471,17 @@ def _contig_worker(args: dict) -> ContigResult:
                         (res.contig, five_prime),
                         MAX_LENGTH_SAMPLE,
                     )
+                    _reservoir_add(
+                        result.exonic_sense_endpoints,
+                        (
+                            res.contig,
+                            "-" if res.is_reverse else "+",
+                            five_prime,
+                            three_prime,
+                            read_key,
+                        ),
+                        MAX_LENGTH_SAMPLE,
+                    )
 
         except ValueError as exc:
             logger.warning("Could not fetch contig '%s': %s — skipping.", contig, exc)
@@ -424,6 +515,7 @@ def run_pipeline(
     tso_sequences: Optional[list] = None,
     tso_min_match: int = TSO_MIN_MATCH_LENGTH,
     tso_check_polyg: bool = True,
+    store_read_assignments: bool = False,
 ) -> SampleResult:
     """
     Run the full classification pipeline on *bam_path*.
@@ -447,8 +539,8 @@ def run_pipeline(
     reference_path:
         Path to reference FASTA for polyA context and junction checks.
     contigs:
-        Explicit list of contigs to process.  Default: all contigs in BAM
-        header, excluding very small scaffolds (< 1 Mb).
+        Explicit list of contigs to process. Default: every reference with at
+        least one mapped record according to the BAM index.
     cell_barcodes:
         Set of called-cell barcode strings (after stripping the -1 suffix).
         If provided, reads whose CB tag (also -1-stripped) is not in this set
@@ -456,8 +548,29 @@ def run_pipeline(
     """
     bam_path = str(bam_path)
 
+    mapped_index = 0
+    unmapped_index = 0
+    mapped_by_contig: dict[str, int] = {}
+    try:
+        with pysam.AlignmentFile(bam_path, "rb") as bam:
+            mapped_by_contig = {
+                s.contig: int(s.mapped) for s in bam.get_index_statistics()
+            }
+            mapped_index = int(bam.mapped)
+            unmapped_index = int(bam.unmapped)
+    except Exception:
+        pass
     if contigs is None:
-        contigs = _select_contigs(meta)
+        # Process every reference that actually has mapped records.  The old
+        # 1-Mb length filter silently dropped spike-ins, viral contigs, decoys
+        # and short scaffolds from both totals and artifact composition.
+        try:
+            contigs = [c for c, n in mapped_by_contig.items() if n > 0]
+            contigs.sort(
+                key=lambda c: meta.reference_lengths.get(c, 0), reverse=True
+            )
+        except Exception:
+            contigs = list(meta.reference_names)
 
     logger.info("Processing %d contigs with %d threads …", len(contigs), threads)
 
@@ -490,19 +603,13 @@ def run_pipeline(
             "tso_sequences":       tso_sequences,
             "tso_min_match":       tso_min_match,
             "tso_check_polyg":     tso_check_polyg,
+            "store_read_assignments": store_read_assignments,
         }
         for contig in contigs
     ]
 
-    # Also add mitochondrial contig if present in BAM header
-    mito_contigs = [c for c in meta.reference_names if c in MITO_CONTIG_NAMES]
-    for mito in mito_contigs:
-        if mito not in contigs:
-            worker_args.append({
-                **worker_args[0],
-                "contig": mito,
-                "seed":   _worker_seed(mito),
-            })
+    if not worker_args:
+        logger.warning("No mapped contigs were found in the BAM index.")
 
     # Run workers
     contig_results = []
@@ -516,6 +623,10 @@ def run_pipeline(
 
     # Merge
     sample = SampleResult(bam_path=Path(bam_path), meta=meta)
+    sample.n_reads_mapped_index = mapped_index
+    sample.n_reads_unmapped = unmapped_index
+    sample.n_reads_total = mapped_index + unmapped_index
+    sample.umi_tracking_enabled = store_umis
     for cr in contig_results:
         _merge_contig(sample, cr)
 
@@ -548,6 +659,17 @@ def merge_sample_results(base: SampleResult, other: SampleResult) -> None:
     base.n_reads_processed  += other.n_reads_processed
     base.n_reads_skipped    += other.n_reads_skipped
     base.n_reads_skipped_not_called_cell += other.n_reads_skipped_not_called_cell
+    base.n_reads_mapped_index += other.n_reads_mapped_index
+    base.n_reads_unmapped += other.n_reads_unmapped
+    base.n_primary_mapped += other.n_primary_mapped
+    base.n_secondary += other.n_secondary
+    base.n_supplementary += other.n_supplementary
+    base.n_qcfail += other.n_qcfail
+    base.n_duplicate += other.n_duplicate
+    base.umi_tracking_enabled = (
+        getattr(base, "umi_tracking_enabled", True)
+        and getattr(other, "umi_tracking_enabled", True)
+    )
 
     for cb, cat_counts in other.read_counts.items():
         for cat, n in cat_counts.items():
@@ -565,33 +687,70 @@ def merge_sample_results(base: SampleResult, other: SampleResult) -> None:
         for flag_name, n in flags.items():
             base.artifact_flags[cb][flag_name] += n
 
+    for cb, values in other.alignment_sums.items():
+        for key, amount in values.items():
+            base.alignment_sums[cb][key] += amount
+
     for cat, lengths in other.length_samples.items():
-        existing = base.length_samples[cat]
-        for L in lengths:
-            _reservoir_add(existing, L, MAX_LENGTH_SAMPLE)
+        _merge_reservoir(base.length_samples[cat], lengths, MAX_LENGTH_SAMPLE)
 
     for cat, bin_counts in other.length_bin_counts.items():
         for bin_idx, n in bin_counts.items():
             base.length_bin_counts[cat][bin_idx] += n
 
-    for rec in other.intergenic_reads:
-        _reservoir_add(base.intergenic_reads, rec, 500_000)
+    _merge_reservoir(base.intergenic_reads, other.intergenic_reads, 500_000)
 
-    for ins in other.insert_size_signal:
-        _reservoir_add(base.insert_size_signal, ins, 500_000)
-    for ins in other.insert_size_noise:
-        _reservoir_add(base.insert_size_noise, ins, 500_000)
+    _merge_reservoir(base.insert_size_signal, other.insert_size_signal, 500_000)
+    _merge_reservoir(base.insert_size_noise, other.insert_size_noise, 500_000)
 
-    for pos in other.exonic_sense_three_prime:
-        _reservoir_add(base.exonic_sense_three_prime, pos, MAX_LENGTH_SAMPLE)
-    for pos in other.exonic_sense_five_prime:
-        _reservoir_add(base.exonic_sense_five_prime, pos, MAX_LENGTH_SAMPLE)
+    _merge_reservoir(base.exonic_sense_three_prime, other.exonic_sense_three_prime, MAX_LENGTH_SAMPLE)
+    _merge_reservoir(base.exonic_sense_five_prime, other.exonic_sense_five_prime, MAX_LENGTH_SAMPLE)
+    _merge_reservoir(base.exonic_sense_endpoints, other.exonic_sense_endpoints, MAX_LENGTH_SAMPLE)
+    base.read_assignments.update(other.read_assignments)
 
     # Propagate polyA / TSS site dicts if base doesn't have them yet
     if not getattr(base, "_polya_site_dict", None) and getattr(other, "_polya_site_dict", None):
         base._polya_site_dict = other._polya_site_dict
     if not getattr(base, "_tss_site_dict", None) and getattr(other, "_tss_site_dict", None):
         base._tss_site_dict = other._tss_site_dict
+
+
+def relabel_barcode(result: SampleResult, old: str, new: str) -> None:
+    """Relabel a synthetic barcode across every barcode-indexed structure.
+
+    Plate wells without CB tags are classified under ``NO_BARCODE`` inside
+    their individual BAM.  Before plate aggregation that sentinel must become
+    the well identity; otherwise every well collapses into one pseudo-cell.
+    """
+    if old == new:
+        return
+    for attr in (
+        "read_counts", "base_counts", "umi_sets", "artifact_flags",
+        "alignment_sums",
+    ):
+        mapping = getattr(result, attr)
+        if old not in mapping:
+            continue
+        value = mapping.pop(old)
+        if new in mapping:
+            if attr == "umi_sets":
+                for cat, members in value.items():
+                    mapping[new][cat].update(members)
+            else:
+                for key, amount in value.items():
+                    mapping[new][key] += amount
+        else:
+            mapping[new] = value
+
+    for idx, rec in enumerate(result.intergenic_reads):
+        if len(rec) >= 5 and rec[4] == old:
+            mutable = list(rec)
+            mutable[4] = new
+            result.intergenic_reads[idx] = tuple(mutable)
+
+    for read_key, (category, barcode) in list(result.read_assignments.items()):
+        if barcode == old:
+            result.read_assignments[read_key] = (category, new)
 
 
 # ---------------------------------------------------------------------------
@@ -602,6 +761,11 @@ def _merge_contig(sample: SampleResult, cr: ContigResult) -> None:
     sample.n_reads_processed += cr.n_reads_processed
     sample.n_reads_skipped   += cr.n_reads_skipped
     sample.n_reads_skipped_not_called_cell += cr.n_reads_skipped_not_called_cell
+    sample.n_primary_mapped += cr.n_primary_mapped
+    sample.n_secondary += cr.n_secondary
+    sample.n_supplementary += cr.n_supplementary
+    sample.n_qcfail += cr.n_qcfail
+    sample.n_duplicate += cr.n_duplicate
 
     for cb, cat_counts in cr.read_counts.items():
         for cat, n in cat_counts.items():
@@ -619,63 +783,31 @@ def _merge_contig(sample: SampleResult, cr: ContigResult) -> None:
         for flag_name, n in flags.items():
             sample.artifact_flags[cb][flag_name] += n
 
+    for cb, values in cr.alignment_sums.items():
+        for key, amount in values.items():
+            sample.alignment_sums[cb][key] += amount
+
     for cat, lengths in cr.length_samples.items():
-        existing = sample.length_samples[cat]
-        for L in lengths:
-            _reservoir_add(existing, L, MAX_LENGTH_SAMPLE)
+        _merge_reservoir(sample.length_samples[cat], lengths, MAX_LENGTH_SAMPLE)
 
     for cat, bin_counts in cr.length_bin_counts.items():
         for bin_idx, n in bin_counts.items():
             sample.length_bin_counts[cat][bin_idx] += n
 
     # Merge intergenic read records (reservoir-sampled to cap memory)
-    for rec in cr.intergenic_reads:
-        _reservoir_add(sample.intergenic_reads, rec, 500_000)
+    _merge_reservoir(sample.intergenic_reads, cr.intergenic_reads, 500_000)
 
     # Merge insert size samples
-    for ins in cr.insert_size_signal:
-        _reservoir_add(sample.insert_size_signal, ins, 500_000)
-    for ins in cr.insert_size_noise:
-        _reservoir_add(sample.insert_size_noise, ins, 500_000)
+    _merge_reservoir(sample.insert_size_signal, cr.insert_size_signal, 500_000)
+    _merge_reservoir(sample.insert_size_noise, cr.insert_size_noise, 500_000)
 
     # Merge exonic-sense 3′ positions
-    for pos in cr.exonic_sense_three_prime:
-        _reservoir_add(sample.exonic_sense_three_prime, pos, MAX_LENGTH_SAMPLE)
-    for pos in cr.exonic_sense_five_prime:
-        _reservoir_add(sample.exonic_sense_five_prime, pos, MAX_LENGTH_SAMPLE)
+    _merge_reservoir(sample.exonic_sense_three_prime, cr.exonic_sense_three_prime, MAX_LENGTH_SAMPLE)
+    _merge_reservoir(sample.exonic_sense_five_prime, cr.exonic_sense_five_prime, MAX_LENGTH_SAMPLE)
+    _merge_reservoir(sample.exonic_sense_endpoints, cr.exonic_sense_endpoints, MAX_LENGTH_SAMPLE)
+    sample.read_assignments.update(cr.read_assignments)
 
     return
-
-
-# ---------------------------------------------------------------------------
-# Contig selection
-# ---------------------------------------------------------------------------
-
-def _select_contigs(meta: BamMetadata, min_length: int = 1_000_000) -> list:
-    """
-    Return the list of contigs to process in parallel.
-
-    Excludes:
-      - Mitochondrial contigs (handled separately)
-      - Contigs shorter than min_length (unplaced scaffolds, alt loci)
-        to avoid spawning thousands of tiny workers for hg38 alt contigs.
-
-    The remaining contigs are sorted by length descending so the largest
-    jobs start first (better load balancing).
-    """
-    selected = [
-        name for name, length in meta.reference_lengths.items()
-        if name not in MITO_CONTIG_NAMES and length >= min_length
-    ]
-    selected.sort(key=lambda c: meta.reference_lengths[c], reverse=True)
-
-    if not selected:
-        logger.warning(
-            "No contigs ≥ %d bp found — falling back to all non-mito contigs.", min_length
-        )
-        selected = [c for c in meta.reference_names if c not in MITO_CONTIG_NAMES]
-
-    return selected
 
 
 # ---------------------------------------------------------------------------
@@ -703,3 +835,42 @@ def _reservoir_add(reservoir: list, value, max_size: int) -> None:
         idx = random.randrange(n)
         if idx < max_size:
             reservoir[idx] = value
+
+
+def _merge_reservoir(base: list, other: list, max_size: int) -> None:
+    """Merge two independent uniform reservoirs without contig-size bias.
+
+    Simply offering the sampled items from each contig to Algorithm R treats a
+    10-read contig and a 10-million-read contig as equal once both reservoirs
+    are capped.  We instead draw how many retained items should come from each
+    source using the corresponding population sizes, then sample uniformly
+    within each source reservoir.
+    """
+    if not other:
+        return
+    n_a = getattr(base, "n_seen", len(base)) or len(base)
+    n_b = getattr(other, "n_seen", len(other)) or len(other)
+    total = n_a + n_b
+    keep = min(max_size, total)
+
+    remaining_a, remaining_b = n_a, n_b
+    keep_a = 0
+    # Hypergeometric draw implemented with the seeded stdlib RNG so --seed
+    # controls workers and merges consistently.
+    for _ in range(keep):
+        remaining_total = remaining_a + remaining_b
+        if remaining_total <= 0:
+            break
+        if random.random() < (remaining_a / remaining_total):
+            keep_a += 1
+            remaining_a -= 1
+        else:
+            remaining_b -= 1
+    keep_b = keep - keep_a
+
+    chosen_a = random.sample(list(base), keep_a) if keep_a else []
+    chosen_b = random.sample(list(other), keep_b) if keep_b else []
+    base[:] = chosen_a + chosen_b
+    random.shuffle(base)
+    if isinstance(base, _Reservoir):
+        base.n_seen = total

@@ -30,7 +30,7 @@ All positions are 0-based reference_start.
 read_exonic_sense      chr1:1100  +   CB=cell1  NH=1  → EXONIC_SENSE
 read_exonic_antisense  chr1:1300  −   CB=cell1  NH=1  → EXONIC_ANTISENSE
 read_multimapper       chr1:1500  +   CB=cell1  NH=3  → MULTIMAPPER
-read_chimeric          chr1:1700  +   CB=cell1  NH=1  SA chr1:50000 → CHIMERIC
+read_chimeric          chr1:1700  +   CB=cell1  NH=1  SA chr2:50000 → CHIMERIC
 read_intronic_boundary chr1:1980  +   CB=cell2  NH=1  → INTRONIC_BOUNDARY
   (20 exonic bases in exon1, 80 intronic in intron1; no N in CIGAR)
 read_intronic_pure     chr1:2100  +   CB=cell2  NH=1  → INTRONIC_PURE
@@ -106,7 +106,7 @@ def tiny_bam(tmp_path_factory) -> Path:
             {"SN": "chr1", "LN": 248_956_422},
             {"SN": "chrM", "LN": 16_569},
         ],
-        # minimap2 @PG triggers ONT platform detection in inspect_bam
+        # An aligner name alone is not sufficient evidence of the platform.
         "PG": [{"ID": "minimap2", "PN": "minimap2", "VN": "2.26"}],
     })
 
@@ -124,7 +124,7 @@ def tiny_bam(tmp_path_factory) -> Path:
         _make_seg(header, "read_exonic_antisense",  REV, 0, 1300,  BARCODE_CELL1, "CCCCCCCCCCCC", 1),
         _make_seg(header, "read_multimapper",       FWD, 0, 1500,  BARCODE_CELL1, "GGGGGGGGGGGG", 3),
         _make_seg(header, "read_chimeric",          FWD, 0, 1700,  BARCODE_CELL1, "TTTTTTTTTTTT", 1,
-                  sa="chr1,50000,+,100M,60,0;"),
+                  sa="chr2,50000,+,100M,60,0;"),
         _make_seg(header, "read_intronic_boundary", FWD, 0, 1980,  BARCODE_CELL2, "ACACACACACAC", 1),
         _make_seg(header, "read_intronic_pure",     FWD, 0, 2100,  BARCODE_CELL2, "TGTGTGTGTGTG", 1),
         _make_seg(header, "read_exonic_sense_neg",  REV, 0, 15100, BARCODE_CELL2, "GCGCGCGCGCGC", 1),

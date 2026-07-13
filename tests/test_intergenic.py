@@ -23,6 +23,7 @@ from scnoisemeter.modules.intergenic_profiler import (
     _modal_three_prime,
     _near_polya_site,
     _overlaps_repeats,
+    _repeat_overlap_fraction,
     _score_locus,
     profile_intergenic_loci,
 )
@@ -69,13 +70,13 @@ class TestClustering:
         ids = _cluster_reads(recs)
         assert ids[0] != ids[1]
 
-    def test_different_strands_different_loci(self):
+    def test_different_strands_same_fixed_window_locus(self):
         recs = [
             self._rec("chr1", 1000, 1200, strand="+"),
             self._rec("chr1", 1050, 1250, strand="-"),
         ]
         ids = _cluster_reads(recs)
-        assert ids[0] != ids[1]
+        assert ids[0] == ids[1]
 
     def test_three_loci(self):
         # After merging recs[0,1], current_end = 300 (end of second read).
@@ -197,6 +198,15 @@ class TestRepeatOverlap:
     def test_touching_start(self):
         # [0, 100) touches [100, 200) at exactly 100 — no overlap
         assert not _overlaps_repeats(self.REPEATS, "chr1", 0, 100)
+
+    def test_fraction_uses_repeat_union_without_double_counting(self):
+        record = IntergenicReadRecord(
+            "chr1", 100, 200, "+", "CB", False, 200
+        )
+        fraction = _repeat_overlap_fraction(
+            {"chr1": [(100, 180), (150, 200)]}, "chr1", [record]
+        )
+        assert fraction == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -468,11 +478,13 @@ class TestNewConstants:
         from scnoisemeter.constants import CATEGORY_ORDER, ReadCategory
         assert ReadCategory.AMBIGUOUS_COD_COD  in CATEGORY_ORDER
         assert ReadCategory.AMBIGUOUS_COD_NCOD in CATEGORY_ORDER
+        assert ReadCategory.INTERGENIC_ENRICHED in CATEGORY_ORDER
 
     def test_new_categories_in_ambiguous_set(self):
         from scnoisemeter.constants import AMBIGUOUS_CATEGORIES, ReadCategory
         assert ReadCategory.AMBIGUOUS_COD_COD  in AMBIGUOUS_CATEGORIES
         assert ReadCategory.AMBIGUOUS_COD_NCOD in AMBIGUOUS_CATEGORIES
+        assert ReadCategory.INTERGENIC_ENRICHED in AMBIGUOUS_CATEGORIES
 
     def test_new_categories_not_in_noise(self):
         from scnoisemeter.constants import NOISE_CATEGORIES, ReadCategory
@@ -486,6 +498,8 @@ class TestNewConstants:
         assert ReadCategory.AMBIGUOUS_COD_NCOD in CATEGORY_COLOURS
         assert ReadCategory.AMBIGUOUS_COD_COD  in CATEGORY_LABELS
         assert ReadCategory.AMBIGUOUS_COD_NCOD in CATEGORY_LABELS
+        assert ReadCategory.INTERGENIC_ENRICHED in CATEGORY_COLOURS
+        assert ReadCategory.INTERGENIC_ENRICHED in CATEGORY_LABELS
 
 
 # ---------------------------------------------------------------------------
@@ -662,17 +676,18 @@ class TestPolyaSiteLoading:
         f = tmp_path / "polya.bed"
         f.write_text("chr1\t1000\t1010\tsite1\t0\t+\nchr1\t2000\t2010\tsite2\t0\t-\nchr2\t500\t510\tsite3\t0\t+\n")
         sites = _load_polya_sites(str(f))
-        assert "chr1" in sites
-        assert "chr2" in sites
-        assert len(sites["chr1"]) == 2
-        assert sites["chr1"] == sorted(sites["chr1"])  # must be sorted
+        assert ("chr1", "+") in sites
+        assert ("chr1", "-") in sites
+        assert ("chr2", "+") in sites
+        assert sites[("chr1", "+")] == [1005]
+        assert sites[("chr1", "-")] == [2005]
 
     def test_comments_skipped(self, tmp_path):
         from scnoisemeter.cli import _load_polya_sites
         f = tmp_path / "polya.bed"
         f.write_text("# header comment\nchr1\t1000\t1010\tsite\t0\t+\n")
         sites = _load_polya_sites(str(f))
-        assert len(sites["chr1"]) == 1
+        assert len(sites[("chr1", "+")]) == 1
 
     def test_gzip_file_loads(self, tmp_path):
         import gzip
@@ -682,9 +697,9 @@ class TestPolyaSiteLoading:
             fh.write("chr1\t1000\t1010\tsite1\t0\t+\n")
             fh.write("chr2\t5000\t5010\tsite2\t0\t-\n")
         sites = _load_polya_sites(str(f))
-        assert "chr1" in sites
-        assert "chr2" in sites
-        assert len(sites["chr1"]) == 1
+        assert ("chr1", "+") in sites
+        assert ("chr2", "-") in sites
+        assert len(sites[("chr1", "+")]) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -699,7 +714,8 @@ class TestPolyASiteMultipleFiles:
         f = tmp_path / "polya.bed"
         f.write_text("chr1\t1000\t1010\tsite1\t0\t+\nchr1\t2000\t2010\tsite2\t0\t-\n")
         sites = _load_polya_sites([str(f)])
-        assert len(sites["chr1"]) == 2
+        assert len(sites[("chr1", "+")]) == 1
+        assert len(sites[("chr1", "-")]) == 1
 
     def test_two_files_merged(self, tmp_path):
         from scnoisemeter.cli import _load_polya_sites
@@ -708,8 +724,8 @@ class TestPolyASiteMultipleFiles:
         f2 = tmp_path / "db2.bed"
         f2.write_text("chr1\t5000\t5010\tsite2\t0\t+\nchr2\t100\t110\tsite3\t0\t-\n")
         sites = _load_polya_sites([str(f1), str(f2)])
-        assert len(sites["chr1"]) == 2
-        assert "chr2" in sites
+        assert len(sites[("chr1", "+")]) == 2
+        assert ("chr2", "-") in sites
 
     def test_duplicate_positions_deduplicated(self, tmp_path):
         from scnoisemeter.cli import _load_polya_sites
@@ -718,7 +734,7 @@ class TestPolyASiteMultipleFiles:
         f2 = tmp_path / "db2.bed"
         f2.write_text("chr1\t1000\t1010\tsite\t0\t+\n")  # same position
         sites = _load_polya_sites([str(f1), str(f2)])
-        assert len(sites["chr1"]) == 1   # deduplicated
+        assert len(sites[("chr1", "+")]) == 1   # deduplicated
 
     def test_string_input_accepted(self, tmp_path):
         """Single string path (not list) should also work."""
@@ -726,7 +742,7 @@ class TestPolyASiteMultipleFiles:
         f = tmp_path / "polya.bed"
         f.write_text("chr1\t1000\t1010\tsite\t0\t+\n")
         sites = _load_polya_sites(str(f))
-        assert "chr1" in sites
+        assert ("chr1", "+") in sites
 
 
 class TestTSSSiteLoader:
@@ -737,10 +753,10 @@ class TestTSSSiteLoader:
         f = tmp_path / "tss.bed"
         f.write_text("chr1\t5000\t5010\tpeak1\t0\t+\nchr2\t3000\t3010\tpeak2\t0\t-\n")
         sites = _load_tss_sites([str(f)])
-        assert "chr1" in sites
-        assert "chr2" in sites
+        assert ("chr1", "+") in sites
+        assert ("chr2", "-") in sites
         # midpoint of 5000-5010 = 5005
-        assert 5005 in sites["chr1"]
+        assert 5005 in sites[("chr1", "+")]
 
     def test_multiple_files_merged(self, tmp_path):
         from scnoisemeter.cli import _load_tss_sites
@@ -749,7 +765,7 @@ class TestTSSSiteLoader:
         f2 = tmp_path / "rampage.bed"
         f2.write_text("chr1\t9000\t9010\tpeak2\t0\t+\n")
         sites = _load_tss_sites([str(f1), str(f2)])
-        assert len(sites["chr1"]) == 2
+        assert len(sites[("chr1", "+")]) == 2
 
     def test_gzip_tss(self, tmp_path):
         import gzip
@@ -758,7 +774,7 @@ class TestTSSSiteLoader:
         with gzip.open(f, "wt") as fh:
             fh.write("chr1\t5000\t5010\tpeak1\t0\t+\n")
         sites = _load_tss_sites([str(f)])
-        assert "chr1" in sites
+        assert ("chr1", "+") in sites
 
 
 class TestNUMTLoader:

@@ -37,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re as _re
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
@@ -48,9 +49,12 @@ import click
 from scnoisemeter import __version__
 from scnoisemeter.constants import (
     BARCODE_AUTODETECT_MIN_FRACTION,
+    CATEGORY_ORDER,
     Chemistry,
     DEFAULT_CHIMERIC_DISTANCE,
     DEFAULT_THREADS,
+    INTERGENIC_LOCUS_WINDOW,
+    MITO_CONTIG_NAMES,
     Platform,
     PipelineStage,
     ReadCategory,
@@ -119,18 +123,22 @@ def _shared_options(func):
                      type=click.Choice(["auto"] + [p.value for p in Platform], case_sensitive=False),
                      default="auto", show_default=True,
                      help="Sequencing platform.  'auto' detects from BAM header."),
+        click.option("--library-strand",
+                     type=click.Choice(["auto", "stranded", "unstranded"], case_sensitive=False),
+                     default="auto", show_default=True,
+                     help="Library strandedness. Set explicitly when possible; 'auto' only "
+                          "treats --platform smartseq as unstranded."),
         click.option("--pipeline-stage",
                      type=click.Choice(["auto"] + [s.value for s in PipelineStage], case_sensitive=False),
                      default="auto", show_default=True,
                      help="Processing stage of the BAM.  'auto' detects from BAM header."),
         click.option("--chimeric-distance",  default=DEFAULT_CHIMERIC_DISTANCE, show_default=True,
-                     type=int, help="Max same-strand intra-chromosomal SA distance (bp) below which a split is NOT chimeric."),
+                     type=int, help="Deprecated compatibility option. Same-strand genomic distance alone is no longer used to call chimeras."),
         click.option("--tso",                multiple=True,
                      help="Template-switch oligo (TSO) sequence used to detect TSO invasion in "
                           "soft-clipped bases. Repeat the flag to supply more than one sequence. "
-                          "When given, REPLACES the built-in 10x/PacBio defaults "
-                          "(AAGCAGTGGTATCAACGCAGAGTACATGGG / AAGCAGTGGTATCAACGCAGAGT). "
-                          "Use this to match a non-10x protocol's oligo."),
+                          "When given, replaces the protocol-aware default. Generic/unknown "
+                          "platforms use no motif by default; pass the actual oligo for other chemistries."),
         click.option("--tso-min-match",      default=TSO_MIN_MATCH_LENGTH, show_default=True, type=int,
                      help="Minimum prefix length (bp) of a TSO sequence required to match a soft-clip. "
                           "Lower it for short custom oligos; raise it for stricter matching."),
@@ -141,7 +149,9 @@ def _shared_options(func):
         click.option("--repeats",            default=None,   type=click.Path(exists=True), help="RepeatMasker BED for hg38 (optional)."),
         click.option("--reference",          default=None,   type=click.Path(exists=True), help="Reference FASTA (.fa/.fa.gz + .fai) for polyA and junction checks."),
         click.option("--threads",            default=DEFAULT_THREADS, show_default=True, type=int, help="Parallel worker processes."),
-        click.option("--no-umi-dedup",       is_flag=True,   help="Skip UMI set tracking (reduces memory for very large datasets)."),
+        click.option("--no-umi-tracking", "--no-umi-dedup", "no_umi_dedup",
+                     is_flag=True, help="Skip UMI string-set tracking (reduces memory; "
+                                        "the old --no-umi-dedup name is retained as an alias)."),
         click.option("--no-cache",           is_flag=True,   help="Do not read or write the annotation cache."),
         click.option("--exclude-biotypes",   default=None,   multiple=True,
                      help="Gene biotypes to exclude from annotation (repeatable)."),
@@ -150,7 +160,7 @@ def _shared_options(func):
                      help="Per-cell metadata TSV with 'cell_barcode' and 'cluster' columns "
                           "(e.g. Seurat meta.data or Scanpy obs). Enables per-cluster noise profiles."),
         click.option("--polya-sites",        multiple=True,  type=click.Path(exists=True),
-                     help="PolyA site BED file(s) for the 3\'-anchored full-length fraction. "
+                     help="PolyA site BED file(s) for the 3\'-anchored read fraction. "
                           "Accepts plain .bed or .bed.gz. Repeat the flag to merge multiple "
                           "databases. When supplied, --polya-db is ignored."),
         click.option("--polya-db",
@@ -163,7 +173,7 @@ def _shared_options(func):
                           "hg38, ~281 k sites); "
                           "both: merge both databases for maximum site coverage."),
         click.option("--tss-sites",          multiple=True,  type=click.Path(exists=True),
-                     help="CAGE peak / TSS BED file(s) for the 5\'-anchored full-length metric. "
+                     help="CAGE peak / TSS BED file(s) for the 5\'-anchored read fraction. "
                           "Accepts plain .bed or .bed.gz. Repeat for multiple databases. "
                           "When supplied, --tss-db is ignored."),
         click.option("--tss-db",
@@ -175,8 +185,8 @@ def _shared_options(func):
                           "none: disable TSS metric entirely."),
         click.option("--numt-bed",           default=None,   type=click.Path(exists=True),
                      help="NUMT BED file (nuclear mitochondrial DNA segments, hg38 coordinates). "
-                          "When provided, mitochondrial reads are cross-checked against NUMT "
-                          "intervals and flagged separately in the output."),
+                          "Reported as interval-set provenance only; a NUMT read fraction requires "
+                          "per-read competing-alignment evidence and is not inferred from BED overlap."),
         click.option("--offline",            is_flag=True,
                      help="Use only cached annotation files; never make network calls. "
                           "Raises an error if the cache is empty. "
@@ -200,7 +210,7 @@ def _shared_options(func):
 @click.group()
 @click.version_option(__version__, prog_name="scnoisemeter")
 def cli():
-    """scNoiseMeter — quantify technical noise in scRNA-seq BAM files."""
+    """scNoiseMeter — barcode-aware alignment artifact and distribution QC."""
     pass
 
 
@@ -364,13 +374,36 @@ def _resolve_tso(tso_arg, tso_min_match: int) -> Optional[list]:
     return cleaned or None
 
 
+def _default_tso_sequences(platform: Platform) -> list[str]:
+    """Return conservative protocol-aware motif defaults.
+
+    An aligner or sequencer does not establish chemistry, so generic Illumina,
+    BD and unknown inputs get no sequence motif by default.  The independent
+    poly-G heuristic remains controlled by ``--no-polyg-tso``.
+    """
+    if platform in {Platform.ONT, Platform.ILLUMINA_10X}:
+        return [TSO_10X]
+    if platform in {Platform.PACBIO, Platform.SMARTSEQ}:
+        return [TSO_PACBIO]
+    return []
+
+
+def _effective_tso_sequences(user_sequences: Optional[list], platform: Platform) -> list[str]:
+    return list(user_sequences) if user_sequences is not None else _default_tso_sequences(platform)
+
+
+def _effective_polyg_check(enabled: bool, sequences: list[str]) -> bool:
+    """The poly-G shortcut is specific to the built-in 10x motif."""
+    return enabled and TSO_10X in sequences
+
+
 def _make_tso_info(tso_seqs: Optional[list], tso_min_match: int, check_polyg: bool = True) -> dict:
     """Provenance dict for the report metadata table (which TSO(s) were used)."""
-    seqs = list(tso_seqs) if tso_seqs else [TSO_10X, TSO_PACBIO]
+    seqs = list(tso_seqs) if tso_seqs is not None else []
     return {
         "sequences": seqs,
         "min_match": tso_min_match,
-        "source": "user-supplied" if tso_seqs else "default",
+        "source": "configured" if seqs else "disabled",
         "check_polyg": check_polyg,
     }
 
@@ -593,6 +626,23 @@ def _is_illumina_platform(platform) -> bool:
     return platform in illumina_vals
 
 
+def _is_unstranded_library(meta, library_strand: str = "auto") -> bool:
+    if library_strand == "unstranded":
+        return True
+    if library_strand == "stranded":
+        return False
+    if meta.platform == Platform.SMARTSEQ:
+        return True
+    if meta.platform in {Platform.UNKNOWN, Platform.ILLUMINA}:
+        warning = (
+            "Library strandedness could not be established from the BAM header. "
+            "Assuming stranded for category reporting; pass --library-strand to override."
+        )
+        if warning not in meta.warnings:
+            meta.warnings.append(warning)
+    return False
+
+
 def _apply_intergenic_reclassification(result, intergenic_records, record_categories):
     """
     Move per-barcode read/base counts from INTERGENIC_SPARSE into the promoted
@@ -611,28 +661,65 @@ def _apply_intergenic_reclassification(result, intergenic_records, record_catego
     if not intergenic_records or not record_categories:
         return
 
-    # Per-barcode counts of sampled records by promoted category
+    from scnoisemeter.modules.pipeline import _get_length_bin
+
+    sampled_records = getattr(result, "intergenic_reads", intergenic_records)
+    sample_seen = getattr(sampled_records, "n_seen", len(intergenic_records))
+    exhaustive = sample_seen <= len(intergenic_records)
+    result._intergenic_reclassification_sampled = not exhaustive
+    result._invalid_umi_categories = set()
+
+    # Per-barcode sampled read and aligned-base support by promoted category.
     per_cb_by_cat: dict[str, dict] = {}
     per_cb_total: dict[str, int] = {}
+    per_cb_bases_by_cat: dict[str, dict] = {}
+    per_cb_total_bases: dict[str, int] = {}
+    sampled_bin_total: dict[int, int] = {}
+    sampled_bin_cat: dict[int, dict] = {}
     for rec, new_cat in zip(intergenic_records, record_categories):
         cb = rec.cell_barcode
         per_cb_total[cb] = per_cb_total.get(cb, 0) + 1
+        per_cb_total_bases[cb] = per_cb_total_bases.get(cb, 0) + max(rec.n_bases, 0)
+        bin_idx = _get_length_bin(rec.read_length)
+        sampled_bin_total[bin_idx] = sampled_bin_total.get(bin_idx, 0) + 1
         if new_cat != ReadCategory.INTERGENIC_SPARSE:
             per_cb_by_cat.setdefault(cb, {})
             per_cb_by_cat[cb][new_cat] = per_cb_by_cat[cb].get(new_cat, 0) + 1
+            per_cb_bases_by_cat.setdefault(cb, {})
+            per_cb_bases_by_cat[cb][new_cat] = (
+                per_cb_bases_by_cat[cb].get(new_cat, 0) + max(rec.n_bases, 0)
+            )
+            sampled_bin_cat.setdefault(bin_idx, {})
+            sampled_bin_cat[bin_idx][new_cat] = (
+                sampled_bin_cat[bin_idx].get(new_cat, 0) + 1
+            )
+
+            assignments = getattr(result, "read_assignments", {})
+            if rec.read_key and rec.read_key in assignments:
+                _old_cat, old_cb = assignments[rec.read_key]
+                assignments[rec.read_key] = (new_cat, old_cb)
+
+            if exhaustive and rec.umi and hasattr(result, "umi_sets"):
+                result.umi_sets[cb][ReadCategory.INTERGENIC_SPARSE].discard(rec.umi)
+                result.umi_sets[cb][new_cat].add(rec.umi)
 
     for cb, cat_counts in per_cb_by_cat.items():
         sparse_reads = result.read_counts[cb].get(ReadCategory.INTERGENIC_SPARSE, 0)
         sparse_bases = result.base_counts[cb].get(ReadCategory.INTERGENIC_SPARSE, 0)
-        denom = per_cb_total[cb]
-        if denom == 0 or sparse_reads == 0:
+        denom_reads = per_cb_total[cb]
+        denom_bases = per_cb_total_bases.get(cb, 0)
+        if denom_reads == 0 or sparse_reads == 0:
             continue
         moved_reads = 0
         moved_bases = 0
         for new_cat, n in cat_counts.items():
-            frac = n / denom
-            r_move = min(int(round(sparse_reads * frac)), sparse_reads - moved_reads)
-            b_move = min(int(round(sparse_bases * frac)), sparse_bases - moved_bases)
+            read_frac = n / denom_reads
+            base_frac = (
+                per_cb_bases_by_cat[cb].get(new_cat, 0) / denom_bases
+                if denom_bases else read_frac
+            )
+            r_move = min(int(round(sparse_reads * read_frac)), sparse_reads - moved_reads)
+            b_move = min(int(round(sparse_bases * base_frac)), sparse_bases - moved_bases)
             if r_move <= 0 and b_move <= 0:
                 continue
             result.read_counts[cb][new_cat] += r_move
@@ -642,10 +729,98 @@ def _apply_intergenic_reclassification(result, intergenic_records, record_catego
         result.read_counts[cb][ReadCategory.INTERGENIC_SPARSE] -= moved_reads
         result.base_counts[cb][ReadCategory.INTERGENIC_SPARSE] -= moved_bases
 
+    # Keep exact length-bin totals consistent with the promoted categories.
+    for bin_idx, cat_counts in sampled_bin_cat.items():
+        if not hasattr(result, "length_bin_counts"):
+            break
+        sparse_count = result.length_bin_counts[ReadCategory.INTERGENIC_SPARSE].get(bin_idx, 0)
+        denom = sampled_bin_total.get(bin_idx, 0)
+        moved = 0
+        if not denom:
+            continue
+        for new_cat, sampled_n in cat_counts.items():
+            amount = min(
+                int(round(sparse_count * sampled_n / denom)),
+                sparse_count - moved,
+            )
+            result.length_bin_counts[new_cat][bin_idx] += amount
+            moved += amount
+        result.length_bin_counts[ReadCategory.INTERGENIC_SPARSE][bin_idx] -= moved
+
+    if not exhaustive:
+        result._invalid_umi_categories.update({
+            ReadCategory.INTERGENIC_SPARSE,
+            ReadCategory.INTERGENIC_REPEAT,
+            ReadCategory.INTERGENIC_HOTSPOT,
+            ReadCategory.INTERGENIC_NOVEL,
+            ReadCategory.INTERGENIC_ENRICHED,
+        })
+
+
+def _profile_intergenic_result(result, index, *, reference: Optional[str], polya_sites: dict):
+    """Run the same intergenic second pass for every CLI workflow."""
+    records = extract_intergenic_records(result)
+    if not records:
+        return []
+
+    repeat_dict = None
+    if index.repeats is not None and not index.repeats.df.empty:
+        repeat_dict = {}
+        for chrom, grp in index.repeats.df.groupby("Chromosome", observed=False):
+            intervals = sorted(
+                (int(row.Start), int(row.End))
+                for row in grp.itertuples(index=False)
+            )
+            merged = []
+            for start, end in intervals:
+                if not merged or start > merged[-1][1]:
+                    merged.append([start, end])
+                else:
+                    merged[-1][1] = max(merged[-1][1], end)
+            repeat_dict[str(chrom)] = [tuple(ivl) for ivl in merged]
+
+    ref_handle = None
+    if reference:
+        try:
+            import pysam as _pysam
+            ref_handle = _pysam.FastaFile(reference)
+        except Exception as exc:
+            logger.warning("Could not open reference FASTA for intergenic profiling: %s", exc)
+    try:
+        loci, categories = profile_intergenic_loci(
+            records,
+            total_intergenic_bases=compute_intergenic_bases(
+                index,
+                by_contig=True,
+                contig_lengths=result.meta.reference_lengths,
+            ),
+            total_barcodes=sum(
+                1 for cb in result.read_counts if cb not in {"", "NO_BARCODE"}
+            ),
+            reference=ref_handle,
+            polya_sites=polya_sites,
+            repeat_intervals=repeat_dict,
+            n_test_windows=sum(
+                (int(length) + INTERGENIC_LOCUS_WINDOW - 1)
+                // INTERGENIC_LOCUS_WINDOW
+                for contig, length in result.meta.reference_lengths.items()
+                if contig not in MITO_CONTIG_NAMES
+            ),
+        )
+    finally:
+        if ref_handle is not None:
+            ref_handle.close()
+
+    _apply_intergenic_reclassification(result, records, categories)
+    return loci
+
 
 @cli.command("run")
 @click.option("--bam",           required=True, type=click.Path(exists=True), help="Input BAM (must have .bai index).")
 @click.option("--sample-name",   default=None, help="Sample label used in output files and reports.  Defaults to BAM filename stem.")
+@click.option("--tagged-bam",    default=None, type=click.Path(),
+              help="Optional output BAM containing the final category in local tag 'sn'. "
+                   "Writes a coordinate-sorted BAM and index after classification.")
 @click.option("--cell-barcodes", default=None, type=click.Path(exists=True),
               help="Path to called-cell barcodes file (one per line, plain text or .gz). "
                    "Reads whose CB tag is not in this list are skipped entirely and do not "
@@ -654,9 +829,9 @@ def _apply_intergenic_reclassification(result, intergenic_records, record_catego
                    "--barcode-whitelist (which defines valid barcode sequences for the chemistry).")
 @_shared_options
 def run_cmd(
-    bam, sample_name, cell_barcodes,
+    bam, sample_name, tagged_bam, cell_barcodes,
     gtf, gtf_version, barcode_whitelist, whitelist_db, barcode_tag, umi_tag,
-    chemistry, platform, pipeline_stage, chimeric_distance, tso, tso_min_match, no_polyg_tso,
+    chemistry, platform, library_strand, pipeline_stage, chimeric_distance, tso, tso_min_match, no_polyg_tso,
     repeats, reference, threads, no_umi_dedup, no_cache,
     exclude_biotypes, output_dir, obs_metadata, polya_sites, polya_db,
     tss_sites, tss_db, numt_bed, offline, seed, verbose,
@@ -820,7 +995,10 @@ def run_cmd(
     if use_paired_chimeric:
         logger.info("Illumina platform detected — enabling paired-end chimeric detection.")
 
-    tso_seqs = _resolve_tso(tso, tso_min_match)
+    tso_seqs = _effective_tso_sequences(
+        _resolve_tso(tso, tso_min_match), meta.platform
+    )
+    tso_check_polyg = _effective_polyg_check(not no_polyg_tso, tso_seqs)
 
     # Run pipeline
     result = run_pipeline(
@@ -831,11 +1009,12 @@ def run_cmd(
         paired_end_chimeric=use_paired_chimeric,
         tso_sequences=tso_seqs,
         tso_min_match=tso_min_match,
-        tso_check_polyg=not no_polyg_tso,
+        tso_check_polyg=tso_check_polyg,
         threads=threads,
         store_umis=not no_umi_dedup,
         reference_path=reference,
         seed=seed,
+        store_read_assignments=bool(tagged_bam),
     )
 
     # Check that --cell-barcodes didn't filter out every read
@@ -880,56 +1059,16 @@ def run_cmd(
     else:
         result._numt_intervals = None
 
-    # --- Intergenic profiler (must run BEFORE compute_metrics so promoted
-    # loci contribute to the correct noise/ambiguous categories) ---
-    intergenic_records = extract_intergenic_records(result)
-    intergenic_loci    = []
-    if intergenic_records:
-        total_ig_bases  = compute_intergenic_bases(index)
-        total_barcodes  = len(result.read_counts)
-
-        polya_site_dict = result._polya_site_dict
-
-        repeat_dict = None
-        if index.repeats is not None and not index.repeats.df.empty:
-            repeat_dict = {}
-            for _, row in index.repeats.df.iterrows():
-                c = row["Chromosome"]
-                repeat_dict.setdefault(c, []).append(
-                    (int(row["Start"]), int(row["End"]))
-                )
-
-        ref_handle = None
-        if reference:
-            try:
-                import pysam as _pysam
-                ref_handle = _pysam.FastaFile(reference)
-            except Exception as _exc:
-                logger.warning("Could not open reference FASTA for polyA context: %s", _exc)
-        try:
-            ig_loci, record_categories = profile_intergenic_loci(
-                intergenic_records,
-                total_intergenic_bases=total_ig_bases,
-                total_barcodes=total_barcodes,
-                reference=ref_handle,
-                polya_sites=polya_site_dict,
-                repeat_intervals=repeat_dict,
-            )
-        finally:
-            if ref_handle is not None:
-                ref_handle.close()
-        intergenic_loci = ig_loci
-        _apply_intergenic_reclassification(result, intergenic_records, record_categories)
-        logger.info(
-            "Intergenic profiling complete: %d loci characterised.", len(ig_loci)
-        )
+    intergenic_loci = _profile_intergenic_result(
+        result, index, reference=reference, polya_sites=result._polya_site_dict
+    )
 
     # Compute metrics (after intergenic reclassification)
     platform_str = meta.platform.value
     sm, ct = compute_metrics(
         result, sample_name,
         platform=platform_str,
-        unstranded=(meta.platform == Platform.SMARTSEQ),
+        unstranded=_is_unstranded_library(meta, library_strand),
     )
 
     # Attach annotation provenance for the HTML report
@@ -945,7 +1084,7 @@ def run_cmd(
         "source": "user-supplied" if tss_sites else "auto-downloaded",
         "path": tss_paths[0] if tss_paths else None,
     } if tss_paths else None
-    sm._tso_info = _make_tso_info(tso_seqs, tso_min_match, check_polyg=not no_polyg_tso)
+    sm._tso_info = _make_tso_info(tso_seqs, tso_min_match, check_polyg=tso_check_polyg)
     if version_warning:
         sm.warnings.append(version_warning)
 
@@ -974,9 +1113,22 @@ def run_cmd(
                        cluster_df=cluster_df, intergenic_loci=intergenic_loci,
                        platform=meta.platform)
 
+    if tagged_bam:
+        _write_category_tagged_bam(
+            bam_path, Path(tagged_bam), result, intergenic_loci
+        )
+
     click.echo(f"\n✓ scNoiseMeter run complete.  Results in: {output_dir}")
-    click.echo(f"  Noise fraction (reads) : {sm.noise_read_frac:.2%}")
-    click.echo(f"  Noise fraction (bases) : {sm.noise_base_frac:.2%}")
+    broad_value = getattr(sm, "broad_noncanonical_read_frac", None)
+    if not isinstance(broad_value, (int, float)):
+        broad_value = getattr(sm, "noise_read_frac", 0.0)
+    artifact_value = getattr(sm, "artifact_candidate_read_frac", None)
+    if not isinstance(artifact_value, (int, float)):
+        artifact_value = getattr(sm, "noise_read_frac_strict", 0.0)
+    if not isinstance(artifact_value, (int, float)):
+        artifact_value = 0.0
+    click.echo(f"  Broad non-canonical (reads): {broad_value:.2%}")
+    click.echo(f"  Artifact candidates (reads): {artifact_value:.2%}")
     click.echo(f"  Strand concordance     : {sm.strand_concordance:.2%}")
     click.echo(f"  Chimeric rate          : {sm.chimeric_read_frac:.2%}")
     click.echo(f"  Cells detected         : {sm.n_cells:,}")
@@ -1003,23 +1155,28 @@ def run_cmd(
 def compare_cmd(
     bam_a, bam_b, label_a, label_b, tso_a, tso_b,
     gtf, gtf_version, barcode_whitelist, whitelist_db, barcode_tag, umi_tag,
-    chemistry, platform, pipeline_stage, chimeric_distance, tso, tso_min_match, no_polyg_tso,
+    chemistry, platform, library_strand, pipeline_stage, chimeric_distance, tso, tso_min_match, no_polyg_tso,
     repeats, reference, threads, no_umi_dedup, no_cache,
     exclude_biotypes, output_dir, obs_metadata, polya_sites, polya_db,
     tss_sites, tss_db, numt_bed, offline, seed, verbose,
 ):
     """
-    Compare noise profiles between two BAMs (e.g. pre- vs post-filter).
+    Compare alignment-category profiles between two BAMs (e.g. pre/post filter).
 
-    Runs the full classification pipeline on both BAMs, computes paired
-    proportion tests for each noise category, and writes a comparison report.
+    Runs the full classifier on both BAMs, reports exact matched-read retention
+    and category transitions, and bootstraps paired-cell median differences.
 
     Output files written to --output-dir:
       comparison.metrics.tsv          Side-by-side scalar metrics
-      comparison.stats.tsv            Paired proportion test results
+      comparison.stats.tsv            Composition deltas and paired-cell CIs
+      comparison.retention.tsv        Exact matched-read retention by category
+      comparison.transitions.tsv      Category transitions for matched reads
+      comparison.matching.tsv         Read-key matching summary
       comparison.report.html          Interactive HTML report
     """
     _setup_logging(verbose)
+    if label_a == label_b:
+        raise click.UsageError("--label-a and --label-b must be distinct.")
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1058,28 +1215,37 @@ def compare_cmd(
         (bam_b, label_b, tso_b or tso),
     ]:
         click.echo(f"\nProcessing {label} ({bam_path}) …")
-        tso_seqs = _resolve_tso(tso_side, tso_min_match)
         meta = inspect_bam(Path(bam_path), barcode_tag=barcode_tag, umi_tag=umi_tag,
                            platform=plat, pipeline_stage=stage)
+        tso_seqs = _effective_tso_sequences(
+            _resolve_tso(tso_side, tso_min_match), meta.platform
+        )
+        tso_check_polyg = _effective_polyg_check(not no_polyg_tso, tso_seqs)
         result = run_pipeline(
             bam_path, index, meta,
             whitelist=whitelist,
             chimeric_distance=chimeric_distance,
+            paired_end_chimeric=_is_illumina_platform(meta.platform),
             tso_sequences=tso_seqs,
             tso_min_match=tso_min_match,
-            tso_check_polyg=not no_polyg_tso,
+            tso_check_polyg=tso_check_polyg,
             threads=threads,
             store_umis=not no_umi_dedup,
             reference_path=reference,
             seed=seed,
+            store_read_assignments=True,
         )
         _bam_cs = _detect_chrom_style(meta.reference_names)
         result._polya_site_dict = _load_polya_sites(polya_paths, chrom_style=_bam_cs)
         result._tss_site_dict = _load_tss_sites(tss_paths, chrom_style=_bam_cs) if tss_paths else None
+        _profile_intergenic_result(
+            result, index, reference=reference,
+            polya_sites=result._polya_site_dict,
+        )
         sm, ct = compute_metrics(
             result, label,
             platform=meta.platform.value,
-            unstranded=(meta.platform == Platform.SMARTSEQ),
+            unstranded=_is_unstranded_library(meta, library_strand),
         )
         sm._gtf_info = {"version": gtf_version, "source": gtf_source, "path": gtf}
         sm._polya_info = {
@@ -1093,7 +1259,7 @@ def compare_cmd(
             "source": "user-supplied" if tss_sites else "auto-downloaded",
             "path": tss_paths[0] if tss_paths else None,
         } if tss_paths else None
-        sm._tso_info = _make_tso_info(tso_seqs, tso_min_match, check_polyg=not no_polyg_tso)
+        sm._tso_info = _make_tso_info(tso_seqs, tso_min_match, check_polyg=tso_check_polyg)
         if version_warning:
             sm.warnings.append(version_warning)
         results[label] = (sm, ct, result)
@@ -1104,8 +1270,8 @@ def compare_cmd(
     click.echo(f"\n✓ Comparison complete.  Results in: {output_dir}")
     sm_a_obj, _, _ = results[label_a]
     sm_b_obj, _, _ = results[label_b]
-    click.echo(f"  {label_a} noise fraction (reads): {sm_a_obj.noise_read_frac:.2%}")
-    click.echo(f"  {label_b} noise fraction (reads): {sm_b_obj.noise_read_frac:.2%}")
+    click.echo(f"  {label_a} broad non-canonical: {sm_a_obj.broad_noncanonical_read_frac:.2%}")
+    click.echo(f"  {label_b} broad non-canonical: {sm_b_obj.broad_noncanonical_read_frac:.2%}")
 
 
 # ---------------------------------------------------------------------------
@@ -1143,7 +1309,7 @@ def compare_cmd(
                    "fantom5 / none (disable TSS metric).")
 @click.option("--tso",         multiple=True,
               help="Template-switch oligo (TSO) sequence for TSO-invasion detection (repeatable). "
-                   "Replaces the built-in 10x/PacBio defaults; applied to every discovered BAM.")
+                   "Replaces the protocol-aware default; applied to every discovered BAM.")
 @click.option("--tso-min-match", default=TSO_MIN_MATCH_LENGTH, show_default=True, type=int,
               help="Minimum prefix length (bp) of a TSO sequence required to match a soft-clip.")
 @click.option("--no-polyg-tso", is_flag=True,
@@ -1174,10 +1340,8 @@ def discover_cmd(
     from scnoisemeter.utils.discover_inspector import (
         DiscoverBamInfo, inspect_bam_for_discover,
         format_discovery_table, _collect_selected_indices,
-        _prompt_platform, _prompt_chemistry, _normalise_platform,
+        _prompt_platform, _normalise_platform,
     )
-    from scnoisemeter.modules.pipeline import run_pipeline
-    from scnoisemeter.modules.metrics import compute_metrics
 
     _setup_logging(verbose)
     output_dir = Path(output_dir)
@@ -1345,7 +1509,7 @@ def discover_cmd(
 
 def _run_single_bam_for_discover(
     *,
-    info: "DiscoverBamInfo",
+    info,
     gtf_path: str,
     gtf_version,
     gtf_source: str,
@@ -1368,14 +1532,13 @@ def _run_single_bam_for_discover(
 ) -> None:
     """Run the full scNoiseMeter pipeline on one BAM (used by discover_cmd)."""
     from scnoisemeter.modules.annotation import build_annotation_index
-    from scnoisemeter.modules.intergenic_profiler import (
-        profile_intergenic_loci, extract_intergenic_records, compute_intergenic_bases,
-    )
-    from scnoisemeter.modules.metrics import compute_metrics, compute_length_stratification
+    from scnoisemeter.modules.metrics import compute_metrics
     from scnoisemeter.modules.pipeline import run_pipeline
 
     meta = info.meta
     bam_path = info.bam_path
+    tso_seqs = _effective_tso_sequences(tso_seqs, meta.platform)
+    tso_check_polyg = _effective_polyg_check(not no_polyg_tso, tso_seqs)
 
     # Validate sort order and chromosome naming
     _validate_sort_order(meta)
@@ -1397,7 +1560,7 @@ def _run_single_bam_for_discover(
         paired_end_chimeric=use_paired_chimeric,
         tso_sequences=tso_seqs,
         tso_min_match=tso_min_match,
-        tso_check_polyg=not no_polyg_tso,
+        tso_check_polyg=tso_check_polyg,
         threads=threads,
         store_umis=True,
         seed=seed,
@@ -1411,37 +1574,14 @@ def _run_single_bam_for_discover(
 
     result._numt_intervals = None
 
-    # Intergenic profiler (runs before compute_metrics so promoted loci
-    # contribute to the correct categories)
-    intergenic_records = extract_intergenic_records(result)
-    intergenic_loci = []
-    if intergenic_records:
-        total_ig_bases = compute_intergenic_bases(index)
-        ref_handle = None
-        if reference:
-            try:
-                import pysam as _pysam
-                ref_handle = _pysam.FastaFile(reference)
-            except Exception as _exc:
-                logger.warning("Could not open reference FASTA for polyA context: %s", _exc)
-        try:
-            ig_loci, record_categories = profile_intergenic_loci(
-                intergenic_records,
-                total_intergenic_bases=total_ig_bases,
-                total_barcodes=len(result.read_counts),
-                reference=ref_handle,
-                polya_sites=result._polya_site_dict,
-            )
-        finally:
-            if ref_handle is not None:
-                ref_handle.close()
-        intergenic_loci = ig_loci
-        _apply_intergenic_reclassification(result, intergenic_records, record_categories)
+    intergenic_loci = _profile_intergenic_result(
+        result, index, reference=reference, polya_sites=result._polya_site_dict
+    )
 
     sm, ct = compute_metrics(
         result, sample_name,
         platform=meta.platform.value,
-        unstranded=(meta.platform == Platform.SMARTSEQ),
+        unstranded=_is_unstranded_library(meta, "auto"),
     )
     sm._gtf_info = {"version": gtf_version, "source": gtf_source, "path": gtf_path}
     sm._polya_info = {
@@ -1455,11 +1595,10 @@ def _run_single_bam_for_discover(
         "source": "auto-downloaded",
         "path": tss_paths[0] if tss_paths else None,
     } if tss_paths else None
-    sm._tso_info = _make_tso_info(tso_seqs, tso_min_match, check_polyg=not no_polyg_tso)
+    sm._tso_info = _make_tso_info(tso_seqs, tso_min_match, check_polyg=tso_check_polyg)
     if version_warning:
         sm.warnings.append(version_warning)
 
-    strat_df = compute_length_stratification(result.length_bin_counts, result.length_samples)
     _write_run_outputs(
         sm, ct, result, output_dir, sample_name,
         cluster_df=None,
@@ -1467,7 +1606,7 @@ def _run_single_bam_for_discover(
         platform=meta.platform,
     )
 
-    click.echo(f"  Noise conservative : {sm.noise_read_frac:.2%}")
+    click.echo(f"  Broad non-canonical: {sm.broad_noncanonical_read_frac:.2%}")
     click.echo(f"  Chimeric rate      : {sm.chimeric_read_frac:.2%}")
     click.echo(f"  Strand concordance : {sm.strand_concordance:.2%}")
 
@@ -1481,7 +1620,6 @@ def _print_discover_summary(
         click.echo("  (no runs completed)")
         return
 
-    headers = ("Sample", "Status", "Output dir")
     rows = []
     for stem, bam_out, status, err in results:
         rows.append((stem, status, str(bam_out)))
@@ -1500,8 +1638,8 @@ def _print_discover_summary(
             if metrics:
                 click.echo(
                     f"\n  {stem}:\n"
-                    f"    noise_conservative  = {float(metrics.get('noise_read_frac', 0)):.2%}\n"
-                    f"    noise_strict        = {float(metrics.get('noise_read_frac_strict', metrics.get('noise_read_frac', 0))):.2%}\n"
+                    f"    broad_noncanonical  = {float(metrics.get('broad_noncanonical_read_frac', metrics.get('noise_read_frac', 0))):.2%}\n"
+                    f"    artifact_candidates = {float(metrics.get('artifact_candidate_read_frac', metrics.get('noise_read_frac_strict', 0))):.2%}\n"
                     f"    chimeric_rate       = {float(metrics.get('chimeric_read_frac', 0)):.2%}\n"
                     f"    strand_concordance  = {float(metrics.get('strand_concordance', 0)):.2%}"
                 )
@@ -1512,8 +1650,6 @@ def _print_discover_summary(
 # ---------------------------------------------------------------------------
 # `run-plate` subcommand
 # ---------------------------------------------------------------------------
-
-import re as _re
 
 _PLATE_WELL_RE = _re.compile(r"^(?P<plate>.+)_(?P<well>[A-Pa-p]\d{1,2})$")
 
@@ -1547,7 +1683,6 @@ def _plate_worker_init(gtf, repeats_path, exclude_biotypes,
 
 def _plate_well_task(task: dict) -> dict:
     """Worker task: inspect BAM, run pipeline, compute per-well metrics."""
-    from scnoisemeter.constants import Platform
     from scnoisemeter.modules.metrics import compute_metrics
     from scnoisemeter.modules.pipeline import run_pipeline
     from scnoisemeter.utils.bam_inspector import inspect_bam
@@ -1587,7 +1722,7 @@ def _plate_well_task(task: dict) -> dict:
         well_sm, _ = compute_metrics(
             well_result, f"{plate_id}_{well_id}",
             platform=meta.platform.value,
-            unstranded=(meta.platform == Platform.SMARTSEQ),
+            unstranded=_is_unstranded_library(meta, task.get("library_strand", "auto")),
         )
 
         # Clear large dicts before pickling result back to the main process
@@ -1716,7 +1851,7 @@ def _discover_plate_wells(plate_dir: Path) -> dict:
 def run_plate_cmd(
     plate_dir, sample_sheet, sequencer, sample_name, plate_ids, parallel_wells,
     gtf, gtf_version, barcode_whitelist, whitelist_db, barcode_tag, umi_tag,
-    chemistry, platform, pipeline_stage, chimeric_distance, tso, tso_min_match, no_polyg_tso,
+    chemistry, platform, library_strand, pipeline_stage, chimeric_distance, tso, tso_min_match, no_polyg_tso,
     repeats, reference, threads, no_umi_dedup, no_cache,
     exclude_biotypes, output_dir, obs_metadata, polya_sites, polya_db,
     tss_sites, tss_db, numt_bed, offline, seed, verbose,
@@ -1736,11 +1871,10 @@ def run_plate_cmd(
       <PlateID>.report.html             Interactive HTML report
     """
     from scnoisemeter.modules.annotation import build_annotation_index
-    from scnoisemeter.modules.intergenic_profiler import (
-        profile_intergenic_loci, extract_intergenic_records, compute_intergenic_bases,
+    from scnoisemeter.modules.metrics import compute_metrics
+    from scnoisemeter.modules.pipeline import (
+        run_pipeline, merge_sample_results, relabel_barcode,
     )
-    from scnoisemeter.modules.metrics import compute_metrics, compute_length_stratification
-    from scnoisemeter.modules.pipeline import run_pipeline, merge_sample_results
     from scnoisemeter.utils.sample_sheet import parse_sample_sheet, lookup_well
 
     _setup_logging(verbose)
@@ -1850,7 +1984,10 @@ def run_plate_cmd(
     )
     version_warning = _check_version_consistency(gtf_version, polya_version)
     tss_paths = _resolve_tss_sites(tss_sites, tss_db=tss_db, offline=offline)
-    tso_seqs = _resolve_tso(tso, tso_min_match)
+    tso_seqs = _effective_tso_sequences(
+        _resolve_tso(tso, tso_min_match), _first_meta.platform
+    )
+    tso_check_polyg = _effective_polyg_check(not no_polyg_tso, tso_seqs)
 
     # Build annotation index ONCE for all wells
     index = build_annotation_index(
@@ -1879,7 +2016,7 @@ def run_plate_cmd(
         plate_output_dir = output_dir_path / plate_id
         plate_output_dir.mkdir(parents=True, exist_ok=True)
 
-        plate_result: "SampleResult | None" = None
+        plate_result = None
         per_well_rows: list = []
         n_failed = 0
 
@@ -1919,12 +2056,13 @@ def run_plate_cmd(
                     "barcode_tag":      barcode_tag,
                     "umi_tag":          umi_tag,
                     "platform_override": plat,
+                    "library_strand":    library_strand,
                     "stage_override":   stage,
                     "whitelist":        whitelist,
                     "chimeric_distance": chimeric_distance,
                     "tso_sequences":    tso_seqs,
                     "tso_min_match":    tso_min_match,
-                    "tso_check_polyg":  not no_polyg_tso,
+                    "tso_check_polyg":  tso_check_polyg,
                     "threads":          _threads_per_well,
                     "store_umis":       not no_umi_dedup,
                     "reference":        reference,
@@ -1950,7 +2088,7 @@ def run_plate_cmd(
                             _well_results[wid] = res
                             click.echo(
                                 f"  [{wid}] {res['well_sm'].n_reads_total:,} reads, "
-                                f"noise={res['well_sm'].noise_read_frac:.1%}"
+                                f"broad={res['well_sm'].broad_noncanonical_read_frac:.1%}"
                             )
                         else:
                             click.echo(f"  [{wid}] FAILED: {res['error']}", err=True)
@@ -1977,6 +2115,9 @@ def run_plate_cmd(
                 res = _well_results[well_id]
                 well_sm     = res["well_sm"]
                 well_result = res["well_result"]
+                relabel_barcode(
+                    well_result, "NO_BARCODE", f"{plate_id}_{well_id}"
+                )
                 well_meta_from_sheet = lookup_well(well_metadata, plate_id, well_id)
                 row: dict = {
                     "plate_id":              plate_id,
@@ -1985,6 +2126,8 @@ def run_plate_cmd(
                     "n_reads_classified":    well_sm.n_reads_classified,
                     "noise_read_frac":       f"{well_sm.noise_read_frac:.4f}",
                     "noise_base_frac":       f"{well_sm.noise_base_frac:.4f}",
+                    "broad_noncanonical_read_frac": f"{well_sm.broad_noncanonical_read_frac:.4f}",
+                    "artifact_candidate_read_frac": f"{well_sm.artifact_candidate_read_frac:.4f}",
                     "strand_concordance":    f"{well_sm.strand_concordance:.4f}",
                     "chimeric_read_frac":    f"{well_sm.chimeric_read_frac:.4f}",
                     "multimapper_read_frac": f"{well_sm.multimapper_read_frac:.4f}",
@@ -2037,7 +2180,7 @@ def run_plate_cmd(
                         paired_end_chimeric=_is_illumina_platform(meta.platform),
                         tso_sequences=tso_seqs,
                         tso_min_match=tso_min_match,
-                        tso_check_polyg=not no_polyg_tso,
+                        tso_check_polyg=tso_check_polyg,
                         threads=threads,
                         store_umis=not no_umi_dedup,
                         reference_path=reference,
@@ -2048,10 +2191,14 @@ def run_plate_cmd(
                     well_result._tss_site_dict   = _shared_tss
                     well_result._numt_intervals  = None
 
+                    relabel_barcode(
+                        well_result, "NO_BARCODE", f"{plate_id}_{well_id}"
+                    )
+
                     well_sm, _ = compute_metrics(
                         well_result, f"{plate_id}_{well_id}",
                         platform=meta.platform.value,
-                        unstranded=(meta.platform == Platform.SMARTSEQ),
+                        unstranded=_is_unstranded_library(meta, library_strand),
                     )
 
                     well_meta_from_sheet = lookup_well(well_metadata, plate_id, well_id)
@@ -2062,6 +2209,8 @@ def run_plate_cmd(
                         "n_reads_classified":    well_sm.n_reads_classified,
                         "noise_read_frac":       f"{well_sm.noise_read_frac:.4f}",
                         "noise_base_frac":       f"{well_sm.noise_base_frac:.4f}",
+                        "broad_noncanonical_read_frac": f"{well_sm.broad_noncanonical_read_frac:.4f}",
+                        "artifact_candidate_read_frac": f"{well_sm.artifact_candidate_read_frac:.4f}",
                         "strand_concordance":    f"{well_sm.strand_concordance:.4f}",
                         "chimeric_read_frac":    f"{well_sm.chimeric_read_frac:.4f}",
                         "multimapper_read_frac": f"{well_sm.multimapper_read_frac:.4f}",
@@ -2089,7 +2238,7 @@ def run_plate_cmd(
                     per_well_rows.append(row)
                     click.echo(
                         f"  [{well_id}] {well_sm.n_reads_total:,} reads, "
-                        f"noise={well_sm.noise_read_frac:.1%}"
+                        f"broad={well_sm.broad_noncanonical_read_frac:.1%}"
                     )
 
                     if plate_result is None:
@@ -2112,36 +2261,17 @@ def run_plate_cmd(
         plate_meta = plate_result.meta  # use last well's meta (platform is the same)
         plate_meta.warnings = []        # clear per-well warnings; plate report stays clean
 
-        # Intergenic profiler at plate level (runs before compute_metrics)
-        intergenic_records = extract_intergenic_records(plate_result)
-        intergenic_loci = []
-        if intergenic_records:
-            total_ig_bases = compute_intergenic_bases(index)
-            ref_handle = None
-            if reference:
-                try:
-                    import pysam as _pysam
-                    ref_handle = _pysam.FastaFile(reference)
-                except Exception as _exc:
-                    logger.warning("Could not open reference FASTA for polyA context: %s", _exc)
-            try:
-                ig_loci, record_categories = profile_intergenic_loci(
-                    intergenic_records,
-                    total_intergenic_bases=total_ig_bases,
-                    total_barcodes=len(plate_result.read_counts),
-                    reference=ref_handle,
-                    polya_sites=getattr(plate_result, "_polya_site_dict", None) or {},
-                )
-            finally:
-                if ref_handle is not None:
-                    ref_handle.close()
-            intergenic_loci = ig_loci
-            _apply_intergenic_reclassification(plate_result, intergenic_records, record_categories)
+        intergenic_loci = _profile_intergenic_result(
+            plate_result,
+            index,
+            reference=reference,
+            polya_sites=getattr(plate_result, "_polya_site_dict", None) or {},
+        )
 
         plate_sm, plate_ct = compute_metrics(
             plate_result, plate_label,
             platform=plate_meta.platform.value,
-            unstranded=(plate_meta.platform == Platform.SMARTSEQ),
+            unstranded=_is_unstranded_library(plate_meta, library_strand),
         )
         plate_sm._gtf_info   = {"version": gtf_version, "source": gtf_source, "path": gtf}
         plate_sm._polya_info = {
@@ -2152,7 +2282,7 @@ def run_plate_cmd(
             "db": tss_db, "source": "auto-downloaded",
             "path": tss_paths[0] if tss_paths else None,
         } if tss_paths else None
-        plate_sm._tso_info = _make_tso_info(tso_seqs, tso_min_match, check_polyg=not no_polyg_tso)
+        plate_sm._tso_info = _make_tso_info(tso_seqs, tso_min_match, check_polyg=tso_check_polyg)
         plate_sm._cell_barcodes_info = None
         if version_warning:
             plate_sm.warnings.append(version_warning)
@@ -2174,7 +2304,7 @@ def run_plate_cmd(
         click.echo(
             f"\n  Plate {plate_id} complete: {n_wells_ok}/{len(well_list)} wells processed."
         )
-        click.echo(f"  Noise fraction (reads) : {plate_sm.noise_read_frac:.2%}")
+        click.echo(f"  Broad non-canonical    : {plate_sm.broad_noncanonical_read_frac:.2%}")
         click.echo(f"  Strand concordance     : {plate_sm.strand_concordance:.2%}")
         click.echo(f"  Chimeric rate          : {plate_sm.chimeric_read_frac:.2%}")
         click.echo(f"  Results in             : {plate_output_dir}")
@@ -2201,12 +2331,18 @@ def _strip_chr_if_needed(sites: dict, chrom_style: str) -> dict:
     if chrom_style != "ensembl":
         return sites
     # Check if the keys actually have the chr prefix before stripping
-    has_chr = any(k.startswith("chr") for k in sites)
+    def _chrom(key):
+        return key[0] if isinstance(key, tuple) else key
+
+    has_chr = any(str(_chrom(k)).startswith("chr") for k in sites)
     if not has_chr:
         return sites
     stripped = {}
     for k, v in sites.items():
-        stripped[k.removeprefix("chr")] = v
+        if isinstance(k, tuple):
+            stripped[(str(k[0]).removeprefix("chr"), k[1])] = v
+        else:
+            stripped[str(k).removeprefix("chr")] = v
     logger.debug("Stripped 'chr' prefix from BED chromosome names to match Ensembl BAM naming.")
     return stripped
 
@@ -2258,8 +2394,9 @@ def _load_polya_sites(paths, chrom_style: str = "ucsc") -> dict:
       - APADB 3.0      (APADB_3.0.hg38.bed.gz)
       - Any BED3+ file with chrom / start / end in the first three columns
     """
-    import gzip as _gz, pickle as _pkl
-    _cache = _site_cache_path(paths, chrom_style, "polya")
+    import gzip as _gz
+    import pickle as _pkl
+    _cache = _site_cache_path(paths, chrom_style, "polya_v2_stranded")
     if _cache and _cache.exists():
         try:
             with _gz.open(_cache, "rb") as fh:
@@ -2267,7 +2404,10 @@ def _load_polya_sites(paths, chrom_style: str = "ucsc") -> dict:
             logger.info("Loaded polyA site dict from cache: %s", _cache.name)
             return sites
         except Exception:
-            _cache.unlink(missing_ok=True)
+            try:
+                _cache.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     if isinstance(paths, str):
         paths = [paths]
@@ -2286,14 +2426,15 @@ def _load_polya_sites(paths, chrom_style: str = "ucsc") -> dict:
                 except ValueError:
                     continue
                 mid = (start + end) // 2
-                sites.setdefault(chrom, []).append(mid)
+                strand = parts[5] if len(parts) > 5 and parts[5] in {"+", "-"} else "."
+                sites.setdefault((chrom, strand), []).append(mid)
                 total += 1
         logger.info("Loaded polyA sites from %s", path)
     for chrom in sites:
         sites[chrom] = sorted(set(sites[chrom]))
     sites = _strip_chr_if_needed(sites, chrom_style)
     logger.info(
-        "Total polyA site positions: %d across %d contigs",
+        "Total polyA site positions: %d across %d contig/strand groups",
         sum(len(v) for v in sites.values()), len(sites),
     )
 
@@ -2310,8 +2451,7 @@ def _load_polya_sites(paths, chrom_style: str = "ucsc") -> dict:
 
 def _load_tss_sites(paths, chrom_style: str = "ucsc") -> dict:
     """
-    Load one or more CAGE peak / TSS BED files for the 5'-anchored
-    full-length metric.
+    Load one or more CAGE peak / TSS BED files for the 5'-anchored metric.
 
     Accepts a single path or list of paths. Format: BED3+ (chrom, start, end).
     Midpoint of each peak is used as the reference TSS position.
@@ -2325,8 +2465,9 @@ def _load_tss_sites(paths, chrom_style: str = "ucsc") -> dict:
       - ENCODE RAMPAGE peaks
       - Any BED3+ file
     """
-    import gzip as _gz, pickle as _pkl
-    _cache = _site_cache_path(paths, chrom_style, "tss")
+    import gzip as _gz
+    import pickle as _pkl
+    _cache = _site_cache_path(paths, chrom_style, "tss_v2_stranded")
     if _cache and _cache.exists():
         try:
             with _gz.open(_cache, "rb") as fh:
@@ -2334,7 +2475,10 @@ def _load_tss_sites(paths, chrom_style: str = "ucsc") -> dict:
             logger.info("Loaded TSS site dict from cache: %s", _cache.name)
             return sites
         except Exception:
-            _cache.unlink(missing_ok=True)
+            try:
+                _cache.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     if isinstance(paths, str):
         paths = [paths]
@@ -2352,13 +2496,14 @@ def _load_tss_sites(paths, chrom_style: str = "ucsc") -> dict:
                 except ValueError:
                     continue
                 mid = (start + end) // 2
-                sites.setdefault(chrom, []).append(mid)
+                strand = parts[5] if len(parts) > 5 and parts[5] in {"+", "-"} else "."
+                sites.setdefault((chrom, strand), []).append(mid)
         logger.info("Loaded TSS sites from %s", path)
     for chrom in sites:
         sites[chrom] = sorted(set(sites[chrom]))
     sites = _strip_chr_if_needed(sites, chrom_style)
     logger.info(
-        "Total TSS positions: %d across %d contigs",
+        "Total TSS positions: %d across %d contig/strand groups",
         sum(len(v) for v in sites.values()), len(sites),
     )
 
@@ -2406,12 +2551,10 @@ def _load_numt_bed(path: str) -> dict:
     Load a NUMT (Nuclear Mitochondrial DNA segment) BED file into a dict of
     contig → list of (start, end) tuples.
 
-    NUMTs are nuclear genome segments that are copies of mitochondrial DNA.
-    Reads from genuine mitochondrial transcripts may map to NUMT loci instead
-    of (or in addition to) chrM, and NUMT-derived reads may be erroneously
-    classified as mitochondrial. When a NUMT BED is provided, reads classified
-    as MITOCHONDRIAL are cross-checked: if the read overlaps a NUMT interval
-    in the nuclear genome, it is flagged as potentially NUMT-derived.
+    NUMTs are nuclear genome segments copied from mitochondrial DNA. This
+    loader records interval-set provenance only. A read-level NUMT call needs
+    competing nuclear/mitochondrial alignment evidence and is deliberately not
+    inferred from a BED overlap count.
 
     Compatible sources:
       - UCSC Table Browser: hg38 > Variation & Repeats > NUMTs
@@ -2438,24 +2581,38 @@ def _load_numt_bed(path: str) -> dict:
 
 def _write_run_outputs(sm, ct, result, output_dir: Path, sample_name: str,
                        cluster_df=None, intergenic_loci=None, platform=None) -> None:
-    import json
 
     # Sample-wide metrics TSV
     metrics_path = output_dir / f"{sample_name}.read_metrics.tsv"
     rows = [("metric", "value")]
-    for attr in ["n_reads_total", "n_reads_classified", "n_reads_unassigned",
-                 "n_cells", "noise_read_frac", "noise_base_frac",
+    for attr in ["n_records_total", "n_records_mapped", "n_records_unmapped",
+                 "n_alignments_classified", "n_reads_total", "n_reads_mapped", "n_reads_unmapped",
+                 "n_primary_mapped", "n_secondary", "n_supplementary",
+                 "n_qcfail", "n_duplicate", "n_reads_classified", "n_reads_unassigned",
+                 "n_cells", "broad_noncanonical_read_frac",
+                 "broad_noncanonical_base_frac", "artifact_candidate_read_frac",
+                 "artifact_candidate_base_frac", "noise_read_frac", "noise_base_frac",
+                 "noise_read_frac_strict", "noise_base_frac_strict",
                  "strand_concordance", "chimeric_read_frac",
-                 "multimapper_read_frac", "per_cell_noise_median",
+                 "multimapper_read_frac", "unmapped_read_frac", "low_mapq_read_frac",
+                 "mean_mapq", "mean_edit_distance", "softclip_base_frac",
+                 "per_cell_noise_median",
                  "per_cell_noise_iqr", "n_tso_invasion", "n_polya_priming",
-                 "n_noncanon_junction", "n_tso_concatemer"]:
-        rows.append((attr, getattr(sm, attr, "")))
+                 "n_noncanon_junction", "n_tso_concatemer", "n_discordant_pair",
+                 "n_low_mapq", "n_numt_intervals_loaded"]:
+        value = getattr(sm, attr, "")
+        rows.append((attr, "" if value is None else value))
     for cat_name, frac in sm.read_fracs.items():
         rows.append((f"read_frac_{cat_name}", f"{frac:.6f}"))
     for cat_name, frac in sm.base_fracs.items():
         rows.append((f"base_frac_{cat_name}", f"{frac:.6f}"))
     if sm.full_length_read_frac is not None:
         rows.append(("full_length_read_frac", f"{sm.full_length_read_frac:.6f}"))
+    for attr in ["three_prime_anchored_frac", "five_prime_anchored_frac",
+                 "both_ends_anchored_frac"]:
+        value = getattr(sm, attr, None)
+        if value is not None:
+            rows.append((attr, f"{value:.6f}"))
 
     with open(metrics_path, "w") as fh:
         for k, v in rows:
@@ -2489,20 +2646,23 @@ def _write_run_outputs(sm, ct, result, output_dir: Path, sample_name: str,
         loci_path = output_dir / f"{sample_name}.intergenic_loci.tsv"
         loci_rows = [
             {
-                "contig":               l.contig,
-                "start":                l.start,
-                "end":                  l.end,
-                "strand":               l.strand,
-                "n_reads":              l.n_reads,
-                "n_barcodes":           l.n_barcodes,
-                "has_splice_evidence":  l.has_splice_evidence,
-                "is_monoexonic":        l.is_monoexonic,
-                "polya_run_downstream": l.polya_run_downstream,
-                "near_polya_site":      l.near_polya_site,
-                "poisson_pvalue_adj":   l.poisson_pvalue_adj,
-                "category":             l.category.value,
+                "contig":               locus.contig,
+                "start":                locus.start,
+                "end":                  locus.end,
+                "strand":               locus.strand,
+                "n_reads":              locus.n_reads,
+                "n_barcodes":           locus.n_barcodes,
+                "has_splice_evidence":  locus.has_splice_evidence,
+                "is_monoexonic":        locus.is_monoexonic,
+                "polya_run_downstream": locus.polya_run_downstream,
+                "near_polya_site":      locus.near_polya_site,
+                "strand_fraction":      locus.strand_fraction,
+                "repeat_overlap_fraction": locus.repeat_overlap_fraction,
+                "poisson_pvalue":       locus.poisson_pvalue,
+                "poisson_pvalue_adj":   locus.poisson_pvalue_adj,
+                "category":             locus.category.value,
             }
-            for l in intergenic_loci
+            for locus in intergenic_loci
         ]
         pd.DataFrame(loci_rows).to_csv(loci_path, sep="\t", index=False)
         logger.info("Wrote %s", loci_path)
@@ -2563,10 +2723,60 @@ def _write_length_distributions(length_samples: dict, output_dir: Path, sample_n
                 fh.write(f"{L}\n")
 
 
+def _write_category_tagged_bam(
+    input_bam: Path,
+    output_bam: Path,
+    result,
+    intergenic_loci: list,
+) -> None:
+    """Write every input record, tagging classified primaries with ``sn``.
+
+    ``sn`` is a local-use SAM tag. Intergenic categories are resolved from the
+    final fixed-window calls so the output remains exact even when the profiler
+    used a reservoir to estimate aggregate category totals.
+    """
+    import pysam
+
+    from scnoisemeter.modules.pipeline import _read_key
+
+    output_bam.parent.mkdir(parents=True, exist_ok=True)
+    final_intergenic = {
+        (locus.contig, locus.start // INTERGENIC_LOCUS_WINDOW): locus.category
+        for locus in intergenic_loci
+    }
+    n_tagged = 0
+    with pysam.AlignmentFile(str(input_bam), "rb") as source:
+        with pysam.AlignmentFile(str(output_bam), "wb", template=source) as destination:
+            for read in source.fetch(until_eof=True):
+                assignment = None
+                if not (read.is_unmapped or read.is_secondary or read.is_supplementary):
+                    assignment = result.read_assignments.get(_read_key(read))
+                if assignment is not None:
+                    category, _barcode = assignment
+                    if category == ReadCategory.INTERGENIC_SPARSE:
+                        ref_end = read.reference_end
+                        if ref_end is not None:
+                            three_prime = read.reference_start if read.is_reverse else ref_end
+                            category = final_intergenic.get(
+                                (read.reference_name, three_prime // INTERGENIC_LOCUS_WINDOW),
+                                category,
+                            )
+                    read.set_tag("sn", category.value, value_type="Z")
+                    n_tagged += 1
+                destination.write(read)
+    pysam.index(str(output_bam))
+    logger.info("Wrote category-tagged BAM (%d alignments): %s", n_tagged, output_bam)
+
+
 def _write_compare_outputs(results: dict, output_dir: Path, label_a: str, label_b: str) -> None:
-    """Write side-by-side metrics TSV and statistical comparison."""
+    """Write matched read retention/transitions and paired cell effect sizes.
+
+    No read-level chi-squared p-values are produced: pre/post-filter BAMs are
+    dependent, and reads nested within UMIs/cells are not experimental units.
+    """
+    from collections import Counter
     import pandas as pd
-    from scipy.stats import chi2_contingency
+    import numpy as np
 
     sm_a, ct_a, _ = results[label_a]
     sm_b, ct_b, _ = results[label_b]
@@ -2588,53 +2798,99 @@ def _write_compare_outputs(results: dict, output_dir: Path, label_a: str, label_
                 delta = ""
             fh.write(f"{k}\t{va}\t{vb}\t{delta}\n")
 
-    # Paired McNemar-style proportion tests per category
-    # Note: BAM-B is a subset of BAM-A (post-filter ⊆ pre-filter).
-    # We use a chi-squared test on the contingency table of read counts.
+    # Descriptive composition effects plus paired-cell bootstrap intervals.
+    common_cells = sorted(set(ct_a.df.index) & set(ct_b.df.index))
+    rng = np.random.default_rng(0)
     stats_rows = []
-    for cat in ReadCategory:
-        n_a = sm_a.n_reads_classified * sm_a.read_fracs.get(cat.value, 0)
-        n_b = sm_b.n_reads_classified * sm_b.read_fracs.get(cat.value, 0)
-        total_a = sm_a.n_reads_classified
-        total_b = sm_b.n_reads_classified
-        if total_a == 0 or total_b == 0:
-            continue
-        contingency = [[int(n_a), int(total_a - n_a)],
-                       [int(n_b), int(total_b - n_b)]]
-        try:
-            chi2, p, _, _ = chi2_contingency(contingency)
-        except Exception:
-            chi2, p = float("nan"), float("nan")
+    for cat in CATEGORY_ORDER:
+        frac_a = sm_a.read_fracs.get(cat.value, 0.0)
+        frac_b = sm_b.read_fracs.get(cat.value, 0.0)
+        paired_median = ci_low = ci_high = float("nan")
+        col = f"read_frac_{cat.value}"
+        if common_cells and col in ct_a.df and col in ct_b.df:
+            deltas = (
+                ct_b.df.loc[common_cells, col].to_numpy(float)
+                - ct_a.df.loc[common_cells, col].to_numpy(float)
+            )
+            paired_median = float(np.median(deltas))
+            if len(deltas) > 1:
+                boots = np.empty(1000, dtype=float)
+                for i in range(len(boots)):
+                    boots[i] = np.median(rng.choice(deltas, size=len(deltas), replace=True))
+                ci_low, ci_high = map(float, np.quantile(boots, [0.025, 0.975]))
         stats_rows.append({
             "category": cat.value,
-            f"frac_{label_a}": sm_a.read_fracs.get(cat.value, 0),
-            f"frac_{label_b}": sm_b.read_fracs.get(cat.value, 0),
-            "delta": sm_b.read_fracs.get(cat.value, 0) - sm_a.read_fracs.get(cat.value, 0),
-            "chi2": chi2,
-            "p_value": p,
+            f"frac_{label_a}": frac_a,
+            f"frac_{label_b}": frac_b,
+            "delta": frac_b - frac_a,
+            "n_paired_cells": len(common_cells),
+            "paired_cell_median_delta": paired_median,
+            "paired_cell_median_ci_low": ci_low,
+            "paired_cell_median_ci_high": ci_high,
         })
 
-    if stats_rows:
-        import pandas as pd
-        stats_df = pd.DataFrame(stats_rows)
-        # Bonferroni correction
-        n_tests = stats_df["p_value"].notna().sum()
-        stats_df["p_adjusted"] = (stats_df["p_value"] * n_tests).clip(upper=1.0)
-        stats_path = output_dir / "comparison.stats.tsv"
-        stats_df.to_csv(stats_path, sep="\t", index=False)
-        logger.info("Wrote %s", stats_path)
+    stats_df = pd.DataFrame(stats_rows)
+    stats_path = output_dir / "comparison.stats.tsv"
+    stats_df.to_csv(stats_path, sep="\t", index=False)
 
-        # HTML comparison report
-        sm_a, ct_a, result_a = results[label_a]
-        sm_b, ct_b, result_b = results[label_b]
-        report_path = output_dir / "comparison.report.html"
-        write_compare_report(
-            sm_a, sm_b, ct_a, ct_b,
-            result_a.length_samples, result_b.length_samples,
-            stats_df,
-            report_path,
+    # Exact read-key matching for subset retention and category transitions.
+    _sm_a, _ct_a, result_a = results[label_a]
+    _sm_b, _ct_b, result_b = results[label_b]
+    assignments_a = result_a.read_assignments
+    assignments_b = result_b.read_assignments
+    keys_a, keys_b = set(assignments_a), set(assignments_b)
+    shared_keys = keys_a & keys_b
+
+    retention_rows = []
+    for cat in CATEGORY_ORDER:
+        cat_keys = {k for k, (c, _cb) in assignments_a.items() if c == cat}
+        n_initial = len(cat_keys)
+        n_retained = len(cat_keys & keys_b)
+        n_same = sum(
+            1 for key in cat_keys & shared_keys
+            if assignments_b[key][0] == cat
         )
-        logger.info("Wrote %s", report_path)
+        retention_rows.append({
+            "category_a": cat.value,
+            "n_in_a": n_initial,
+            "n_present_in_b": n_retained,
+            "retention_fraction": n_retained / n_initial if n_initial else float("nan"),
+            "n_same_category_in_b": n_same,
+            "same_category_fraction": n_same / n_retained if n_retained else float("nan"),
+        })
+    pd.DataFrame(retention_rows).to_csv(
+        output_dir / "comparison.retention.tsv", sep="\t", index=False
+    )
+
+    transitions = Counter(
+        (assignments_a[key][0].value, assignments_b[key][0].value)
+        for key in shared_keys
+    )
+    transition_rows = [
+        {"category_a": a, "category_b": b, "n_reads": n}
+        for (a, b), n in sorted(transitions.items())
+    ]
+    pd.DataFrame(
+        transition_rows, columns=["category_a", "category_b", "n_reads"]
+    ).to_csv(output_dir / "comparison.transitions.tsv", sep="\t", index=False)
+
+    summary_path = output_dir / "comparison.matching.tsv"
+    pd.DataFrame([{
+        "n_read_keys_a": len(keys_a),
+        "n_read_keys_b": len(keys_b),
+        "n_shared": len(shared_keys),
+        "n_only_a": len(keys_a - keys_b),
+        "n_only_b": len(keys_b - keys_a),
+    }]).to_csv(summary_path, sep="\t", index=False)
+
+    report_path = output_dir / "comparison.report.html"
+    write_compare_report(
+        sm_a, sm_b, ct_a, ct_b,
+        result_a.length_samples, result_b.length_samples,
+        stats_df,
+        report_path,
+    )
+    logger.info("Wrote matched comparison outputs to %s", output_dir)
 
 
 # ---------------------------------------------------------------------------

@@ -17,6 +17,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from scnoisemeter.constants import (
+    ADAPTIVE_PVALUE_THRESHOLD,
     CATEGORY_ORDER,
     LENGTH_BIN_LABELS_LONG,
     LENGTH_BIN_LABELS_SHORT,
@@ -32,14 +33,15 @@ logger = logging.getLogger(__name__)
 
 CATEGORY_COLOURS = {
     ReadCategory.EXONIC_SENSE:        "#2ecc71",   # green  — signal
-    ReadCategory.EXONIC_ANTISENSE:    "#e74c3c",   # red    — clear noise
+    ReadCategory.EXONIC_ANTISENSE:    "#e74c3c",   # red    — opposite orientation
     ReadCategory.INTRONIC_JXNSPAN:    "#f39c12",   # amber  — ambiguous
-    ReadCategory.INTRONIC_PURE:       "#e67e22",   # orange — likely noise
+    ReadCategory.INTRONIC_PURE:       "#e67e22",   # orange — intronic
     ReadCategory.INTRONIC_BOUNDARY:   "#d35400",   # dark orange
-    ReadCategory.INTERGENIC_SPARSE:   "#95a5a6",   # grey   — background noise
+    ReadCategory.INTERGENIC_SPARSE:   "#95a5a6",   # grey   — not enriched
     ReadCategory.INTERGENIC_REPEAT:   "#7f8c8d",   # dark grey
     ReadCategory.INTERGENIC_HOTSPOT:  "#c0392b",   # dark red — artifact
     ReadCategory.INTERGENIC_NOVEL:    "#8e44ad",   # purple — candidate biology
+    ReadCategory.INTERGENIC_ENRICHED: "#7f8c8d",   # grey — unresolved enrichment
     ReadCategory.CHIMERIC:            "#2980b9",   # blue   — chimeric
     ReadCategory.MITOCHONDRIAL:       "#1abc9c",   # teal
     ReadCategory.MULTIMAPPER:         "#bdc3c7",   # light grey
@@ -60,6 +62,7 @@ CATEGORY_LABELS = {
     ReadCategory.INTERGENIC_REPEAT:   "Intergenic repeat",
     ReadCategory.INTERGENIC_HOTSPOT:  "Intergenic hotspot",
     ReadCategory.INTERGENIC_NOVEL:    "Intergenic novel",
+    ReadCategory.INTERGENIC_ENRICHED: "Intergenic enriched, unresolved",
     ReadCategory.CHIMERIC:            "Chimeric",
     ReadCategory.MITOCHONDRIAL:       "Mitochondrial",
     ReadCategory.MULTIMAPPER:         "Multi-mapper",
@@ -76,20 +79,21 @@ CATEGORY_CRITERIA: dict[ReadCategory, str] = {
     ReadCategory.SECONDARY:           "SAM flag 0x100 — duplicate multi-mapper record, skipped.",
     ReadCategory.SUPPLEMENTARY:       "SAM flag 0x800 — split alignment partner, passed to chimeric detector only.",
     ReadCategory.MULTIMAPPER:         "NH tag > 1: aligns equally well to multiple genomic loci.",
-    ReadCategory.CHIMERIC:            "SA tag present AND (different chromosome, OR opposite strand, OR same-strand distance > chimeric threshold).",
+    ReadCategory.CHIMERIC:            "SA evidence is inter-chromosomal, strand-discordant, or incompatible in query/genomic order; extreme paired insert size is a fallback.",
     ReadCategory.MITOCHONDRIAL:       "Maps to the mitochondrial chromosome (chrM / MT).",
     ReadCategory.EXONIC_SENSE:        "≥1 aligned base overlaps an annotated exon on the same strand as the read.",
-    ReadCategory.EXONIC_ANTISENSE:    "≥1 aligned base overlaps an annotated exon on the OPPOSITE strand — indicates strand-switching or genuine antisense transcription.",
-    ReadCategory.INTRONIC_JXNSPAN:    "Majority of bases within a gene intron (sense strand) AND CIGAR N at or near a known splice site — candidate intron retention or novel isoform.",
+    ReadCategory.EXONIC_ANTISENSE:    "≥1 aligned base overlaps an annotated exon on the opposite strand; interpretation depends on protocol strandedness and biology.",
+    ReadCategory.INTRONIC_JXNSPAN:    "Intronic bases on an alignment with a CIGAR N; exact junction and motif evidence are checked independently.",
     ReadCategory.INTRONIC_BOUNDARY:   "Spans an exon–intron boundary (sense) with no CIGAR N at the junction — candidate incomplete reverse transcription.",
-    ReadCategory.INTRONIC_PURE:       "All aligned bases within an intron body (sense), no CIGAR N anywhere — likely pre-mRNA, nuclear contamination, or incomplete RT.",
-    ReadCategory.INTERGENIC_REPEAT:   "Outside all gene bodies AND overlaps a RepeatMasker element — likely transposable-element-derived transcription.",
-    ReadCategory.INTERGENIC_HOTSPOT:  "Intergenic, above Poisson significance threshold, monoexonic reads, AND ≥6 consecutive A bases in reference downstream of modal 3′ end — internal polyA priming artifact.",
+    ReadCategory.INTRONIC_PURE:       "Intronic alignment without CIGAR N or an exon–intron boundary; can represent pre-mRNA or technical capture.",
+    ReadCategory.INTERGENIC_REPEAT:   "Outside gene bodies with ≥50% sampled aligned span overlapping supplied repeat intervals.",
+    ReadCategory.INTERGENIC_HOTSPOT:  "Enriched fixed window, monoexonic, with strand-aware genomic A/T-run context and no nearby matched polyA site — internal-priming candidate.",
     ReadCategory.INTERGENIC_NOVEL:    "Intergenic, above significance threshold, strand-consistent, multi-barcode, AND splice or polyA evidence — candidate unannotated transcript.",
-    ReadCategory.INTERGENIC_SPARSE:   "Intergenic AND below the adaptive Poisson significance threshold — background noise.",
+    ReadCategory.INTERGENIC_ENRICHED: "Fixed intergenic window with significant enrichment but insufficient positive evidence for either internal priming or a transcript candidate.",
+    ReadCategory.INTERGENIC_SPARSE:   "Intergenic window not promoted by the global-rate enrichment/support screen.",
     ReadCategory.AMBIGUOUS:           "Maps to a region where multiple genes overlap and the sub-type (cod/cod or cod/ncod) cannot be determined.",
-    ReadCategory.AMBIGUOUS_COD_COD:   "Maps to a region where two protein-coding genes have genuinely overlapping exons — unresolvable at read level.",
-    ReadCategory.AMBIGUOUS_COD_NCOD:  "Maps to a region where a protein-coding gene exon overlaps a non-coding gene (lncRNA / pseudogene) exon.",
+    ReadCategory.AMBIGUOUS_COD_COD:   "Maps to a same-strand region shared by two protein-coding gene bodies.",
+    ReadCategory.AMBIGUOUS_COD_NCOD:  "Maps to a same-strand region shared by coding and non-coding gene bodies.",
     ReadCategory.UNASSIGNED:          "CB tag absent when a whitelist was provided, or CB tag not in the whitelist.",
 }
 
@@ -100,14 +104,13 @@ CATEGORY_CRITERIA: dict[ReadCategory, str] = {
 
 def _noise_donut(sm: SampleMetrics) -> go.Figure:
     """
-    Summary overview: key scalar metrics + horizontal bar of noise categories only.
+    Summary overview: key scalar metrics plus non-exonic category bars.
 
-    When exonic sense > 80%, a standard pie collapses all noise into an
+    When exonic sense > 80%, a standard pie collapses other categories into an
     illegible sliver.  Instead we show:
-      - Four key numbers as annotations (exonic sense, total noise,
-        strand concordance, chimeric rate)
+      - Key composition numbers as annotations
       - A horizontal bar chart of ONLY the non-exonic-sense, non-unassigned
-        categories, giving each noise category its own full-width bar.
+        categories, giving each category its own full-width bar.
     """
     exclude = {
         ReadCategory.EXONIC_SENSE, ReadCategory.UNASSIGNED,
@@ -121,16 +124,14 @@ def _noise_donut(sm: SampleMetrics) -> go.Figure:
     colors = [CATEGORY_COLOURS[c] for c in cats]
 
     es_frac        = sm.read_fracs.get(ReadCategory.EXONIC_SENSE.value, 0)
-    noise_frac        = sm.noise_read_frac or 0
-    noise_frac_strict = getattr(sm, "noise_read_frac_strict", noise_frac)
+    noise_frac = getattr(sm, "broad_noncanonical_read_frac", sm.noise_read_frac) or 0
+    noise_frac_strict = getattr(sm, "artifact_candidate_read_frac", sm.noise_read_frac_strict)
     strand_conc    = sm.strand_concordance
-    chimeric_rate  = sm.chimeric_read_frac or 0
-
     max_val = max(values) if values else 0.01
 
     fig = go.Figure()
 
-    # Horizontal bars for noise/ambiguous categories
+    # Horizontal bars for non-exonic/ambiguous categories
     criteria = [CATEGORY_CRITERIA.get(c, "") for c in cats]
     hover = [
         f"<b>{lbl}</b><br>{v:.2%}<br><i>{crit}</i>"
@@ -152,14 +153,14 @@ def _noise_donut(sm: SampleMetrics) -> go.Figure:
             text=(
                 f"Read classification overview — "
                 f"Exonic sense: <b>{es_frac:.1%}</b>  |  "
-                f"Noise (conservative): <b>{noise_frac:.1%}</b>  |  "
-                f"Noise (strict): <b>{noise_frac_strict:.1%}</b>  |  "
+                f"Broad non-canonical: <b>{noise_frac:.1%}</b>  |  "
+                f"Artifact candidates: <b>{noise_frac_strict:.1%}</b>  |  "
                 f"Strand concordance: <b>{strand_conc:.1%}</b>"
                 if strand_conc else
                 f"Read classification overview — "
                 f"Exonic sense: <b>{es_frac:.1%}</b>  |  "
-                f"Noise (conservative): <b>{noise_frac:.1%}</b>  |  "
-                f"Noise (strict): <b>{noise_frac_strict:.1%}</b>"
+                f"Broad non-canonical: <b>{noise_frac:.1%}</b>  |  "
+                f"Artifact candidates: <b>{noise_frac_strict:.1%}</b>"
             ),
             x=0.5, font=dict(size=12),
         ),
@@ -197,7 +198,7 @@ def _fraction_bar(fracs: dict, title: str) -> go.Figure:
         return go.Figure()
 
     max_val = max(values)
-    max_label_len = max(len(l) for l in labels)
+    max_label_len = max(len(label) for label in labels)
     left_margin = max(220, max_label_len * 8)
 
     criteria = [CATEGORY_CRITERIA.get(c, "") for c in cats]
@@ -305,7 +306,7 @@ def _length_stratified_chart(strat_df: "pd.DataFrame") -> go.Figure:
     # and chart top — well above the 8 px / 12 px minimums required.
     fig.update_layout(
         barmode="stack",
-        title=dict(text="Noise by read length", x=0.5, y=0.98, yanchor="top"),
+        title=dict(text="Broad non-canonical composition by read length", x=0.5, y=0.98, yanchor="top"),
         xaxis=dict(title="Fraction of bin", tickformat=".0%", range=[0, 1.0]),
         yaxis=dict(autorange="reversed", automargin=True),
         legend=dict(
@@ -321,7 +322,7 @@ def _length_stratified_chart(strat_df: "pd.DataFrame") -> go.Figure:
 
 
 def _per_cell_violin(ct: CellTable) -> go.Figure:
-    """Violin + strip plot of per-cell noise_read_frac distribution."""
+    """Violin + strip plot of the legacy broad-composition column."""
     df = ct.df
     if "noise_read_frac" not in df.columns:
         return go.Figure()
@@ -335,7 +336,7 @@ def _per_cell_violin(ct: CellTable) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(go.Violin(
         y=vals,
-        name="noise fraction",
+        name="broad non-canonical",
         box_visible=True,
         meanline_visible=True,
         fillcolor="#e74c3c",
@@ -345,8 +346,8 @@ def _per_cell_violin(ct: CellTable) -> go.Figure:
         spanmode="hard",
     ))
     fig.update_layout(
-        title=dict(text="Per-cell noise fraction distribution (reads)", x=0.5),
-        yaxis=dict(title="Noise read fraction", tickformat=".1%"),
+        title=dict(text="Per-cell broad non-canonical composition", x=0.5),
+        yaxis=dict(title="Read fraction", tickformat=".1%"),
         showlegend=False,
         height=380,
         margin=dict(t=60, b=40, l=70, r=20),
@@ -359,14 +360,12 @@ def _length_distributions(length_samples: dict) -> go.Figure:
     Read length distributions split into two panels:
       Left  — signal categories (exonic sense, intronic junction-spanning,
                ambiguous) where length reflects transcript biology
-      Right — noise categories (chimeric, intronic pure, intergenic, antisense)
-               where length reflects artifact molecule size
+      Right — other categories (chimeric, intronic, intergenic, antisense)
 
     Splitting avoids the problem of exonic-sense (many reads, broad range)
-    completely dominating the plot and making all noise categories invisible.
+    completely dominating the plot and making all other categories invisible.
     Each panel uses its own y-axis scale.
     """
-    from plotly.subplots import make_subplots
 
     SIGNAL_CATS = {
         ReadCategory.EXONIC_SENSE,
@@ -385,6 +384,7 @@ def _length_distributions(length_samples: dict) -> go.Figure:
         ReadCategory.INTERGENIC_REPEAT,
         ReadCategory.INTERGENIC_HOTSPOT,
         ReadCategory.INTERGENIC_NOVEL,
+        ReadCategory.INTERGENIC_ENRICHED,
     }
 
     # Only include categories with actual data
@@ -417,7 +417,7 @@ def _length_distributions(length_samples: dict) -> go.Figure:
 
     fig = make_subplots(
         rows=1, cols=2,
-        subplot_titles=["Signal categories", "Noise categories"],
+        subplot_titles=["Signal categories", "Other categories"],
         horizontal_spacing=0.10,
     )
 
@@ -485,7 +485,7 @@ def _insert_size_distribution(insert_sizes: dict) -> go.Figure:
     if noise_sizes:
         fig.add_trace(go.Histogram(
             x=noise_sizes,
-            name="Noise (all other categories)",
+            name="Other classified categories",
             marker_color="#e74c3c",
             opacity=0.6,
             nbinsx=100,
@@ -614,12 +614,12 @@ def _category_legend() -> go.Figure:
 
 def _intergenic_loci_plots(intergenic_loci: list) -> "list[go.Figure]":
     """
-    Return two figures for significant intergenic loci:
+    Return two figures for intergenic windows:
 
     1. Horizontal bar chart — top 20 loci by read count (immediately readable).
     2. Scatter plot — adj. p-value (x) vs read count (y, log scale) for all
        loci, with y-jitter so overlapping points spread apart.  Point size is
-       proportional to n_barcodes.  A dashed significance line marks p=0.05.
+       proportional to n_barcodes. A dashed line marks the configured adjusted-p threshold.
     """
     if not intergenic_loci:
         return []
@@ -632,27 +632,33 @@ def _intergenic_loci_plots(intergenic_loci: list) -> "list[go.Figure]":
     cat_colours = {
         ReadCategory.INTERGENIC_HOTSPOT: "#c0392b",
         ReadCategory.INTERGENIC_NOVEL:   "#8e44ad",
+        ReadCategory.INTERGENIC_ENRICHED:"#7f8c8d",
         ReadCategory.INTERGENIC_REPEAT:  "#7f8c8d",
         ReadCategory.INTERGENIC_SPARSE:  "#bdc3c7",
     }
     cat_labels = {
         ReadCategory.INTERGENIC_HOTSPOT: "Internal priming hotspot",
         ReadCategory.INTERGENIC_NOVEL:   "Candidate novel gene",
+        ReadCategory.INTERGENIC_ENRICHED:"Enriched, unresolved",
         ReadCategory.INTERGENIC_REPEAT:  "Repeat-derived",
         ReadCategory.INTERGENIC_SPARSE:  "Sparse (below threshold)",
     }
 
     # ── Figure 1: top-20 bar chart ────────────────────────────────────────────
-    top20 = sorted(intergenic_loci, key=lambda l: l.n_reads, reverse=True)[:20]
-    bar_labels = [f"{l.contig}:{l.start:,}-{l.end:,}" for l in top20]
-    bar_values = [l.n_reads for l in top20]
-    bar_colours = [cat_colours.get(l.category, "#95a5a6") for l in top20]
+    top20 = sorted(intergenic_loci, key=lambda locus: locus.n_reads, reverse=True)[:20]
+    bar_labels = [
+        f"{locus.contig}:{locus.start:,}-{locus.end:,}" for locus in top20
+    ]
+    bar_values = [locus.n_reads for locus in top20]
+    bar_colours = [
+        cat_colours.get(locus.category, "#95a5a6") for locus in top20
+    ]
     bar_hover = [
-        f"{l.contig}:{l.start:,}-{l.end:,}<br>"
-        f"Reads: {l.n_reads}<br>Barcodes: {l.n_barcodes}<br>"
-        f"Category: {cat_labels.get(l.category, l.category.value)}<br>"
-        f"Adj. p: {l.poisson_pvalue_adj:.2e}"
-        for l in top20
+        f"{locus.contig}:{locus.start:,}-{locus.end:,}<br>"
+        f"Reads: {locus.n_reads}<br>Barcodes: {locus.n_barcodes}<br>"
+        f"Category: {cat_labels.get(locus.category, locus.category.value)}<br>"
+        f"Adj. p: {locus.poisson_pvalue_adj:.2e}"
+        for locus in top20
     ]
 
     fig_bar = go.Figure(go.Bar(
@@ -674,7 +680,9 @@ def _intergenic_loci_plots(intergenic_loci: list) -> "list[go.Figure]":
 
     # ── Figure 2: scatter — adj. p-value vs read count, jittered ─────────────
     # Compute jitter range: ±5% of the log10 range of read counts
-    all_reads = [l.n_reads for l in intergenic_loci if l.n_reads > 0]
+    all_reads = [
+        locus.n_reads for locus in intergenic_loci if locus.n_reads > 0
+    ]
     if all_reads:
         log_min = math.log10(max(1, min(all_reads)))
         log_max = math.log10(max(all_reads))
@@ -691,19 +699,19 @@ def _intergenic_loci_plots(intergenic_loci: list) -> "list[go.Figure]":
     fig_sc = go.Figure()
     for cat, loci in by_cat.items():
         x_vals, y_vals, sizes, hover = [], [], [], []
-        for l in loci:
-            pval = max(l.poisson_pvalue_adj, 1e-300)  # avoid log(0)
+        for locus in loci:
+            pval = max(locus.poisson_pvalue_adj, 1e-300)  # avoid log(0)
             jitter = rng.uniform(-jitter_scale, jitter_scale)
-            log_reads = math.log10(max(1, l.n_reads))
+            log_reads = math.log10(max(1, locus.n_reads))
             x_vals.append(pval)
             y_vals.append(10 ** (log_reads + jitter))
-            sizes.append(max(6, min(24, l.n_barcodes * 2 + 4)))
+            sizes.append(max(6, min(24, locus.n_barcodes * 2 + 4)))
             hover.append(
-                f"{l.contig}:{l.start:,}-{l.end:,}<br>"
-                f"Reads: {l.n_reads}<br>Barcodes: {l.n_barcodes}<br>"
-                f"Adj. p: {l.poisson_pvalue_adj:.2e}<br>"
-                f"polyA downstream: {l.polya_run_downstream}<br>"
-                f"Near polyA site: {l.near_polya_site}"
+                f"{locus.contig}:{locus.start:,}-{locus.end:,}<br>"
+                f"Reads: {locus.n_reads}<br>Barcodes: {locus.n_barcodes}<br>"
+                f"Adj. p: {locus.poisson_pvalue_adj:.2e}<br>"
+                f"polyA downstream: {locus.polya_run_downstream}<br>"
+                f"Near polyA site: {locus.near_polya_site}"
             )
         fig_sc.add_trace(go.Scatter(
             x=x_vals,
@@ -720,18 +728,18 @@ def _intergenic_loci_plots(intergenic_loci: list) -> "list[go.Figure]":
             hoverinfo="text",
         ))
 
-    # Significance threshold line at adj. p-value = 0.05
+    # Configured adjusted-p threshold.
     fig_sc.add_shape(
         type="line",
-        x0=0.05, x1=0.05,
+        x0=ADAPTIVE_PVALUE_THRESHOLD, x1=ADAPTIVE_PVALUE_THRESHOLD,
         y0=0, y1=1,
         xref="x", yref="paper",
         line=dict(color="#e74c3c", dash="dash", width=1.5),
     )
     fig_sc.add_annotation(
-        x=0.05, y=0.98,
+        x=ADAPTIVE_PVALUE_THRESHOLD, y=0.98,
         xref="x", yref="paper",
-        text="p = 0.05",
+        text=f"adjusted p = {ADAPTIVE_PVALUE_THRESHOLD:g}",
         showarrow=False,
         font=dict(size=10, color="#e74c3c"),
         xanchor="left",
@@ -739,7 +747,7 @@ def _intergenic_loci_plots(intergenic_loci: list) -> "list[go.Figure]":
 
     fig_sc.update_layout(
         title=dict(
-            text="Significant intergenic loci — adj. p-value vs read count"
+            text="Intergenic windows — adjusted p-value vs read count"
                  "<br><sup>Point size ∝ distinct barcodes · y-axis jittered for readability</sup>",
             x=0.5,
         ),
@@ -759,15 +767,18 @@ def _intergenic_loci_plots(intergenic_loci: list) -> "list[go.Figure]":
 
 def _cluster_noise_plot(cluster_df: "pd.DataFrame") -> go.Figure:
     """
-    Grouped bar chart showing median noise fraction per cluster,
-    decomposed into the major noise sub-categories.
-    Clusters are sorted by total noise fraction descending.
+    Grouped bar chart showing selected median category fractions per cluster.
+    Clusters are sorted by the legacy broad-composition column.
     """
     if cluster_df.empty:
         return go.Figure()
 
-    # Sort clusters by total noise fraction
-    sort_col = "median_noise_read_frac"
+    # Sort clusters by broad non-canonical fraction
+    sort_col = (
+        "median_broad_noncanonical_read_frac"
+        if "median_broad_noncanonical_read_frac" in cluster_df.columns
+        else "median_noise_read_frac"
+    )
     if sort_col in cluster_df.columns:
         cluster_df = cluster_df.sort_values(sort_col, ascending=False)
 
@@ -794,9 +805,9 @@ def _cluster_noise_plot(cluster_df: "pd.DataFrame") -> go.Figure:
 
     fig.update_layout(
         barmode="stack",
-        title=dict(text="Per-cluster noise decomposition (median read fraction)", x=0.5),
+        title=dict(text="Per-cluster category decomposition (median read fraction)", x=0.5),
         xaxis=dict(title="Cluster", tickangle=-35),
-        yaxis=dict(title="Median noise fraction", tickformat=".1%"),
+        yaxis=dict(title="Median broad non-canonical fraction", tickformat=".1%"),
         legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.3),
         height=460,
         margin=dict(t=60, b=140, l=70, r=20),
@@ -806,7 +817,7 @@ def _cluster_noise_plot(cluster_df: "pd.DataFrame") -> go.Figure:
 
 def _cluster_heatmap(cluster_df: "pd.DataFrame") -> go.Figure:
     """
-    Heatmap of all noise sub-category fractions across clusters.
+    Heatmap of available category and aggregate fractions across clusters.
     Each cell shows the median fraction for that cluster × category.
     """
     if cluster_df.empty:
@@ -860,7 +871,7 @@ def _comparison_bars(sm_a: SampleMetrics, sm_b: SampleMetrics) -> go.Figure:
     vals_a  = [sm_a.read_fracs.get(c.value, 0) for c in cats]
     vals_b  = [sm_b.read_fracs.get(c.value, 0) for c in cats]
     max_val = max(vals_a + vals_b) if (vals_a or vals_b) else 1
-    max_label = max((len(l) for l in labels), default=20)
+    max_label = max((len(label) for label in labels), default=20)
     left_margin = max(260, max_label * 8)
 
     fig = go.Figure()
@@ -904,9 +915,9 @@ def _delta_plot(
     stats_df: Optional[pd.DataFrame],
 ) -> go.Figure:
     """
-    Horizontal delta plot: B minus A per category, with significance markers.
+    Horizontal descriptive delta plot: B minus A per category.
     Horizontal layout gives long category names the space they need.
-    Red bars = B higher than A (more noise); green = A higher (less noise).
+    Red bars = B higher than A; green = B lower than A.
     """
     cats = [c for c in CATEGORY_ORDER
             if sm_a.read_fracs.get(c.value, 0) > 0.0005
@@ -916,16 +927,8 @@ def _delta_plot(
               for c in cats]
     colors = ["#e74c3c" if d > 0 else "#2ecc71" for d in deltas]
 
-    # Significance stars
-    stars = [""] * len(cats)
-    if stats_df is not None and "category" in stats_df.columns and "p_adjusted" in stats_df.columns:
-        sig_map = dict(zip(stats_df["category"], stats_df["p_adjusted"]))
-        for i, cat in enumerate(cats):
-            p = sig_map.get(cat.value, 1.0)
-            stars[i] = "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else ""
-
-    texts = [f"{d:+.2%}{' ' + s if s else ''}".strip() for d, s in zip(deltas, stars)]
-    max_label = max((len(l) for l in labels), default=20)
+    texts = [f"{d:+.2%}" for d in deltas]
+    max_label = max((len(label) for label in labels), default=20)
     left_margin = max(260, max_label * 8)
     abs_max = max((abs(d) for d in deltas), default=0.01)
 
@@ -943,8 +946,8 @@ def _delta_plot(
         title=dict(
             text=(
                 f"Δ read fraction ({sm_b.sample_name} − {sm_a.sample_name})<br>"
-                "<sup>* p&lt;0.05  ** p&lt;0.01  *** p&lt;0.001 "
-                "(Bonferroni-corrected)</sup>"
+                "<sup>Descriptive composition effect; paired-cell bootstrap "
+                "intervals are written to comparison.stats.tsv</sup>"
             ),
             x=0.5,
         ),
@@ -980,8 +983,8 @@ def _comparison_violin(ct_a: CellTable, ct_b: CellTable) -> go.Figure:
             points="outliers",
         ))
     fig.update_layout(
-        title=dict(text="Per-cell noise fraction — comparison", x=0.5),
-        yaxis=dict(title="Noise read fraction", tickformat=".1%"),
+        title=dict(text="Per-cell broad non-canonical composition — comparison", x=0.5),
+        yaxis=dict(title="Read fraction", tickformat=".1%"),
         height=400,
         margin=dict(t=60, b=40, l=70, r=20),
     )
