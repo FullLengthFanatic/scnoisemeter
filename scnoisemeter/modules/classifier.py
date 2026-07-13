@@ -383,15 +383,15 @@ class ReadClassifier:
     def _is_multimapper(read: pysam.AlignedSegment) -> bool:
         """Detect explicit evidence that a primary alignment is non-unique.
 
-        ``NH`` is preferred when present.  It is optional in SAM and absent
-        from standard minimap2 output, so MAPQ=0 and a non-empty XA tag are
-        conservative fallbacks.  We deliberately do not infer multi-mapping
-        from a low but non-zero MAPQ because scales are aligner-specific.
+        ``NH`` is preferred when present.  A non-empty ``XA`` tag is also
+        explicit alternative-hit evidence when ``NH`` is absent.  MAPQ is not
+        used here: it is a confidence score, not a count of reported hits, and
+        its conventions differ between aligners.  Low-MAPQ records are
+        reported through an independent QC flag instead of replacing their
+        genomic category.
         """
         if read.has_tag(BamTag.NH):
             return int(read.get_tag(BamTag.NH)) > 1
-        if int(read.mapping_quality or 0) == 0:
-            return True
         if read.has_tag("XA"):
             return bool(str(read.get_tag("XA")).strip())
         return False
