@@ -80,7 +80,7 @@ logger = logging.getLogger(__name__)
 # Minimum fraction of reads on the dominant strand to call strand-consistency
 STRAND_CONSISTENCY_MIN = 0.80
 
-# Minimum distinct barcodes for a novel-gene candidate
+# Minimum distinct barcodes for an unannotated-transcript candidate
 MIN_NOVEL_DISTINCT_BARCODES = 3
 
 

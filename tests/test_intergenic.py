@@ -501,6 +501,30 @@ class TestNewConstants:
         assert ReadCategory.INTERGENIC_ENRICHED in CATEGORY_COLOURS
         assert ReadCategory.INTERGENIC_ENRICHED in CATEGORY_LABELS
 
+    def test_intergenic_report_does_not_overstate_transcript_evidence(self):
+        from scnoisemeter.constants import ReadCategory
+        from scnoisemeter.modules.intergenic_profiler import IntergenicLocus
+        from scnoisemeter.modules.report_figures import _intergenic_loci_plots
+
+        locus = IntergenicLocus(
+            contig="chr1",
+            start=1_000,
+            end=1_500,
+            strand="+",
+            n_reads=20,
+            n_barcodes=4,
+            has_splice_evidence=True,
+            is_monoexonic=False,
+            polya_run_downstream=False,
+            near_polya_site=True,
+            poisson_pvalue=1e-8,
+            poisson_pvalue_adj=1e-4,
+            category=ReadCategory.INTERGENIC_NOVEL,
+        )
+
+        _, scatter = _intergenic_loci_plots([locus])
+        assert scatter.data[0].name == "Candidate unannotated transcript"
+
 
 # ---------------------------------------------------------------------------
 # Tests for new features: intergenic profiler integration,
