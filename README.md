@@ -6,7 +6,7 @@ Barcode-aware alignment artifact and read-distribution QC for single-cell RNA-se
 
 scNoiseMeter assigns each mapped primary alignment to one of 17 mutually exclusive output categories, partitions its aligned reference bases without double-counting, and reports independent artifact-evidence flags. It supports barcode-aware droplet data, barcode-free BAMs, pre/post-filter comparisons, and Smart-seq/FLASH-seq plate aggregation.
 
-Version **0.7.1** deliberately avoids presenting a single category sum as a causal estimate of “technical noise.” It reports:
+Version **0.7.2** deliberately avoids presenting a single category sum as a causal estimate of “technical noise.” It reports:
 
 - `broad_noncanonical_*`: a descriptive composition of antisense, selected intronic and intergenic categories, hotspots, and chimeric alignments;
 - `artifact_candidate_*`: the narrower subset with positive alignment/context evidence (`intergenic_hotspot` and `chimeric`);
@@ -73,7 +73,7 @@ Unmapped, secondary, and supplementary records are counted separately and exclud
 | Category | Interpretation |
 |---|---|
 | `unassigned` | Barcode missing/off-whitelist when a whitelist is enforced |
-| `multimapper` | Explicit multi-hit evidence: `NH>1`, or a non-empty `XA` tag when `NH` is absent. MAPQ 0 alone is retained in its genomic category and reported by the separate low-MAPQ metric |
+| `multimapper` | Explicit `NH>1` evidence. MAPQ and producer-specific `X*` tags do not replace the genomic category; low MAPQ is reported separately |
 | `mitochondrial` | Primary alignment is on `chrM`, `MT`, `chrMT`, or `mitochondrion` |
 | `chimeric` | Inter-contig or strand-discordant `SA`, incompatible query/genomic split order, or extreme paired insert size |
 | `ambiguous_cod_cod` | Same-strand region shared by protein-coding genes |
