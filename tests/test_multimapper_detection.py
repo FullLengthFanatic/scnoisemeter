@@ -39,8 +39,16 @@ def test_nh_one_is_not_multimapper_even_at_mapq_zero():
     assert not ReadClassifier._is_multimapper(_read(mapq=0, NH=1))
 
 
-def test_nonempty_xa_is_multimapper_when_nh_is_absent():
-    assert ReadClassifier._is_multimapper(_read(XA="chr2,+100,100M,1;"))
+def test_nonempty_xa_is_not_interpreted_generically():
+    """XA is in the SAM local-use namespace and may mean something else."""
+    assert not ReadClassifier._is_multimapper(_read(XA="producer-specific-value"))
+
+
+def test_mapq_zero_with_local_xa_still_retains_genomic_classification():
+    """Regression for the PacBio report that collapsed entirely to MULTIMAPPER."""
+    assert not ReadClassifier._is_multimapper(
+        _read(mapq=0, XA="producer-specific-value")
+    )
 
 
 def test_empty_xa_is_not_multimapper():
