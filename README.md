@@ -66,6 +66,12 @@ scnoisemeter run \
 
 Do not rely on an aligner name alone to identify the sequencer or library. `minimap2` is not proof of ONT, and bare `STAR` is not proof of Smart-seq. Ambiguous headers produce a warning; use `--platform` and `--library-strand` explicitly.
 
+## Report preview
+
+![scNoiseMeter classification overview and category definitions](docs/report_preview2.png)
+
+The interactive HTML report also covers [sample metadata](docs/report_preview1.png), [read and base fractions](docs/report_preview3.png), [length-stratified and per-cell composition](docs/report_preview4.png), [read-length distributions and artifact flags](docs/report_preview5.png), and [the top intergenic loci](docs/report_preview6.png).
+
 ## Classification
 
 Unmapped, secondary, and supplementary records are counted separately and excluded from the genomic-category denominator. Remaining primary alignments are processed in this priority order. The historical `read_*` names mean alignment records; paired mates count separately. Version 0.7 also emits precise `n_records_*` and `n_alignments_classified` aliases.
