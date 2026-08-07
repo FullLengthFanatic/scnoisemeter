@@ -47,10 +47,10 @@ def _make_sm(**kwargs) -> SampleMetrics:
         n_cells=100,
         read_fracs={},
         base_fracs={},
-        noise_read_frac=0.20,
-        noise_base_frac=0.19,
-        noise_read_frac_strict=0.04,
-        noise_base_frac_strict=0.04,
+        broad_noncanonical_read_frac=0.20,
+        broad_noncanonical_base_frac=0.19,
+        artifact_candidate_read_frac=0.04,
+        artifact_candidate_base_frac=0.04,
         strand_concordance=0.97,
         chimeric_read_frac=0.01,
         multimapper_read_frac=0.00,
@@ -307,7 +307,7 @@ def _make_ct_with_data(sample_name: str = "test") -> CellTable:
     """Return a CellTable with real per-cell noise data."""
     import numpy as np
     rng = np.random.default_rng(0)
-    df = pd.DataFrame({"noise_read_frac": rng.beta(2, 8, 50)})
+    df = pd.DataFrame({"broad_noncanonical_read_frac": rng.beta(2, 8, 50)})
     return CellTable(df=df, sample_name=sample_name)
 
 

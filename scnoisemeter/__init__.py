@@ -7,5 +7,5 @@ Supports ONT, PacBio/Kinnex, and short-read (Illumina, ElemBio) BAMs from 10x
 Genomics or BD Rhapsody kits, plus Smart-seq / FLASH-seq plates.
 """
 
-__version__ = "0.7.2"
+__version__ = "0.8.0"
 __author__ = "scNoiseMeter contributors"

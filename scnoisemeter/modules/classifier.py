@@ -244,6 +244,13 @@ class ReadClassifier:
         self._tso_concat_pattern = (
             re.compile("|".join(re.escape(s) for s in _concat)) if _concat else None
         )
+        # Same motif set, kept as a list for the approximate matcher.
+        self._tso_concat_motifs = _concat
+
+        # Genomic polyA-run context patterns.  POLYA_RUN_MIN_LENGTH is a
+        # constant, so compiling these per read is pure overhead.
+        self._polya_t_run_re = re.compile(f"T{{{POLYA_RUN_MIN_LENGTH},}}")
+        self._polya_a_run_re = re.compile(f"A{{{POLYA_RUN_MIN_LENGTH},}}")
 
         # Pre-build per-contig interval lookup tables for fast query
         # These are built lazily on first access via _get_contig_intervals()
@@ -599,15 +606,9 @@ class ReadClassifier:
         seq = read.query_sequence
         if not seq:
             return False
-        motifs = sorted(
-            {s.upper() for s in self.tso_sequences}
-            | {_revcomp(s) for s in self.tso_sequences},
-            key=len,
-            reverse=True,
-        )
         hits: list[tuple[int, int]] = []
         upper = seq.upper()
-        for motif in motifs:
+        for motif in self._tso_concat_motifs:
             max_mm = max(1, int(round(len(motif) * 0.10)))
             for start in _approx_match_starts(upper, motif, max_mm):
                 end = start + len(motif)
@@ -655,7 +656,7 @@ class ReadClassifier:
                 if lo >= start:
                     return False
                 context = self.reference.fetch(contig, lo, start).upper()
-                run_re = re.compile(f"T{{{POLYA_RUN_MIN_LENGTH},}}")
+                run_re = self._polya_t_run_re
             else:
                 end_pos = read.reference_end  # 0-based exclusive
                 if end_pos is None:
@@ -663,7 +664,7 @@ class ReadClassifier:
                 context = self.reference.fetch(
                     contig, end_pos, end_pos + POLYA_CONTEXT_WINDOW
                 ).upper()
-                run_re = re.compile(f"A{{{POLYA_RUN_MIN_LENGTH},}}")
+                run_re = self._polya_a_run_re
         except (ValueError, KeyError):
             return False
 
@@ -1041,7 +1042,7 @@ def _aligned_reference_bases(read: pysam.AlignedSegment) -> int:
     """Number of reference bases covered by aligned blocks, consistently."""
     try:
         return sum(max(0, int(end) - int(start)) for start, end in read.get_blocks())
-    except Exception:
+    except (TypeError, ValueError):
         return int(read.query_alignment_length or 0)
 
 
@@ -1056,7 +1057,7 @@ def _edit_distance(read: pysam.AlignedSegment) -> Optional[int]:
 def _softclip_bases(read: pysam.AlignedSegment) -> int:
     try:
         return sum(length for op, length in (read.cigartuples or []) if op == 4)
-    except Exception:
+    except (TypeError, ValueError):
         return 0
 
 

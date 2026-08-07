@@ -589,8 +589,8 @@ class TestClusterMetrics:
             "cell_barcode":        ["CB1", "CB2", "CB3", "CB4", "CB5", "CB6"],
             "n_reads":             [1000,  1200,  800,   900,   1100,  950],
             "n_bases":             [500000]*6,
-            "noise_read_frac":     [0.10,  0.12,  0.08,  0.25,  0.27,  0.22],
-            "noise_base_frac":     [0.11,  0.13,  0.09,  0.26,  0.28,  0.23],
+            "broad_noncanonical_read_frac": [0.10, 0.12, 0.08, 0.25, 0.27, 0.22],
+            "broad_noncanonical_base_frac": [0.11, 0.13, 0.09, 0.26, 0.28, 0.23],
             f"read_frac_{ReadCategory.EXONIC_SENSE.value}":    [0.80]*6,
             f"read_frac_{ReadCategory.INTRONIC_PURE.value}":   [0.05]*6,
             f"read_frac_{ReadCategory.CHIMERIC.value}":        [0.02]*6,
@@ -624,8 +624,8 @@ class TestClusterMetrics:
         ct = self._make_cell_table()
         obs = self._make_obs()
         cluster_df = compute_cluster_metrics(ct, obs)
-        t_noise = cluster_df.loc["T_cell", "median_noise_read_frac"]
-        b_noise = cluster_df.loc["B_cell", "median_noise_read_frac"]
+        t_noise = cluster_df.loc["T_cell", "median_broad_noncanonical_read_frac"]
+        b_noise = cluster_df.loc["B_cell", "median_broad_noncanonical_read_frac"]
         assert b_noise > t_noise
 
     def test_empty_obs_returns_empty(self):

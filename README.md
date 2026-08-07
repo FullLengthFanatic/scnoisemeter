@@ -6,7 +6,7 @@ Barcode-aware alignment artifact and read-distribution QC for single-cell RNA-se
 
 scNoiseMeter assigns each mapped primary alignment to one of 17 mutually exclusive output categories, partitions its aligned reference bases without double-counting, and reports independent artifact-evidence flags. It supports barcode-aware droplet data, barcode-free BAMs, pre/post-filter comparisons, and Smart-seq/FLASH-seq plate aggregation.
 
-Version **0.7.2** deliberately avoids presenting a single category sum as a causal estimate of “technical noise.” It reports:
+Version **0.8.0** deliberately avoids presenting a single category sum as a causal estimate of “technical noise.” It reports:
 
 - `broad_noncanonical_*`: a descriptive composition of antisense, selected intronic and intergenic categories, hotspots, and chimeric alignments;
 - `artifact_candidate_*`: the narrower subset with positive alignment/context evidence (`intergenic_hotspot` and `chimeric`);
@@ -155,6 +155,27 @@ scnoisemeter compare \
 
 The comparison does not use an invalid independent-samples chi-square test. It produces exact read-key retention and transition tables plus descriptive composition deltas and a paired-cell bootstrap interval for the median per-cell change.
 
+Retention and transitions require the two BAMs to be the *same reads* before and after a step. `compare` samples read names from both BAMs and, when they do not match, skips those tables and says so rather than emitting NaN. This also avoids holding a per-read map of both BAMs in memory, which for two long-read samples runs to tens of gigabytes. Note that some deduplicators rewrite read names (`isoseq dedup` replaces PacBio CCS names with `molecule/N`), so a genuine pre/post pair can still be unmatchable; the composition metrics remain valid. Force either behaviour with `--matched-reads` / `--no-matched-reads`.
+
+### Many samples
+
+```bash
+scnoisemeter cohort \
+  --results results/BD46/ \
+  --results results/10x_FL/ \
+  --results results/PIPseq/ \
+  --sample-sheet cohort.tsv \
+  --output-dir cohort/
+```
+
+Compares any number of independent samples by reading the metrics `run` already wrote, so it takes seconds rather than the hours a re-classification would need. Use it whenever the samples are separate experiments; use `compare` only for a nested pre/post pair of the same reads.
+
+The optional sample sheet has columns `sample`, `label`, `group`, `order`, where `sample` matches the `<sample>.read_metrics.tsv` stem. Without it, samples are labelled by that stem and ordered cleanest first.
+
+The report carries four figures: composition per sample with exonic sense excluded so the differences are not compressed into the tail of the bar; a heatmap coloured by deviation from the cohort median, which shows what is *unusual* about a method rather than restating the composition; artifact-flag rates on a log axis, since those span several orders of magnitude; and per-cell spread for whichever samples have barcodes.
+
+Samples that came from different scnoisemeter versions, different GENCODE releases, or a mix of stranded and unstranded protocols are flagged in the report. Metrics that a sample never reported are shown as absent, never as zero.
+
 ### Directory discovery
 
 ```bash
@@ -196,6 +217,12 @@ Barcode-free well BAMs are relabeled to `<plate>_<well>` before aggregation, pre
 | `comparison.transitions.tsv` | Category A→B transitions for matched read keys |
 | `comparison.matching.tsv` | Overall matching counts |
 | `comparison.stats.tsv` | Composition deltas and paired-cell bootstrap intervals |
+| `<sample>.run_info.json` | Tool version, platform, strandedness and annotation sources for this run |
+| `cohort.summary.tsv` | One row per sample: provenance and headline metrics |
+| `cohort.composition.tsv` | Samples x categories, read and base fractions |
+| `cohort.report.html` | Cross-sample report |
+
+`comparison.retention.tsv`, `comparison.transitions.tsv` and `comparison.matching.tsv` are written only for a nested pair.
 
 ## Scope and limitations
 

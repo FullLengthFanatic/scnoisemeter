@@ -566,9 +566,10 @@ def run_pipeline(
         # and short scaffolds from both totals and artifact composition.
         try:
             contigs = [c for c, n in mapped_by_contig.items() if n > 0]
-            contigs.sort(
-                key=lambda c: meta.reference_lengths.get(c, 0), reverse=True
-            )
+            # Longest-job-first, where the job is reads to classify rather
+            # than reference span: a short contig can carry more alignments
+            # than a long one, and the pool hands out work in this order.
+            contigs.sort(key=lambda c: mapped_by_contig.get(c, 0), reverse=True)
         except Exception:
             contigs = list(meta.reference_names)
 

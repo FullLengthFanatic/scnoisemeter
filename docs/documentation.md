@@ -180,7 +180,54 @@ Comparison outputs are dependent-data aware:
 - sample fractions are descriptive;
 - paired-cell median differences use cells shared by both BAMs and a fixed-seed 1,000-resample percentile bootstrap.
 
-No independent read-count chi-square p-values are produced. If query names were changed by a pipeline, exact matching will be low; inspect `comparison.matching.tsv` before interpreting retention.
+No independent read-count chi-square p-values are produced.
+
+Retention, transitions and the matching summary are only written when the two BAMs really are
+the same reads. Before classifying, `compare` samples read names from a shared genomic window of
+both BAMs; below 50% overlap it treats them as independent, skips those three files, and warns.
+That is also what keeps memory bounded: tracking per-read identity costs roughly 175 bytes per
+read on each side, so a 76M-read and a 37M-read sample together approach 20 GB held at once.
+
+Two different situations produce a low overlap, and the warning covers both. The samples may
+genuinely be unrelated, in which case `cohort` is the right tool. Or a step between them may have
+rewritten the read names: `isoseq dedup` replaces PacBio CCS names with `molecule/N`, so a real
+pre/post-dedup pair shares no names at all. Composition metrics stay valid either way.
+
+Override the detection with `--matched-reads` or `--no-matched-reads`.
+
+## 6a. `cohort`
+
+```bash
+scnoisemeter cohort \
+  --results results/BD46/ \
+  --results results/10x_FL/ \
+  --results results/PIPseq/ \
+  --sample-sheet cohort.tsv \
+  --output-dir cohort/
+```
+
+Compares any number of independent samples from directories `run` or `run-plate` already wrote.
+No BAMs are read and nothing is re-classified, so a cohort of a dozen samples completes in
+seconds. At least two `--results` directories are required.
+
+`--sample-sheet` is an optional TSV or CSV with columns `sample`, `label`, `group` and `order`.
+`sample` matches the `<sample>.read_metrics.tsv` stem; `group` drives colour in the artifact and
+per-cell figures; `order` overrides the default ordering, which is cleanest sample first by
+artifact-candidate composition, or by broad composition when some samples predate that metric.
+
+Three properties of the reader matter when interpreting the output:
+
+- A metric a sample never reported is absent, not zero. `n_tso_concatemer` does not exist before
+  v0.7, and drawing it as zero would assert a measurement that was never made.
+- Samples from different scnoisemeter versions or different GENCODE releases are flagged. Metric
+  definitions changed between releases: the same BD46 BAM reports a TSO invasion rate of
+  2.33e-03 under v0.6.1 and 3.28e-06 under v0.7.2, a 700-fold difference that is entirely
+  methodological.
+- Stranded and unstranded protocols are flagged and the affected heatmap cells are outlined,
+  because exonic antisense and strand concordance do not mean the same thing across that boundary.
+
+Samples classified in barcode-agnostic mode have no per-cell values; they appear in every figure
+except the per-cell one, which names its exclusions.
 
 ## 7. `discover`
 
@@ -242,8 +289,11 @@ The two-column sample table contains:
 ### Aggregate composition
 
 - `broad_noncanonical_read_frac`, `broad_noncanonical_base_frac`;
-- `artifact_candidate_read_frac`, `artifact_candidate_base_frac`;
-- deprecated aliases `noise_read_frac`, `noise_base_frac`, `noise_read_frac_strict`, `noise_base_frac_strict`.
+- `artifact_candidate_read_frac`, `artifact_candidate_base_frac`.
+
+The pre-v0.7 aliases `noise_read_frac`, `noise_base_frac`, `noise_read_frac_strict` and
+`noise_base_frac_strict` were removed in 0.8.0. `cohort` still reads them from older result
+directories, so archived runs remain usable, but nothing writes them any more.
 
 ### Alignment/location
 
@@ -326,6 +376,34 @@ Counts of category A → category B among shared keys.
 ### `comparison.matching.tsv`
 
 Overall A/B key counts, shared keys, A-only, and B-only.
+
+`comparison.retention.tsv`, `comparison.transitions.tsv` and `comparison.matching.tsv` exist only
+for a nested pair. When the read names do not match they are not written at all, rather than
+written full of NaN.
+
+## 13a. Provenance and cohort files
+
+### `<sample>.run_info.json`
+
+Written by `run` and `run-plate` alongside the metrics: scnoisemeter version, sample name, BAM
+path, platform, pipeline stage, aligner, strandedness, read and cell totals, and the GTF, polyA,
+TSS and TSO sources with how each was obtained. `read_metrics.tsv` holds only numbers, so this is
+what lets a later reader, or `cohort`, establish whether two result sets are comparable.
+
+### `cohort.summary.tsv`
+
+One row per sample: identity, group, platform, tool version, strandedness, read and cell counts,
+aggregate compositions, strand concordance, chimeric rate, and each artifact-flag rate. Values a
+sample never reported are empty rather than zero.
+
+### `cohort.composition.tsv`
+
+Samples by categories, read and base fractions, one row per sample.
+
+### `cohort.report.html`
+
+Composition bars excluding exonic sense, the deviation-from-median category heatmap, artifact
+flag rates on a log axis, and per-cell spread for the samples that have barcodes.
 
 ## 14. Caching and reproducibility
 

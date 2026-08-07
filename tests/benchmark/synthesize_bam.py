@@ -29,7 +29,7 @@ Exp 4 (per-cell artifact-flag counters, TSO / polyA):
   sit at a position with a downstream A-run. Validated against per-cell
   n_tso / n_polya in cell_metrics.tsv.
 
-Categories covered (16 of 19):
+Categories covered (16 of 17 classified):
 
   Simple (1 CB each):
     EXONIC_SENSE, EXONIC_ANTISENSE,
@@ -50,7 +50,15 @@ Side outputs:
   --barcode-whitelist; the UNASSIGNED CB is deliberately excluded so
   its reads trip the not-on-whitelist branch in the classifier.
 
-Not yet covered (requires upstream feature work):
+Not yet covered:
+  INTERGENIC_ENRICHED — a window that clears the enrichment screen but
+  carries no positive evidence either way. Constructing ground truth for it
+  means hitting a gap between the hotspot and novel promotion rules
+  (significant, monoexonic, no genomic A-run, not near an annotated polyA
+  site, not repeat-overlapping), which is fragile to threshold changes.
+  run_and_evaluate.py does score the column, so reads landing there are
+  counted rather than silently dropped from the confusion matrix.
+
   NUMT-derived MITOCHONDRIAL sub-classification (per-read NUMT
   disambiguation is not yet implemented in scnoisemeter).
 

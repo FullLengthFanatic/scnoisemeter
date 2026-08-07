@@ -36,6 +36,10 @@ import plotly.io as pio
 
 from scnoisemeter.modules.metrics import CellTable, SampleMetrics
 from scnoisemeter.modules.report_figures import (
+    _cohort_artifact_dots,
+    _cohort_composition_bars,
+    _cohort_deviation_heatmap,
+    _cohort_percell_boxes,
     CATEGORY_COLOURS as CATEGORY_COLOURS,
     CATEGORY_LABELS as CATEGORY_LABELS,
     _artifact_flags,
@@ -235,6 +239,50 @@ def write_compare_report(
     logger.info("Wrote comparison report: %s", output_path)
 
 
+def write_cohort_report(cohort, output_path: Path, *, offline: bool = False) -> None:
+    """Write the cross-sample HTML report for a :class:`Cohort`."""
+    figures = [
+        _cohort_composition_bars(cohort),
+        _cohort_deviation_heatmap(cohort),
+        _cohort_artifact_dots(cohort),
+        _cohort_percell_boxes(cohort),
+    ]
+    figures = [f for f in figures if f.data]
+
+    html = _assemble_html(
+        figures=figures,
+        title=f"scNoiseMeter — cohort of {len(cohort)} samples",
+        metadata_table=_cohort_metadata_table(cohort),
+        warnings=list(cohort.warnings),
+        offline=offline,
+    )
+    output_path.write_text(html, encoding="utf-8")
+    logger.info("Wrote cohort report: %s", output_path)
+
+
+def _cohort_metadata_table(cohort) -> str:
+    header = ("<tr><th>Sample</th><th>Group</th><th>Platform</th><th>Version</th>"
+              "<th>Reads classified</th><th>Cells</th>"
+              "<th>Broad non-canonical</th><th>Artifact candidates</th></tr>")
+    rows = []
+    for s in cohort.samples:
+        def fmt(metric, pct=False):
+            v = s.get(metric)
+            if v is None:
+                return "<i>n/a</i>"
+            return f"{v:.2%}" if pct else f"{int(v):,}"
+        rows.append(
+            f"<tr><td><b>{s.label}</b></td><td>{s.group or ''}</td>"
+            f"<td>{s.platform or '<i>unknown</i>'}</td>"
+            f"<td>{s.version or '<i>unknown</i>'}</td>"
+            f"<td>{fmt('n_reads_classified')}</td>"
+            f"<td>{fmt('n_cells') if s.has_cells else '<i>barcode-agnostic</i>'}</td>"
+            f"<td>{fmt('broad_noncanonical_read_frac', True)}</td>"
+            f"<td>{fmt('artifact_candidate_read_frac', True)}</td></tr>"
+        )
+    return f"<table class='meta-table'>{header}{''.join(rows)}</table>"
+
+
 # ---------------------------------------------------------------------------
 # HTML assembly
 # ---------------------------------------------------------------------------
@@ -413,9 +461,17 @@ def _assemble_html(
     warnings: list,
     offline: bool,
 ) -> str:
+    # Export figures as SVG rather than PNG from Plotly's own modebar, so a panel
+    # can go straight into a figure without adding a rendering dependency.
+    # responsive: figures otherwise render at Plotly's default 700 px while the
+    # report grid gives each card about 666 px, and .plot-card clips the
+    # overflow, cutting the right edge off every chart.
+    _config = {"responsive": True,
+               "toImageButtonOptions": {"format": "svg", "scale": 1},
+               "displaylogo": False}
     fig_divs = []
     for fig in figures:
-        div = pio.to_html(fig, full_html=False, include_plotlyjs=False)
+        div = pio.to_html(fig, full_html=False, include_plotlyjs=False, config=_config)
         fig_divs.append(f"<div class='plot-card'>{div}</div>")
 
     warning_html = ""

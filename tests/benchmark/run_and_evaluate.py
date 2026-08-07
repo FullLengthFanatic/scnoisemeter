@@ -13,7 +13,7 @@ Two outputs:
 
   Exp 2 — noise-fraction dose-response.
           Each Exp 2 CB holds a known mixture of signal + noise. We compare
-          the reported noise_read_frac to the true noise fraction encoded in
+          the reported broad_noncanonical_read_frac to the true fraction encoded in
           the CB name.
 
 Usage:
@@ -42,24 +42,27 @@ from pathlib import Path
 
 import pandas as pd
 
+from scnoisemeter.constants import (
+    ARTIFACT_CANDIDATE_CATEGORIES,
+    BROAD_NONCANONICAL_CATEGORIES,
+)
+
 
 CATEGORY_COLUMNS = [
     "exonic_sense", "exonic_antisense",
     "intronic_jxnspan", "intronic_pure", "intronic_boundary",
     "intergenic_sparse", "intergenic_repeat", "intergenic_hotspot", "intergenic_novel",
+    "intergenic_enriched",
     "chimeric", "mitochondrial", "multimapper",
     "ambiguous", "ambiguous_cod_ncod", "ambiguous_cod_cod",
     "unassigned",
 ]
 
-CONSERVATIVE_NOISE = {
-    "exonic_antisense", "intronic_pure", "intronic_boundary",
-    "intergenic_sparse", "intergenic_repeat", "intergenic_hotspot", "chimeric",
-}
-STRICT_NOISE = {
-    "exonic_antisense",
-    "intergenic_sparse", "intergenic_repeat", "intergenic_hotspot", "chimeric",
-}
+# Taken from the package rather than restated here.  Both sets had drifted from
+# the classifier: the broad set was missing intergenic_enriched and the strict
+# set still listed five categories where the tool now counts two.
+CONSERVATIVE_NOISE = {c.value for c in BROAD_NONCANONICAL_CATEGORIES}
+STRICT_NOISE = {c.value for c in ARTIFACT_CANDIDATE_CATEGORIES}
 
 
 def parse_args():
@@ -250,7 +253,7 @@ def noise_dose_response(cell_metrics: pd.DataFrame, truth: pd.DataFrame) -> pd.D
         true_frac = cb_to_true_frac[cb]
         cons_frac = sum((row.get(f"read_frac_{c}", 0) or 0) for c in CONSERVATIVE_NOISE)
         strict_frac = sum((row.get(f"read_frac_{c}", 0) or 0) for c in STRICT_NOISE)
-        reported = row.get("noise_read_frac", float("nan"))
+        reported = row.get("broad_noncanonical_read_frac", float("nan"))
         rows.append({
             "cell_barcode": cb,
             "n_reads": int(row["n_reads"]),
