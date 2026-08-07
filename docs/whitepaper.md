@@ -59,7 +59,7 @@ Unmapped, secondary, and supplementary records are counted but not assigned geno
 5. atomic annotation overlap;
 6. intergenic second-pass refinement.
 
-The resulting 17 categories are listed in the README and operational documentation.
+The resulting 17 categories are listed in the README.
 
 ### Chimeric evidence
 
@@ -161,3 +161,36 @@ A defensible methods section should state:
 - which denominator and aggregate metric was reported.
 
 Do not relabel `broad_noncanonical_read_frac` as percent contamination. Report its component categories and the narrower artifact-candidate composition alongside it.
+
+Every run writes `<sample>.run_info.json` next to the metrics, carrying the version, platform,
+strandedness and annotation sources. The metrics table itself holds only numbers, so this file is
+the record that makes an archived result set interpretable later, and it is what the cross-sample
+comparison uses to decide whether two samples may be placed side by side at all.
+
+### Comparing across samples
+
+Two comparisons are possible and they are not interchangeable.
+
+A **nested** comparison asks what a processing step did to a fixed set of reads, and is only
+defined when both files contain the same reads. Read-level retention and category transitions
+belong here. Note that this is narrower than "before and after a step": some deduplicators
+rewrite read names, so a genuine pre/post pair can be unmatchable at the read level even though
+both files describe the same library.
+
+A **cohort** comparison asks how independent samples differ, and can only be distributional.
+Three limits apply, and each of them is a way a cross-sample figure can invent a result.
+
+Metric definitions change between tool versions. The same BD46 alignment file reports a TSO
+invasion rate of 2.33e-03 under v0.6.1 and 3.28e-06 under v0.7.2, a 700-fold difference caused
+entirely by a change in how the flag is detected. Pooling result sets from different versions
+therefore produces differences that look biological and are not.
+
+Annotation completeness changes what "intergenic" means. Samples annotated against different
+GENCODE releases are not comparable in the categories that depend on gene coverage.
+
+Strandedness changes what a category measures. In a non-stranded protocol, exonic-antisense reads
+are expected cDNA signal and strand concordance near 50% is the design, so neither quantity can be
+ranked against a stranded sample.
+
+A metric that a sample never recorded is a gap in the record, not a measurement of zero, and is
+reported as absent.

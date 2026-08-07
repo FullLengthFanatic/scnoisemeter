@@ -274,16 +274,17 @@ class TestMetrics:
         assert sample_metrics.n_reads_classified > 0
 
     def test_noise_frac_in_unit_interval(self, sample_metrics):
-        assert 0.0 <= sample_metrics.noise_read_frac <= 1.0
-        assert 0.0 <= sample_metrics.noise_base_frac <= 1.0
+        assert 0.0 <= sample_metrics.broad_noncanonical_read_frac <= 1.0
+        assert 0.0 <= sample_metrics.broad_noncanonical_base_frac <= 1.0
 
     def test_noise_frac_positive(self, sample_metrics):
         """We injected chimeric and intronic reads so noise must be > 0."""
-        assert sample_metrics.noise_read_frac > 0.0
+        assert sample_metrics.broad_noncanonical_read_frac > 0.0
 
     def test_strict_noise_leq_conservative(self, sample_metrics):
         """Strict noise is a subset of conservative noise."""
-        assert sample_metrics.noise_read_frac_strict <= sample_metrics.noise_read_frac
+        assert (sample_metrics.artifact_candidate_read_frac
+                <= sample_metrics.broad_noncanonical_read_frac)
 
     def test_strand_concordance_in_unit_interval(self, sample_metrics):
         assert 0.0 <= sample_metrics.strand_concordance <= 1.0
@@ -352,7 +353,7 @@ class TestCellTable:
         assert len(cell_table.df) == 2
 
     def test_noise_column_present(self, cell_table):
-        assert "noise_read_frac" in cell_table.df.columns
+        assert "broad_noncanonical_read_frac" in cell_table.df.columns
 
     def test_all_category_columns_present(self, cell_table):
         from scnoisemeter.constants import CATEGORY_ORDER

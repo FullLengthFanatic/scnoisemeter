@@ -1326,10 +1326,10 @@ class TestCellMetricsTSVColumns:
             "Missing tab between base_frac_multimapper and base_frac_ambiguous in TSV header"
         )
 
-    def test_noise_read_frac_column_present_for_violin(self):
-        """noise_read_frac must be a column so the per-cell violin plot can render."""
+    def test_broad_noncanonical_column_present_for_violin(self):
+        """The per-cell violin plot renders from broad_noncanonical_read_frac."""
         ct = self._get_ct()
-        assert "noise_read_frac" in ct.df.columns
+        assert "broad_noncanonical_read_frac" in ct.df.columns
 
     def test_all_category_read_frac_columns_present(self):
         """Every category in CATEGORY_ORDER must have its own read_frac column."""

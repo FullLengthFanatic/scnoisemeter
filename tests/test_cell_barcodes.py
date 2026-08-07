@@ -383,8 +383,8 @@ class TestCellBarcodesAgnosticMode:
 
             fake_sm = MagicMock()
             fake_sm.n_cells             = 0
-            fake_sm.noise_read_frac     = 0.10
-            fake_sm.noise_base_frac     = 0.09
+            fake_sm.broad_noncanonical_read_frac = 0.10
+            fake_sm.broad_noncanonical_base_frac = 0.09
             fake_sm.strand_concordance  = 0.95
             fake_sm.chimeric_read_frac  = 0.01
             fake_sm.warnings            = []

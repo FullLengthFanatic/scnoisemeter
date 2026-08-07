@@ -261,8 +261,10 @@ class TestCase4TinyBAM:
         type(mock_bam_instance).unmapped = PropertyMock(return_value=0)
 
         mock_sm = MagicMock()
-        mock_sm.noise_read_frac = 0.0
-        mock_sm.noise_base_frac = 0.0
+        mock_sm.broad_noncanonical_read_frac = 0.0
+        mock_sm.broad_noncanonical_base_frac = 0.0
+        mock_sm.artifact_candidate_read_frac = 0.0
+        mock_sm.artifact_candidate_base_frac = 0.0
         mock_sm.strand_concordance = 1.0
         mock_sm.chimeric_read_frac = 0.0
         mock_sm.n_cells = 0

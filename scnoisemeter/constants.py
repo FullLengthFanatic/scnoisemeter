@@ -353,6 +353,25 @@ BARCODE_AUTODETECT_MIN_FRACTION = 0.50
 
 
 # ---------------------------------------------------------------------------
+# `compare`: nested-pair detection
+# ---------------------------------------------------------------------------
+
+# Retention and transition tables are only meaningful when BAM B is a filtered
+# subset of BAM A.  Read names are sampled from a shared genomic window of both
+# BAMs; a nested pair shares nearly all of them, two independent samples share
+# none.  Anything below the threshold is treated as independent, which also
+# avoids materialising a per-read assignment dict for both BAMs at once.
+# Below-threshold intergenic windows plotted in the report scatter.  Real
+# samples produce 20k-130k windows, the vast majority never promoted; drawing
+# all of them made the HTML report tens of MB without adding information.
+INTERGENIC_SCATTER_MAX_SPARSE = 3_000
+
+
+COMPARE_PROBE_SAMPLE_SIZE = 50_000
+COMPARE_NESTED_MIN_OVERLAP = 0.50
+
+
+# ---------------------------------------------------------------------------
 # Parallelization
 # ---------------------------------------------------------------------------
 

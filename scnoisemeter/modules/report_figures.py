@@ -18,6 +18,7 @@ from plotly.subplots import make_subplots
 
 from scnoisemeter.constants import (
     ADAPTIVE_PVALUE_THRESHOLD,
+    INTERGENIC_SCATTER_MAX_SPARSE,
     CATEGORY_ORDER,
     LENGTH_BIN_LABELS_LONG,
     LENGTH_BIN_LABELS_SHORT,
@@ -31,24 +32,37 @@ logger = logging.getLogger(__name__)
 # Colour palette — one colour per category, consistent across all plots
 # ---------------------------------------------------------------------------
 
+# Chosen with an OKLab/CVD validator rather than by eye, then checked against
+# real sample compositions.  The set passes, on the CATEGORY_ORDER adjacency
+# used by every stacked and ordered chart here: OKLCH lightness band, chroma
+# floor (nothing reads as gray), colour-vision-deficiency separation
+# (worst adjacent pair ΔE 8.1 protan), and the normal-vision floor
+# (worst adjacent ΔE 17.6).  Several slots sit below 3:1 contrast on the white
+# card, which is why the bar charts carry visible value labels and the report
+# ships the category-definition table: identity is never colour alone.
+#
+# The previous palette failed three of those checks: intergenic_repeat and
+# intergenic_enriched were the same hex, ambiguous/unassigned were invisible
+# against the card, and intronic_pure/intronic_jxnspan were ΔE 7.8 apart in
+# normal vision while sitting adjacent in every stack.
 CATEGORY_COLOURS = {
-    ReadCategory.EXONIC_SENSE:        "#2ecc71",   # green  — signal
-    ReadCategory.EXONIC_ANTISENSE:    "#e74c3c",   # red    — opposite orientation
-    ReadCategory.INTRONIC_JXNSPAN:    "#f39c12",   # amber  — ambiguous
-    ReadCategory.INTRONIC_PURE:       "#e67e22",   # orange — intronic
-    ReadCategory.INTRONIC_BOUNDARY:   "#d35400",   # dark orange
-    ReadCategory.INTERGENIC_SPARSE:   "#95a5a6",   # grey   — not enriched
-    ReadCategory.INTERGENIC_REPEAT:   "#7f8c8d",   # dark grey
-    ReadCategory.INTERGENIC_HOTSPOT:  "#c0392b",   # dark red — artifact
-    ReadCategory.INTERGENIC_NOVEL:    "#8e44ad",   # purple — candidate biology
-    ReadCategory.INTERGENIC_ENRICHED: "#7f8c8d",   # grey — unresolved enrichment
-    ReadCategory.CHIMERIC:            "#2980b9",   # blue   — chimeric
-    ReadCategory.MITOCHONDRIAL:       "#1abc9c",   # teal
-    ReadCategory.MULTIMAPPER:         "#bdc3c7",   # light grey
-    ReadCategory.AMBIGUOUS:           "#ecf0f1",   # very light grey
-    ReadCategory.AMBIGUOUS_COD_NCOD:  "#d2b4de",   # light purple — coding/noncoding overlap
-    ReadCategory.AMBIGUOUS_COD_COD:   "#9b59b6",   # purple — coding/coding overlap
-    ReadCategory.UNASSIGNED:          "#f0f0f0",   # near-white
+    ReadCategory.EXONIC_SENSE:        "#78b95f",   # green — canonical signal, kept calm
+    ReadCategory.EXONIC_ANTISENSE:    "#c50037",   # crimson — opposite orientation
+    ReadCategory.INTRONIC_JXNSPAN:    "#e4a067",   # tan
+    ReadCategory.INTRONIC_PURE:       "#746b00",   # dark olive
+    ReadCategory.INTRONIC_BOUNDARY:   "#c67261",   # clay
+    ReadCategory.INTERGENIC_SPARSE:   "#635dfd",   # indigo — not enriched
+    ReadCategory.INTERGENIC_REPEAT:   "#00c8d7",   # cyan
+    ReadCategory.INTERGENIC_HOTSPOT:  "#f33179",   # magenta — internal-priming candidate
+    ReadCategory.INTERGENIC_NOVEL:    "#8b68ad",   # muted purple — candidate biology
+    ReadCategory.INTERGENIC_ENRICHED: "#c2ae3e",   # gold — enriched, unresolved
+    ReadCategory.CHIMERIC:            "#393eca",   # blue
+    ReadCategory.MITOCHONDRIAL:       "#33a182",   # sea green
+    ReadCategory.MULTIMAPPER:         "#89401c",   # brown
+    ReadCategory.AMBIGUOUS:           "#e384fc",   # orchid
+    ReadCategory.AMBIGUOUS_COD_NCOD:  "#8316a4",   # violet — coding/noncoding overlap
+    ReadCategory.AMBIGUOUS_COD_COD:   "#9dabf7",   # periwinkle — coding/coding overlap
+    ReadCategory.UNASSIGNED:          "#1d81c0",   # steel blue
 }
 
 # Human-readable labels for plot axes and legends
@@ -124,9 +138,8 @@ def _noise_donut(sm: SampleMetrics) -> go.Figure:
     colors = [CATEGORY_COLOURS[c] for c in cats]
 
     es_frac        = sm.read_fracs.get(ReadCategory.EXONIC_SENSE.value, 0)
-    noise_frac = getattr(sm, "broad_noncanonical_read_frac", sm.noise_read_frac) or 0
-    noise_frac_strict = getattr(sm, "artifact_candidate_read_frac", sm.noise_read_frac_strict)
-    strand_conc    = sm.strand_concordance
+    noise_frac = sm.broad_noncanonical_read_frac or 0
+    noise_frac_strict = sm.artifact_candidate_read_frac
     max_val = max(values) if values else 0.01
 
     fig = go.Figure()
@@ -151,18 +164,20 @@ def _noise_donut(sm: SampleMetrics) -> go.Figure:
     fig.update_layout(
         title=dict(
             text=(
-                f"Read classification overview — "
-                f"Exonic sense: <b>{es_frac:.1%}</b>  |  "
-                f"Broad non-canonical: <b>{noise_frac:.1%}</b>  |  "
-                f"Artifact candidates: <b>{noise_frac_strict:.1%}</b>  |  "
-                f"Strand concordance: <b>{strand_conc:.1%}</b>"
-                if strand_conc else
-                f"Read classification overview — "
-                f"Exonic sense: <b>{es_frac:.1%}</b>  |  "
-                f"Broad non-canonical: <b>{noise_frac:.1%}</b>  |  "
-                f"Artifact candidates: <b>{noise_frac_strict:.1%}</b>"
+                # Headline on its own line, numbers as a short subtitle.  All
+                # four metrics on the title line overflowed the 560 px report
+                # grid cell and the last one was clipped mid-word.  The full
+                # set, including strand concordance, is in the metadata table.
+                "Read classification overview"
+                "<br><sup>"
+                f"exonic sense <b>{es_frac:.1%}</b> · "
+                f"non-canonical <b>{noise_frac:.1%}</b> · "
+                f"artifact <b>{noise_frac_strict:.1%}</b>"
+                "</sup>"
             ),
-            x=0.5, font=dict(size=12),
+            # Centre on the card, not on the plot area: the 220 px left margin
+            # would otherwise push a centred title off the right edge.
+            x=0.5, xanchor="center", xref="container", font=dict(size=13),
         ),
         xaxis=dict(
             title="Read fraction",
@@ -171,8 +186,8 @@ def _noise_donut(sm: SampleMetrics) -> go.Figure:
         ),
         yaxis=dict(autorange="reversed", automargin=True),
         showlegend=False,
-        margin=dict(t=70, b=40, l=220, r=20),
-        height=max(300, len(cats) * 38 + 100),
+        margin=dict(t=92, b=40, l=220, r=20),   # room for the two-line title
+        height=max(300, len(cats) * 38 + 120),
     )
     return fig
 
@@ -242,12 +257,15 @@ def _length_stratified_chart(strat_df: "pd.DataFrame") -> go.Figure:
     if strat_df.empty:
         return go.Figure()
 
-    # Determine which bin labels are present and their display order
+    # Determine which bin labels are present and their display order.  The two
+    # label sets share their upper bins, so "did any LONG label match" is not a
+    # usable test: against SHORT data it matched four of five bins and left
+    # "<500" to fall through to the tail, putting the shortest reads last.
+    # Pick whichever set covers more of the bins actually present.
     present_bins = set(strat_df["length_bin"].unique())
-    bin_order = [b for b in LENGTH_BIN_LABELS_LONG if b in present_bins]
-    # Fall back to SHORT labels if none of the LONG labels matched
-    if not bin_order:
-        bin_order = [b for b in LENGTH_BIN_LABELS_SHORT if b in present_bins]
+    labels = max((LENGTH_BIN_LABELS_LONG, LENGTH_BIN_LABELS_SHORT),
+                 key=lambda ls: len(present_bins.intersection(ls)))
+    bin_order = [b for b in labels if b in present_bins]
     # Any remaining bins not in either standard list
     bin_order += [b for b in strat_df["length_bin"].unique() if b not in bin_order]
 
@@ -298,25 +316,24 @@ def _length_stratified_chart(strat_df: "pd.DataFrame") -> go.Figure:
             font=dict(size=11),
         )
 
-    # Layout: title sits above the legend, legend sits above the chart.
-    # title at y=1.20 (yanchor="bottom") → title bottom is above legend top.
-    # legend at y=1.05 (yanchor="bottom") → legend bottom clears the chart area.
-    # margin t=170 provides ~170px for both title and legend in the top margin,
-    # giving ≥ 20px gap between title and legend, and ≥ 15px between legend
-    # and chart top — well above the 8 px / 12 px minimums required.
+    # The legend sits below the plot, not above it.  Squeezing 13 categories
+    # into the top margin worked at full width but wrapped to seven rows in a
+    # 666 px report card and grew straight through the title.
+    n_legend_rows = max(1, -(-len(fig.data) // 2))
     fig.update_layout(
         barmode="stack",
-        title=dict(text="Broad non-canonical composition by read length", x=0.5, y=0.98, yanchor="top"),
+        title=dict(text="Broad non-canonical composition by read length",
+                   x=0.5, xanchor="center", xref="container"),
         xaxis=dict(title="Fraction of bin", tickformat=".0%", range=[0, 1.0]),
         yaxis=dict(autorange="reversed", automargin=True),
         legend=dict(
             orientation="h",
-            yanchor="bottom", y=1.08,
-            xanchor="right",  x=1.0,
+            yanchor="top", y=-0.18,
+            xanchor="center", x=0.5,
             font=dict(size=10),
         ),
-        margin=dict(t=160, b=60, l=120, r=100),
-        height=max(360, len(bin_order) * 62 + 200),
+        margin=dict(t=60, b=60 + n_legend_rows * 22, l=120, r=100),
+        height=max(360, len(bin_order) * 62 + 140 + n_legend_rows * 22),
     )
     return fig
 
@@ -324,10 +341,10 @@ def _length_stratified_chart(strat_df: "pd.DataFrame") -> go.Figure:
 def _per_cell_violin(ct: CellTable) -> go.Figure:
     """Violin + strip plot of the legacy broad-composition column."""
     df = ct.df
-    if "noise_read_frac" not in df.columns:
+    if "broad_noncanonical_read_frac" not in df.columns:
         return go.Figure()
 
-    vals = df["noise_read_frac"].dropna().values
+    vals = df["broad_noncanonical_read_frac"].dropna().values
 
     # With >5 000 cells, rendering individual outlier points causes Plotly to
     # silently drop the violin body.  Disable points for large datasets.
@@ -353,6 +370,24 @@ def _per_cell_violin(ct: CellTable) -> go.Figure:
         margin=dict(t=60, b=40, l=70, r=20),
     )
     return fig
+
+
+def _length_axis_max(*sample_groups) -> float:
+    """
+    Upper bound for a read-length axis, taken from the data.
+
+    The previous fixed 5,000 bp ceiling was wrong in both directions: it clipped
+    the tail (BD45 reaches 7,371 bp) while also wasting a third of the width on
+    empty axis, since the 99.5th percentile of every real long-read sample here
+    falls between 2,300 and 4,600 bp. Cutting at that percentile keeps a handful
+    of outliers from flattening the distribution.
+    """
+    values = [v for group in sample_groups for series in group for v in series]
+    if not values:
+        return 5000.0
+    values.sort()
+    idx = min(len(values) - 1, int(0.995 * len(values)))
+    return max(200.0, values[idx] * 1.05)
 
 
 def _length_distributions(length_samples: dict) -> go.Figure:
@@ -408,7 +443,8 @@ def _length_distributions(length_samples: dict) -> go.Figure:
         fig.update_layout(
             barmode="overlay",
             title=dict(text="Read length distributions by category", x=0.5),
-            xaxis=dict(title="Read length (bp)", range=[0, 5000]),
+            xaxis=dict(title="Read length (bp)",
+                       range=[0, _length_axis_max([length_samples[c] for c in signal_cats])]),
             yaxis=dict(title="% of reads in category"),
             legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.2),
             height=420, margin=dict(t=60, b=120, l=70, r=20),
@@ -439,8 +475,12 @@ def _length_distributions(length_samples: dict) -> go.Figure:
             legendgroup="noise",
         ), row=1, col=2)
 
-    fig.update_xaxes(title_text="Read length (bp)", range=[0, 5000], row=1, col=1)
-    fig.update_xaxes(title_text="Read length (bp)", range=[0, 5000], row=1, col=2)
+    _x_max = _length_axis_max(
+        [length_samples[c] for c in signal_cats],
+        [length_samples[c] for c in noise_cats],
+    )
+    fig.update_xaxes(title_text="Read length (bp)", range=[0, _x_max], row=1, col=1)
+    fig.update_xaxes(title_text="Read length (bp)", range=[0, _x_max], row=1, col=2)
     fig.update_yaxes(title_text="% of reads in category", row=1, col=1)
     fig.update_yaxes(title_text="% of reads in category", row=1, col=2)
 
@@ -516,7 +556,10 @@ def _artifact_flags(sm: SampleMetrics) -> go.Figure:
     labels = ["TSO invasion", "Internal polyA priming", "Non-canonical junction", "TSO concatemer"]
     values = [sm.n_tso_invasion, sm.n_polya_priming, sm.n_noncanon_junction,
               getattr(sm, "n_tso_concatemer", 0)]
-    colors = ["#e74c3c", "#e67e22", "#3498db", "#8e44ad"]
+    # Each bar is already named on the axis, so hue carries no information here.
+    # Four arbitrary colours only invited the reader to look for a link to the
+    # read categories, which these flags are independent of.
+    colors = ["#4a5568"] * len(labels)
     descriptions = [
         "Reads with TSO sequence (or its reverse complement) in a soft-clip",
         "Reads ending at an A-rich (forward) / T-rich (reverse) reference stretch",
@@ -627,15 +670,9 @@ def _intergenic_loci_plots(intergenic_loci: list) -> "list[go.Figure]":
     import math
     import random
 
-    from scnoisemeter.constants import ReadCategory
-
-    cat_colours = {
-        ReadCategory.INTERGENIC_HOTSPOT: "#c0392b",
-        ReadCategory.INTERGENIC_NOVEL:   "#8e44ad",
-        ReadCategory.INTERGENIC_ENRICHED:"#7f8c8d",
-        ReadCategory.INTERGENIC_REPEAT:  "#7f8c8d",
-        ReadCategory.INTERGENIC_SPARSE:  "#bdc3c7",
-    }
+    # Same hues as everywhere else in the report; a second local dict here is
+    # how intergenic_repeat and intergenic_enriched came to share a colour.
+    cat_colours = CATEGORY_COLOURS
     cat_labels = {
         ReadCategory.INTERGENIC_HOTSPOT: "Internal priming hotspot",
         ReadCategory.INTERGENIC_NOVEL:   "Candidate unannotated transcript",
@@ -690,42 +727,60 @@ def _intergenic_loci_plots(intergenic_loci: list) -> "list[go.Figure]":
     else:
         jitter_scale = 0.1
 
-    rng = random.Random(42)  # deterministic jitter
+    rng = random.Random(42)  # deterministic jitter and sampling
 
     by_cat: dict = {}
     for locus in intergenic_loci:
         by_cat.setdefault(locus.category, []).append(locus)
 
+    # Windows that were never promoted are, by definition, indistinguishable
+    # background: tens of thousands of identical markers carry no information
+    # and dominate the file size.  Sample them, keep every promoted window.
+    n_sparse_total = len(by_cat.get(ReadCategory.INTERGENIC_SPARSE, []))
+    n_sparse_shown = min(n_sparse_total, INTERGENIC_SCATTER_MAX_SPARSE)
+    if n_sparse_total > n_sparse_shown:
+        by_cat[ReadCategory.INTERGENIC_SPARSE] = rng.sample(
+            by_cat[ReadCategory.INTERGENIC_SPARSE], n_sparse_shown
+        )
+
     fig_sc = go.Figure()
     for cat, loci in by_cat.items():
-        x_vals, y_vals, sizes, hover = [], [], [], []
+        label = cat_labels.get(cat, cat.value)
+        x_vals, y_vals, sizes, custom = [], [], [], []
         for locus in loci:
-            pval = max(locus.poisson_pvalue_adj, 1e-300)  # avoid log(0)
             jitter = rng.uniform(-jitter_scale, jitter_scale)
             log_reads = math.log10(max(1, locus.n_reads))
-            x_vals.append(pval)
+            x_vals.append(max(locus.poisson_pvalue_adj, 1e-300))  # avoid log(0)
             y_vals.append(10 ** (log_reads + jitter))
             sizes.append(max(6, min(24, locus.n_barcodes * 2 + 4)))
-            hover.append(
-                f"{locus.contig}:{locus.start:,}-{locus.end:,}<br>"
-                f"Reads: {locus.n_reads}<br>Barcodes: {locus.n_barcodes}<br>"
-                f"Adj. p: {locus.poisson_pvalue_adj:.2e}<br>"
-                f"polyA downstream: {locus.polya_run_downstream}<br>"
-                f"Near polyA site: {locus.near_polya_site}"
-            )
+            # customdata carries the raw values; the hover string is built once
+            # by Plotly from the template below.  Formatting a string per point
+            # instead put tens of MB of duplicated markup in the HTML.
+            custom.append((
+                locus.contig, locus.start, locus.end, locus.n_reads,
+                locus.n_barcodes, locus.poisson_pvalue_adj,
+                locus.polya_run_downstream, locus.near_polya_site,
+            ))
         fig_sc.add_trace(go.Scatter(
             x=x_vals,
             y=y_vals,
             mode="markers",
-            name=cat_labels.get(cat, cat.value),
+            name=label,
             marker=dict(
                 color=cat_colours.get(cat, "#95a5a6"),
                 size=sizes,
                 opacity=0.72,
                 line=dict(width=0.5, color="white"),
             ),
-            hovertext=hover,
-            hoverinfo="text",
+            customdata=custom,
+            hovertemplate=(
+                "%{customdata[0]}:%{customdata[1]:,}-%{customdata[2]:,}<br>"
+                "Reads: %{customdata[3]:,}<br>Barcodes: %{customdata[4]:,}<br>"
+                "Adj. p: %{customdata[5]:.2e}<br>"
+                "polyA downstream: %{customdata[6]}<br>"
+                "Near polyA site: %{customdata[7]}"
+                f"<extra>{label}</extra>"
+            ),
         ))
 
     # Configured adjusted-p threshold.
@@ -745,10 +800,15 @@ def _intergenic_loci_plots(intergenic_loci: list) -> "list[go.Figure]":
         xanchor="left",
     )
 
+    _sampled_note = (
+        f" · {n_sparse_shown:,} of {n_sparse_total:,} below-threshold windows sampled"
+        if n_sparse_total > n_sparse_shown else ""
+    )
     fig_sc.update_layout(
         title=dict(
             text="Intergenic windows — adjusted p-value vs read count"
-                 "<br><sup>Point size ∝ distinct barcodes · y-axis jittered for readability</sup>",
+                 "<br><sup>Point size ∝ distinct barcodes · y-axis jittered for readability"
+                 f"{_sampled_note}</sup>",
             x=0.5,
         ),
         xaxis=dict(title="Adjusted p-value", type="log"),
@@ -774,11 +834,7 @@ def _cluster_noise_plot(cluster_df: "pd.DataFrame") -> go.Figure:
         return go.Figure()
 
     # Sort clusters by broad non-canonical fraction
-    sort_col = (
-        "median_broad_noncanonical_read_frac"
-        if "median_broad_noncanonical_read_frac" in cluster_df.columns
-        else "median_noise_read_frac"
-    )
+    sort_col = "median_broad_noncanonical_read_frac"
     if sort_col in cluster_df.columns:
         cluster_df = cluster_df.sort_values(sort_col, ascending=False)
 
@@ -969,9 +1025,9 @@ def _comparison_violin(ct_a: CellTable, ct_b: CellTable) -> go.Figure:
     """Side-by-side violin of per-cell noise fractions."""
     fig = go.Figure()
     for ct, colour in [(ct_a, "#3498db"), (ct_b, "#e74c3c")]:
-        if "noise_read_frac" not in ct.df.columns:
+        if "broad_noncanonical_read_frac" not in ct.df.columns:
             continue
-        vals = ct.df["noise_read_frac"].dropna().values
+        vals = ct.df["broad_noncanonical_read_frac"].dropna().values
         fig.add_trace(go.Violin(
             y=vals,
             name=ct.sample_name,
@@ -1011,9 +1067,314 @@ def _comparison_lengths(
     fig.update_layout(
         barmode="overlay",
         title=dict(text="Exonic-sense read length distribution — comparison", x=0.5),
-        xaxis=dict(title="Read length (bp)", range=[0, 5000]),
+        xaxis=dict(title="Read length (bp)", range=[0, _length_axis_max(
+            [ls.get(ReadCategory.EXONIC_SENSE, []) for ls in (ls_a, ls_b)])]),
         yaxis=dict(title="Percent"),
         height=380,
         margin=dict(t=60, b=60, l=70, r=20),
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Cohort figures (N independent samples)
+# ---------------------------------------------------------------------------
+
+# Groups get one colour each; categories keep CATEGORY_COLOURS everywhere.
+_GROUP_COLOURS = ["#393eca", "#c50037", "#33a182", "#c2ae3e",
+                  "#8316a4", "#00c8d7", "#89401c", "#f33179"]
+
+
+def _group_colour_map(cohort) -> dict:
+    groups = [g for g in dict.fromkeys(s.group for s in cohort.samples) if g]
+    return {g: _GROUP_COLOURS[i % len(_GROUP_COLOURS)] for i, g in enumerate(groups)}
+
+
+def _cohort_composition_bars(cohort) -> go.Figure:
+    """
+    One stacked bar per sample, exonic sense excluded.
+
+    Exonic sense runs 64-83% of reads, so including it would compress every
+    difference between methods into the tail of the bar.  It is printed as text
+    on the right instead, which keeps the magnitude available without spending
+    the axis on it.  Fractions stay absolute (not renormalised), so bar length
+    is directly the total non-canonical composition and the chart is both the
+    ranking and the breakdown.
+    """
+    if not cohort.samples:
+        return go.Figure()
+
+    labels = [s.label for s in cohort.samples]
+    shown = [c for c in CATEGORY_ORDER
+             if c is not ReadCategory.EXONIC_SENSE
+             and any((s.get(f"read_frac_{c.value}") or 0) > 0 for s in cohort.samples)]
+
+    fig = go.Figure()
+    for cat in shown:
+        values = [s.get(f"read_frac_{cat.value}") or 0.0 for s in cohort.samples]
+        fig.add_trace(go.Bar(
+            x=values, y=labels, name=CATEGORY_LABELS[cat], orientation="h",
+            marker_color=CATEGORY_COLOURS[cat],
+            marker_line=dict(color="white", width=1),   # 2px surface gap between segments
+            customdata=[[CATEGORY_LABELS[cat]]] * len(values),
+            hovertemplate="%{y}<br>%{customdata[0]}: %{x:.2%}<extra></extra>",
+        ))
+
+    totals = [sum(s.get(f"read_frac_{c.value}") or 0.0 for c in shown)
+              for s in cohort.samples]
+    for label, total, s in zip(labels, totals, cohort.samples):
+        es = s.get("read_frac_exonic_sense")
+        fig.add_annotation(
+            x=total, y=label, xref="x", yref="y",
+            text=f"  exonic sense {es:.1%}" if es is not None else "  exonic sense n/a",
+            showarrow=False, xanchor="left",
+            font=dict(size=10, color="#636e72"),
+        )
+
+    x_max = max(totals) if totals else 1.0
+    fig.update_layout(
+        barmode="stack",
+        title=dict(text="Alignment composition excluding exonic sense", x=0.5),
+        xaxis=dict(title="Fraction of classified reads", tickformat=".0%",
+                   range=[0, x_max * 1.32]),
+        yaxis=dict(autorange="reversed", automargin=True),
+        legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.18,
+                    font=dict(size=10), traceorder="normal"),
+        height=max(360, len(labels) * 34 + 220),
+        margin=dict(t=60, b=120, l=190, r=40),
+    )
+    return fig
+
+
+def _cohort_deviation_heatmap(cohort) -> go.Figure:
+    """
+    Samples x categories, coloured by deviation from the cohort median.
+
+    Colouring by the raw fraction would only restate the composition figure.
+    Colouring by deviation answers the question the composition figure cannot:
+    which category is unusual for this method.  Cell text keeps the raw value
+    so the absolute number is never lost.
+
+    Below four samples a cohort median is not meaningful, so the colour falls
+    back to the raw fraction and the title says so.
+    """
+    metrics = cohort.category_metrics("read_frac_")
+    if not cohort.samples or not metrics:
+        return go.Figure()
+
+    labels = [s.label for s in cohort.samples]
+    raw = [[s.get(m) for s in cohort.samples] for m in metrics]
+
+    use_deviation = len(cohort.samples) >= 4
+    # A row where every sample sits near zero has a spread of ~0, and scaling by
+    # it would paint a 0.0003 percentage-point difference as the strongest
+    # signal in the figure.  Such rows stay neutral; the text still shows the
+    # values.  The same applies when too few samples reported the category for a
+    # median to mean anything.
+    MIN_ROW_MAX = 0.001      # 0.1% of reads
+    MIN_ROW_SAMPLES = 3
+    z, text = [], []
+    for row in raw:
+        present = [v for v in row if v is not None]
+        median = sorted(present)[len(present) // 2] if present else 0.0
+        spread = (max(present) - min(present)) if present else 0.0
+        informative = (
+            use_deviation and spread > 0
+            and len(present) >= MIN_ROW_SAMPLES
+            and max(present) >= MIN_ROW_MAX
+        )
+        z.append([
+            None if v is None else ((v - median) / spread if informative else 0.0)
+            for v in row
+        ])
+        text.append(["n/a" if v is None else f"{v:.2%}" for v in row])
+
+    unstranded = {s.label for s in cohort.samples if s.is_unstranded}
+    y_labels = [
+        CATEGORY_LABELS.get(next(c for c in CATEGORY_ORDER
+                                 if m == f"read_frac_{c.value}"), m)
+        for m in metrics
+    ]
+
+    fig = go.Figure(go.Heatmap(
+        z=z, x=labels, y=y_labels,
+        colorscale="RdBu_r", zmid=0, zmin=-1, zmax=1,
+        text=text, texttemplate="%{text}", textfont=dict(size=9),
+        hovertemplate="%{x}<br>%{y}<br>%{text}<extra></extra>",
+        colorbar=dict(title="vs cohort<br>median",
+                      tickvals=[-1, 0, 1], ticktext=["lowest", "median", "highest"]),
+    ))
+
+    # Mark the cells whose meaning changes with library strandedness.
+    if cohort.has_mixed_strandedness:
+        for xi, label in enumerate(labels):
+            if label not in unstranded:
+                continue
+            for yi, m in enumerate(metrics):
+                if m in {"read_frac_exonic_antisense"}:
+                    fig.add_shape(type="rect", x0=xi - 0.5, x1=xi + 0.5,
+                                  y0=yi - 0.5, y1=yi + 0.5,
+                                  line=dict(color="#2d3436", width=2, dash="dot"),
+                                  fillcolor="rgba(0,0,0,0)")
+
+    subtitle = ("Colour is deviation from the cohort median; cell text is the raw fraction"
+                if use_deviation else
+                "Fewer than 4 samples: no cohort median, so colour is not scaled")
+    subtitle += "; rows that are near-zero everywhere are left neutral"
+    if cohort.has_mixed_strandedness:
+        subtitle += " · dotted cells are unstranded and not comparable here"
+
+    fig.update_layout(
+        title=dict(text=f"Category signature by sample<br><sup>{subtitle}</sup>", x=0.5),
+        xaxis=dict(tickangle=-30, automargin=True),
+        yaxis=dict(autorange="reversed", automargin=True),
+        height=max(340, len(metrics) * 30 + 190),
+        margin=dict(t=100, b=90, l=210, r=70),
+    )
+    return fig
+
+
+def _cohort_artifact_dots(cohort) -> go.Figure:
+    """
+    One row per artifact flag, one dot per sample, log x-axis.
+
+    These rates span roughly four orders of magnitude across real samples, so a
+    linear axis collapses all but the largest onto zero.  Dots rather than bars
+    because bar length measured from an arbitrary log baseline means nothing.
+    The vertical tick is the cohort median for that flag.
+
+    Every flag keeps its row even when no sample reports it, so a missing
+    measurement is visible as an empty row rather than as an absent concept.
+    """
+    from scnoisemeter.modules.cohort import ARTIFACT_FLAG_COUNTS
+
+    if not cohort.samples:
+        return go.Figure()
+
+    group_colours = _group_colour_map(cohort)
+    has_groups = any(s.group for s in cohort.samples)
+    n_samples = len(cohort.samples)
+
+    row_labels, rates_by_row = [], []
+    for key, flag_label in ARTIFACT_FLAG_COUNTS.items():
+        rates = [(s, s.flag_rate(key)) for s in cohort.samples]
+        n_missing = sum(1 for _, r in rates if r is None)
+        n_zero = sum(1 for _, r in rates if r == 0)
+        note = ""
+        if n_missing:
+            note = f"<br><sup>not reported by {n_missing}/{n_samples}</sup>"
+        elif n_zero == n_samples:
+            note = f"<br><sup>zero in all {n_samples}</sup>"
+        row_labels.append(flag_label + note)
+        rates_by_row.append([(s, r) for s, r in rates if r is not None and r > 0])
+
+    fig = go.Figure()
+    seen_groups: set = set()
+    for label, present in zip(row_labels, rates_by_row):
+        if not present:
+            # Register the category so a flag nothing reported still gets a row.
+            # Dropping it would read as "this artifact does not exist".
+            fig.add_trace(go.Scatter(x=[None], y=[label], mode="markers",
+                                     showlegend=False, hoverinfo="skip"))
+        if present:
+            values = sorted(r for _, r in present)
+            median = values[len(values) // 2]
+            fig.add_trace(go.Scatter(
+                x=[median], y=[label], mode="markers",
+                marker=dict(symbol="line-ns-open", size=26, color="#2d3436",
+                            line=dict(width=2)),
+                showlegend=False,
+                hovertemplate=f"cohort median {median:.2e}<extra></extra>",
+            ))
+        for s, rate in present:
+            group = s.group or "sample"
+            fig.add_trace(go.Scatter(
+                x=[rate], y=[label], mode="markers",
+                name=group, legendgroup=group,
+                showlegend=has_groups and group not in seen_groups,
+                marker=dict(size=12, opacity=0.85,
+                            color=group_colours.get(s.group, "#393eca"),
+                            line=dict(width=1.5, color="white")),
+                customdata=[[s.label]],
+                hovertemplate="%{customdata[0]}<br>%{x:.3e}<extra></extra>",
+            ))
+            seen_groups.add(group)
+
+    if not any(rates_by_row):
+        return go.Figure()
+
+    fig.update_layout(
+        title=dict(
+            text="Artifact flag rates by sample"
+                 "<br><sup>Log axis: these rates span orders of magnitude · "
+                 "vertical tick is the cohort median</sup>",
+            x=0.5,
+        ),
+        xaxis=dict(title="Fraction of classified reads", type="log",
+                   showgrid=True, dtick=1, tickformat=".0e",
+                   minor=dict(showgrid=False)),
+        yaxis=dict(automargin=True, categoryorder="array",
+                   categoryarray=row_labels[::-1]),   # first flag at the top
+        legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.3),
+        height=max(300, len(row_labels) * 52 + 190),
+        margin=dict(t=95, b=110 if has_groups else 80, l=210, r=50),
+    )
+    return fig
+
+
+def _cohort_percell_boxes(cohort) -> go.Figure:
+    """
+    Per-cell composition spread, for the samples that have real per-cell data.
+
+    A tight box means the composition is uniform across cells and therefore
+    protocol-level; a long tail means a subpopulation drives it.  Samples run in
+    barcode-agnostic mode have no per-cell values at all and are named in the
+    subtitle rather than silently dropped.
+    """
+    col = "broad_noncanonical_read_frac"
+    with_cells = [s for s in cohort.samples
+                  if s.has_cells and col in (s.cell_df.columns if s.cell_df is not None else [])]
+    if not with_cells:
+        return go.Figure()
+
+    import numpy as np
+
+    group_colours = _group_colour_map(cohort)
+    fig = go.Figure()
+    for s in reversed(with_cells):        # keep composition-figure order top-down
+        values = s.cell_df[col].dropna().to_numpy(dtype=float)
+        if not len(values):
+            continue
+        # Summarise here rather than shipping every cell to the browser: one
+        # sample in a real cohort has 176k cells, and the raw arrays alone put
+        # megabytes of numbers into the HTML for a five-number summary.
+        q1, med, q3 = (float(v) for v in np.percentile(values, [25, 50, 75]))
+        iqr = q3 - q1
+        lo = float(values[values >= q1 - 1.5 * iqr].min()) if len(values) else q1
+        hi = float(values[values <= q3 + 1.5 * iqr].max()) if len(values) else q3
+        fig.add_trace(go.Box(
+            name=s.label, orientation="h", y=[s.label],
+            q1=[q1], median=[med], q3=[q3], lowerfence=[lo], upperfence=[hi],
+            mean=[float(values.mean())],
+            marker_color=group_colours.get(s.group, "#393eca"),
+            line=dict(width=1.5),
+            hovertext=[f"{s.label}<br>{len(values):,} cells<br>"
+                       f"median {med:.2%} · IQR {q1:.2%}–{q3:.2%}"],
+            hoverinfo="text",
+        ))
+
+    excluded = [s.label for s in cohort.samples if s not in with_cells]
+    subtitle = f"{len(with_cells)} of {len(cohort.samples)} samples have per-cell data"
+    if excluded:
+        subtitle += " · no cells in: " + ", ".join(excluded)
+
+    fig.update_layout(
+        title=dict(
+            text=f"Per-cell non-canonical composition<br><sup>{subtitle}</sup>", x=0.5),
+        xaxis=dict(title="Fraction of the cell's reads", tickformat=".0%"),
+        yaxis=dict(automargin=True),
+        showlegend=False,
+        height=max(320, len(with_cells) * 42 + 170),
+        margin=dict(t=95, b=60, l=190, r=40),
     )
     return fig

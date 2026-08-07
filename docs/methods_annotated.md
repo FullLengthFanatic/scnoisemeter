@@ -10,7 +10,9 @@ Source: `scnoisemeter/constants.py`.
 
 `ReadCategory` defines the output taxonomy. `CATEGORY_ORDER` is the canonical output/report order and intentionally excludes the three record states that are not genomic classifications: unmapped, secondary, and supplementary.
 
-`BROAD_NONCANONICAL_CATEGORIES` is a descriptive composition, not a causal noise estimator. `ARTIFACT_CANDIDATE_CATEGORIES` is the smaller hotspot/chimeric set. The older `NOISE_*` constants alias these sets for compatibility.
+`BROAD_NONCANONICAL_CATEGORIES` is a descriptive composition, not a causal noise estimator. `ARTIFACT_CANDIDATE_CATEGORIES` is the smaller hotspot/chimeric set. The older `NOISE_*` constants remain as internal aliases of these sets; the corresponding `noise_*` output fields were removed in 0.8.0, so nothing in the metrics tables or MultiQC JSON carries the old vocabulary. `modules/cohort.py` maps the old names forward when reading result directories written before that.
+
+`ARTIFACT_CANDIDATE_CATEGORIES` contains no orientation-dependent category, so unlike the broad set it needs no stranded/unstranded variant. The benchmark evaluator imports both sets from `constants.py` rather than restating them.
 
 Important constants:
 
@@ -224,6 +226,23 @@ The result is named `umi_sequence_diversity_*`. It is not gene-aware molecule co
 
 It deliberately emits no read-level independent-samples p-value.
 
+The first three of those are conditional. `cli._probe_nested_overlap()` opens both BAMs before the
+pipeline runs, takes up to `COMPARE_PROBE_SAMPLE_SIZE` primary read names from the first shared
+contig of B, and measures how many occur in A over the same genomic window. Below
+`COMPARE_NESTED_MIN_OVERLAP` the pair is treated as independent: `store_read_assignments` stays
+False, the matching outputs are skipped, and the run warns. Iteration is over A testing membership
+in B's name set, so probe memory is bounded by the sample size rather than by A's density.
+
+This is a memory control as much as a correctness one. `read_assignments` costs roughly 175 bytes
+per read, measured with real PacBio names, so retaining it for both sides of a 76M-read and a
+37M-read pair needs about 20 GB simultaneously. `--matched-reads` and `--no-matched-reads`
+override the probe.
+
+`modules/cohort.py` covers the other comparison shape: N independent samples read from finished
+result directories rather than BAMs. It shares no code with the paired path because it can share
+no assumptions, and it refuses to silently pool samples from different tool versions, different
+GENCODE releases, or mixed strandedness.
+
 `cli._write_category_tagged_bam()` is the optional audit trail for `run`. It copies all records in coordinate order and writes local tag `sn:Z:<category>` on classified mapped-primary alignments. Intergenic tags use final fixed-window calls rather than sampled aggregate assignments; the output BAM is indexed after writing.
 
 ## 11. Platform inference and strandedness
@@ -242,7 +261,18 @@ Explicit platform hints have priority. Minimap2 alone maps to `unknown`; bare ST
 - `tests/test_adversarial.py`: empty/tiny input and validation failures.
 - `tests/test_cell_barcodes.py`: called-cell filtering.
 - `tests/test_discover.py` and `tests/test_sample_sheet.py`: platform discovery and plate metadata.
+- `tests/test_cohort.py`: reading legacy and current result directories, absent-versus-zero
+  handling, the version / annotation / strandedness comparability warnings, ranking fallback when
+  a metric predates some samples, sample-sheet labelling and ordering, and that the deviation
+  heatmap leaves a near-zero row neutral instead of painting it as the strongest signal.
 - `.github/workflows/tests.yml`: Python 3.9 and 3.12 CI with Ruff and pytest.
+
+`tests/benchmark/` builds a synthetic BAM with known per-read truth and scores the classifier
+against it. It covers 16 of the 17 classified categories; `INTERGENIC_ENRICHED` has no ground
+truth because constructing a window that clears the enrichment screen while failing every
+positive-evidence rule is fragile to threshold changes. The evaluator does score the column, so
+reads landing there are counted rather than dropped from the confusion matrix, and it imports the
+aggregate sets from `constants.py` so they cannot drift from the classifier again.
 
 ## 13. Safe tuning guidance
 

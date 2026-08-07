@@ -51,6 +51,8 @@ from scnoisemeter.constants import (
     BARCODE_AUTODETECT_MIN_FRACTION,
     CATEGORY_ORDER,
     Chemistry,
+    COMPARE_NESTED_MIN_OVERLAP,
+    COMPARE_PROBE_SAMPLE_SIZE,
     DEFAULT_CHIMERIC_DISTANCE,
     DEFAULT_THREADS,
     INTERGENIC_LOCUS_WINDOW,
@@ -72,7 +74,15 @@ from scnoisemeter.modules.intergenic_profiler import (
     profile_intergenic_loci, extract_intergenic_records,
     compute_intergenic_bases,
 )
-from scnoisemeter.modules.report import write_run_report, write_compare_report
+from scnoisemeter.modules.cohort import (
+    build_composition_table,
+    build_summary_table,
+    load_cohort,
+    ranking_metric,
+)
+from scnoisemeter.modules.report import (
+    write_cohort_report, write_compare_report, write_run_report,
+)
 from scnoisemeter.modules.pipeline import run_pipeline
 from scnoisemeter.utils.bam_inspector import inspect_bam, BamMetadata
 from scnoisemeter.utils.annotation_fetcher import (
@@ -406,6 +416,46 @@ def _make_tso_info(tso_seqs: Optional[list], tso_min_match: int, check_polyg: bo
         "source": "configured" if seqs else "disabled",
         "check_polyg": check_polyg,
     }
+
+
+def _attach_result_provenance(
+    sm, *,
+    gtf_path, gtf_version, gtf_source,
+    polya_paths, polya_version, polya_source, polya_db,
+    tss_paths, tss_db, tss_user_supplied,
+    tso_seqs, tso_min_match, tso_check_polyg,
+    version_warning: Optional[str] = None,
+) -> dict:
+    """
+    Record which annotation sources produced these metrics, and return them.
+
+    Every subcommand routes through here so that the report metadata table and
+    any other consumer see one provenance shape.  The four hand-written copies
+    of this block had already drifted: `discover` and `run-plate` both reported
+    user-supplied TSS sites as auto-downloaded.
+    """
+    provenance = {
+        "gtf": {"version": gtf_version, "source": gtf_source, "path": gtf_path},
+        "polya": {
+            "version": polya_version,
+            "source": polya_source,
+            "path": polya_paths[0] if polya_paths else None,
+            "db": polya_db,
+        },
+        "tss": {
+            "db": tss_db,
+            "source": "user-supplied" if tss_user_supplied else "auto-downloaded",
+            "path": tss_paths[0] if tss_paths else None,
+        } if tss_paths else None,
+        "tso": _make_tso_info(tso_seqs, tso_min_match, check_polyg=tso_check_polyg),
+    }
+    sm._gtf_info   = provenance["gtf"]
+    sm._polya_info = provenance["polya"]
+    sm._tss_info   = provenance["tss"]
+    sm._tso_info   = provenance["tso"]
+    if version_warning:
+        sm.warnings.append(version_warning)
+    return provenance
 
 
 def _check_version_consistency(gtf_version: Optional[int], polya_version: Optional[int]) -> Optional[str]:
@@ -1072,21 +1122,16 @@ def run_cmd(
     )
 
     # Attach annotation provenance for the HTML report
-    sm._gtf_info = {"version": gtf_version, "source": gtf_source, "path": gtf}
-    sm._polya_info = {
-        "version": polya_version,
-        "source": polya_source,
-        "path": polya_paths[0] if polya_paths else None,
-        "db": polya_db,
-    }
-    sm._tss_info = {
-        "db": tss_db,
-        "source": "user-supplied" if tss_sites else "auto-downloaded",
-        "path": tss_paths[0] if tss_paths else None,
-    } if tss_paths else None
-    sm._tso_info = _make_tso_info(tso_seqs, tso_min_match, check_polyg=tso_check_polyg)
-    if version_warning:
-        sm.warnings.append(version_warning)
+    _attach_result_provenance(
+        sm,
+        gtf_path=gtf, gtf_version=gtf_version, gtf_source=gtf_source,
+        polya_paths=polya_paths, polya_version=polya_version,
+        polya_source=polya_source, polya_db=polya_db,
+        tss_paths=tss_paths, tss_db=tss_db, tss_user_supplied=bool(tss_sites),
+        tso_seqs=tso_seqs, tso_min_match=tso_min_match,
+        tso_check_polyg=tso_check_polyg,
+        version_warning=version_warning,
+    )
 
     # Attach cell barcode info for the HTML report
     if cell_barcode_set is not None:
@@ -1119,16 +1164,8 @@ def run_cmd(
         )
 
     click.echo(f"\n✓ scNoiseMeter run complete.  Results in: {output_dir}")
-    broad_value = getattr(sm, "broad_noncanonical_read_frac", None)
-    if not isinstance(broad_value, (int, float)):
-        broad_value = getattr(sm, "noise_read_frac", 0.0)
-    artifact_value = getattr(sm, "artifact_candidate_read_frac", None)
-    if not isinstance(artifact_value, (int, float)):
-        artifact_value = getattr(sm, "noise_read_frac_strict", 0.0)
-    if not isinstance(artifact_value, (int, float)):
-        artifact_value = 0.0
-    click.echo(f"  Broad non-canonical (reads): {broad_value:.2%}")
-    click.echo(f"  Artifact candidates (reads): {artifact_value:.2%}")
+    click.echo(f"  Broad non-canonical (reads): {sm.broad_noncanonical_read_frac:.2%}")
+    click.echo(f"  Artifact candidates (reads): {sm.artifact_candidate_read_frac:.2%}")
     click.echo(f"  Strand concordance     : {sm.strand_concordance:.2%}")
     click.echo(f"  Chimeric rate          : {sm.chimeric_read_frac:.2%}")
     click.echo(f"  Cells detected         : {sm.n_cells:,}")
@@ -1141,11 +1178,60 @@ def run_cmd(
 # `compare` subcommand
 # ---------------------------------------------------------------------------
 
+def _probe_nested_overlap(bam_a: str, bam_b: str,
+                          sample_size: int = COMPARE_PROBE_SAMPLE_SIZE) -> float:
+    """
+    Fraction of BAM-B read names in a shared genomic window that also occur in BAM A.
+
+    Both BAMs are coordinate-sorted, so sampling the same window of the same
+    contig makes the two name sets directly comparable: a filtered subset shares
+    nearly every name, two independent samples share none.  Returns 0.0 when the
+    probe cannot run, which selects the memory-safe branch.
+    """
+    import pysam as _pysam
+
+    try:
+        with _pysam.AlignmentFile(bam_a, "rb") as fa, _pysam.AlignmentFile(bam_b, "rb") as fb:
+            refs_a = set(fa.references)
+            for contig in fb.references:
+                if contig not in refs_a:
+                    continue
+                names_b: set = set()
+                window_end = 0
+                for read in fb.fetch(contig):
+                    if read.is_secondary or read.is_supplementary:
+                        continue
+                    names_b.add(read.query_name)
+                    window_end = max(window_end, read.reference_end or 0)
+                    if len(names_b) >= sample_size:
+                        break
+                if not names_b:
+                    continue
+                # Iterate A and test membership in B rather than the reverse, so
+                # peak memory stays bounded by the sample size even when A is
+                # orders of magnitude denser over the same window.
+                matched = {
+                    read.query_name
+                    for read in fa.fetch(contig, 0, window_end or None)
+                    if not (read.is_secondary or read.is_supplementary)
+                    and read.query_name in names_b
+                }
+                return len(matched) / len(names_b)
+    except (ValueError, OSError) as exc:
+        logger.warning("Could not sample read names to detect a nested pair (%s).", exc)
+    return 0.0
+
+
 @cli.command("compare")
 @click.option("--bam-a",        required=True, type=click.Path(exists=True), help="BAM A (e.g. pre-filter / raw).")
 @click.option("--bam-b",        required=True, type=click.Path(exists=True), help="BAM B (e.g. post-filter).")
 @click.option("--label-a",      default="sample_A", show_default=True, help="Label for BAM A in reports.")
 @click.option("--label-b",      default="sample_B", show_default=True, help="Label for BAM B in reports.")
+@click.option("--matched-reads/--no-matched-reads", "matched_reads", default=None,
+              help="Track every read's identity to produce retention and transition tables.  "
+                   "Only meaningful when BAM B is a filtered subset of BAM A, and costs roughly "
+                   "175 bytes per read of both BAMs.  Default: auto-detect by sampling read "
+                   "names from a shared window of both BAMs.")
 @click.option("--tso-a",        multiple=True,
               help="TSO sequence(s) for BAM A (repeatable). Overrides the shared --tso for side A. "
                    "Use when the two methods being compared used different TSOs.")
@@ -1153,7 +1239,7 @@ def run_cmd(
               help="TSO sequence(s) for BAM B (repeatable). Overrides the shared --tso for side B.")
 @_shared_options
 def compare_cmd(
-    bam_a, bam_b, label_a, label_b, tso_a, tso_b,
+    bam_a, bam_b, label_a, label_b, matched_reads, tso_a, tso_b,
     gtf, gtf_version, barcode_whitelist, whitelist_db, barcode_tag, umi_tag,
     chemistry, platform, library_strand, pipeline_stage, chimeric_distance, tso, tso_min_match, no_polyg_tso,
     repeats, reference, threads, no_umi_dedup, no_cache,
@@ -1166,19 +1252,43 @@ def compare_cmd(
     Runs the full classifier on both BAMs, reports exact matched-read retention
     and category transitions, and bootstraps paired-cell median differences.
 
+    For independent samples from different experiments use `cohort` instead:
+    retention and transitions are only defined for a nested pair.
+
     Output files written to --output-dir:
       comparison.metrics.tsv          Side-by-side scalar metrics
       comparison.stats.tsv            Composition deltas and paired-cell CIs
+      comparison.report.html          Interactive HTML report
+
+    Nested pairs additionally get:
       comparison.retention.tsv        Exact matched-read retention by category
       comparison.transitions.tsv      Category transitions for matched reads
       comparison.matching.tsv         Read-key matching summary
-      comparison.report.html          Interactive HTML report
     """
     _setup_logging(verbose)
     if label_a == label_b:
         raise click.UsageError("--label-a and --label-b must be distinct.")
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if matched_reads is None:
+        overlap = _probe_nested_overlap(bam_a, bam_b)
+        matched_reads = overlap >= COMPARE_NESTED_MIN_OVERLAP
+        logger.info("Sampled read-name overlap between the two BAMs: %.1f%%", 100 * overlap)
+        if not matched_reads:
+            _msg = (
+                f"BAM A and BAM B share only {overlap:.1%} of sampled read names, so per-read "
+                "retention and category transitions are not computed.  Either these are "
+                "independent samples, in which case `scnoisemeter cohort` is the right tool, or "
+                "a step between them rewrote the read names (isoseq dedup replaces PacBio CCS "
+                "names with molecule/N, for example), in which case reads cannot be matched by "
+                "name at all and the composition metrics below are the meaningful comparison.  "
+                "Pass --matched-reads to force per-read tracking anyway."
+            )
+            logger.warning(_msg)
+            click.echo(f"\nWarning: {_msg}", err=True)
+    elif not matched_reads:
+        logger.info("--no-matched-reads: skipping retention and transition tables.")
 
     whitelist = _resolve_whitelist(barcode_whitelist, whitelist_db, offline)
     plat  = None if platform == "auto"       else Platform(platform)
@@ -1217,6 +1327,10 @@ def compare_cmd(
         click.echo(f"\nProcessing {label} ({bam_path}) …")
         meta = inspect_bam(Path(bam_path), barcode_tag=barcode_tag, umi_tag=umi_tag,
                            platform=plat, pipeline_stage=stage)
+        _validate_sort_order(meta)
+        _validate_sq_lines(meta)
+        _validate_chromosome_naming(meta, gtf)
+        _validate_chromosome_lengths(meta, reference_path=reference)
         tso_seqs = _effective_tso_sequences(
             _resolve_tso(tso_side, tso_min_match), meta.platform
         )
@@ -1233,7 +1347,7 @@ def compare_cmd(
             store_umis=not no_umi_dedup,
             reference_path=reference,
             seed=seed,
-            store_read_assignments=True,
+            store_read_assignments=matched_reads,
         )
         _bam_cs = _detect_chrom_style(meta.reference_names)
         result._polya_site_dict = _load_polya_sites(polya_paths, chrom_style=_bam_cs)
@@ -1247,31 +1361,100 @@ def compare_cmd(
             platform=meta.platform.value,
             unstranded=_is_unstranded_library(meta, library_strand),
         )
-        sm._gtf_info = {"version": gtf_version, "source": gtf_source, "path": gtf}
-        sm._polya_info = {
-            "version": polya_version,
-            "source": polya_source,
-            "path": polya_paths[0] if polya_paths else None,
-            "db": polya_db,
-        }
-        sm._tss_info = {
-            "db": tss_db,
-            "source": "user-supplied" if tss_sites else "auto-downloaded",
-            "path": tss_paths[0] if tss_paths else None,
-        } if tss_paths else None
-        sm._tso_info = _make_tso_info(tso_seqs, tso_min_match, check_polyg=tso_check_polyg)
-        if version_warning:
-            sm.warnings.append(version_warning)
+        _attach_result_provenance(
+            sm,
+            gtf_path=gtf, gtf_version=gtf_version, gtf_source=gtf_source,
+            polya_paths=polya_paths, polya_version=polya_version,
+            polya_source=polya_source, polya_db=polya_db,
+            tss_paths=tss_paths, tss_db=tss_db, tss_user_supplied=bool(tss_sites),
+            tso_seqs=tso_seqs, tso_min_match=tso_min_match,
+            tso_check_polyg=tso_check_polyg,
+            version_warning=version_warning,
+        )
         results[label] = (sm, ct, result)
 
     # Write comparison outputs
-    _write_compare_outputs(results, output_dir, label_a, label_b)
+    _write_compare_outputs(results, output_dir, label_a, label_b,
+                           matched_reads=matched_reads)
 
     click.echo(f"\n✓ Comparison complete.  Results in: {output_dir}")
     sm_a_obj, _, _ = results[label_a]
     sm_b_obj, _, _ = results[label_b]
     click.echo(f"  {label_a} broad non-canonical: {sm_a_obj.broad_noncanonical_read_frac:.2%}")
     click.echo(f"  {label_b} broad non-canonical: {sm_b_obj.broad_noncanonical_read_frac:.2%}")
+
+
+# ---------------------------------------------------------------------------
+# `cohort` subcommand
+# ---------------------------------------------------------------------------
+
+@cli.command("cohort")
+@click.option("--results", "results_dirs", multiple=True, required=True,
+              type=click.Path(exists=True, file_okay=False),
+              help="Result directory written by a previous `run` or `run-plate` "
+                   "(repeatable, at least two).")
+@click.option("--sample-sheet", default=None, type=click.Path(exists=True),
+              help="Optional TSV/CSV with columns sample, label, group, order. "
+                   "Controls labelling, colour grouping and ordering.")
+@click.option("--output-dir", required=True, type=click.Path(),
+              help="Directory for the cohort tables and report.")
+@click.option("--offline", is_flag=True,
+              help="Embed Plotly JS in the report instead of loading it from a CDN.")
+@click.option("--verbose", "-v", is_flag=True, help="Enable debug logging.")
+def cohort_cmd(results_dirs, sample_sheet, output_dir, offline, verbose):
+    """
+    Compare many independent samples from finished result directories.
+
+    Reads the metrics `run` already wrote, so a cohort of a dozen samples takes
+    seconds rather than the hours a re-classification would need.  Use `compare`
+    instead for a nested pre/post-filter pair of the same reads.
+
+    Output files written to --output-dir:
+      cohort.summary.tsv         One row per sample: provenance and headline metrics
+      cohort.composition.tsv     Samples x categories, read and base fractions
+      cohort.report.html         Interactive HTML report
+    """
+    _setup_logging(verbose)
+    if len(results_dirs) < 2:
+        raise click.UsageError("--results must be given at least twice.")
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    sheet = None
+    if sample_sheet:
+        import pandas as _pd
+        sep = "," if str(sample_sheet).lower().endswith(".csv") else "\t"
+        sheet = _pd.read_csv(sample_sheet, sep=sep)
+        if "sample" not in sheet.columns:
+            raise click.UsageError(
+                "--sample-sheet needs a 'sample' column matching the result "
+                "directory's <sample>.read_metrics.tsv stem."
+            )
+        sheet = sheet.set_index("sample")
+
+    cohort = load_cohort(results_dirs, sample_sheet=sheet)
+    if not cohort.samples:
+        raise click.ClickException("No readable result directories were found.")
+
+    build_summary_table(cohort).to_csv(
+        output_dir / "cohort.summary.tsv", sep="\t", index=False)
+    build_composition_table(cohort).to_csv(
+        output_dir / "cohort.composition.tsv", sep="\t", index=False)
+    write_cohort_report(cohort, output_dir / "cohort.report.html", offline=offline)
+
+    click.echo(f"\n\u2713 Cohort complete.  Results in: {output_dir}")
+    click.echo(f"  Samples: {len(cohort)}")
+    for w in cohort.warnings:
+        click.echo(f"\n  Warning: {w}", err=True)
+    metric = ranking_metric(cohort)
+    click.echo(f"\n  Ranked by {metric.replace('_', ' ')} (cleanest first):")
+    for s in cohort.samples:
+        def _pct(name):
+            v = s.get(name)
+            return f"{v:>7.2%}" if v is not None else "    n/a"
+        click.echo(f"    {s.label:<44} "
+                   f"broad {_pct('broad_noncanonical_read_frac')}   "
+                   f"artifact-candidate {_pct('artifact_candidate_read_frac')}")
 
 
 # ---------------------------------------------------------------------------
@@ -1481,6 +1664,7 @@ def discover_cmd(
                 version_warning=version_warning,
                 tss_paths=tss_paths,
                 tss_db=tss_db,
+                tss_user_supplied=bool(tss_sites),
                 reference=reference,
                 threads=threads,
                 output_dir=bam_output_dir,
@@ -1520,6 +1704,7 @@ def _run_single_bam_for_discover(
     version_warning: Optional[str],
     tss_paths: list,
     tss_db: str,
+    tss_user_supplied: bool,
     reference: str,
     threads: int,
     output_dir: Path,
@@ -1583,21 +1768,16 @@ def _run_single_bam_for_discover(
         platform=meta.platform.value,
         unstranded=_is_unstranded_library(meta, "auto"),
     )
-    sm._gtf_info = {"version": gtf_version, "source": gtf_source, "path": gtf_path}
-    sm._polya_info = {
-        "version": polya_version,
-        "source": polya_source,
-        "path": polya_paths[0] if polya_paths else None,
-        "db": polya_db,
-    }
-    sm._tss_info = {
-        "db": tss_db,
-        "source": "auto-downloaded",
-        "path": tss_paths[0] if tss_paths else None,
-    } if tss_paths else None
-    sm._tso_info = _make_tso_info(tso_seqs, tso_min_match, check_polyg=tso_check_polyg)
-    if version_warning:
-        sm.warnings.append(version_warning)
+    _attach_result_provenance(
+        sm,
+        gtf_path=gtf_path, gtf_version=gtf_version, gtf_source=gtf_source,
+        polya_paths=polya_paths, polya_version=polya_version,
+        polya_source=polya_source, polya_db=polya_db,
+        tss_paths=tss_paths, tss_db=tss_db, tss_user_supplied=tss_user_supplied,
+        tso_seqs=tso_seqs, tso_min_match=tso_min_match,
+        tso_check_polyg=tso_check_polyg,
+        version_warning=version_warning,
+    )
 
     _write_run_outputs(
         sm, ct, result, output_dir, sample_name,
@@ -1638,8 +1818,8 @@ def _print_discover_summary(
             if metrics:
                 click.echo(
                     f"\n  {stem}:\n"
-                    f"    broad_noncanonical  = {float(metrics.get('broad_noncanonical_read_frac', metrics.get('noise_read_frac', 0))):.2%}\n"
-                    f"    artifact_candidates = {float(metrics.get('artifact_candidate_read_frac', metrics.get('noise_read_frac_strict', 0))):.2%}\n"
+                    f"    broad_noncanonical  = {float(metrics.get('broad_noncanonical_read_frac', 0)):.2%}\n"
+                    f"    artifact_candidates = {float(metrics.get('artifact_candidate_read_frac', 0)):.2%}\n"
                     f"    chimeric_rate       = {float(metrics.get('chimeric_read_frac', 0)):.2%}\n"
                     f"    strand_concordance  = {float(metrics.get('strand_concordance', 0)):.2%}"
                 )
@@ -1738,6 +1918,47 @@ def _plate_well_task(task: dict) -> dict:
         }
     except Exception as exc:
         return {"ok": False, "well_id": well_id, "error": str(exc)}
+
+
+def _build_per_well_metrics_row(well_sm, *, plate_id: str, well_id: str,
+                                bam_path, well_meta_from_sheet: Optional[dict]) -> dict:
+    """One row of `<PlateID>.per_well_metrics.tsv`.
+
+    Shared by the parallel and serial well loops, which previously built this
+    dict independently and would drift the moment either gained a column.
+    """
+    row: dict = {
+        "plate_id":              plate_id,
+        "well_id":               well_id,
+        "n_reads_total":         well_sm.n_reads_total,
+        "n_reads_classified":    well_sm.n_reads_classified,
+        "broad_noncanonical_base_frac": f"{well_sm.broad_noncanonical_base_frac:.4f}",
+        "broad_noncanonical_read_frac": f"{well_sm.broad_noncanonical_read_frac:.4f}",
+        "artifact_candidate_read_frac": f"{well_sm.artifact_candidate_read_frac:.4f}",
+        "strand_concordance":    f"{well_sm.strand_concordance:.4f}",
+        "chimeric_read_frac":    f"{well_sm.chimeric_read_frac:.4f}",
+        "multimapper_read_frac": f"{well_sm.multimapper_read_frac:.4f}",
+        "full_length_read_frac": (
+            f"{well_sm.full_length_read_frac:.4f}"
+            if well_sm.full_length_read_frac is not None else ""
+        ),
+        "n_tso_invasion":        well_sm.n_tso_invasion,
+        "n_polya_priming":       well_sm.n_polya_priming,
+        "n_tso_concatemer":      well_sm.n_tso_concatemer,
+        "bam_path":              str(bam_path),
+    }
+    if well_meta_from_sheet:
+        row.update({
+            "i5_name": well_meta_from_sheet.get("i5_name", ""),
+            "i7_name": well_meta_from_sheet.get("i7_name", ""),
+            "i5_seq":  well_meta_from_sheet.get("i5_seq",  ""),
+            "i7_seq":  well_meta_from_sheet.get("i7_seq",  ""),
+        })
+        for k, v in well_meta_from_sheet.items():
+            if k not in {"well_id", "plate_id", "i5_name", "i7_name",
+                         "i5_seq", "i7_seq"} and k not in row:
+                row[k] = v
+    return row
 
 
 def _discover_plate_wells(plate_dir: Path) -> dict:
@@ -2118,40 +2339,10 @@ def run_plate_cmd(
                 relabel_barcode(
                     well_result, "NO_BARCODE", f"{plate_id}_{well_id}"
                 )
-                well_meta_from_sheet = lookup_well(well_metadata, plate_id, well_id)
-                row: dict = {
-                    "plate_id":              plate_id,
-                    "well_id":               well_id,
-                    "n_reads_total":         well_sm.n_reads_total,
-                    "n_reads_classified":    well_sm.n_reads_classified,
-                    "noise_read_frac":       f"{well_sm.noise_read_frac:.4f}",
-                    "noise_base_frac":       f"{well_sm.noise_base_frac:.4f}",
-                    "broad_noncanonical_read_frac": f"{well_sm.broad_noncanonical_read_frac:.4f}",
-                    "artifact_candidate_read_frac": f"{well_sm.artifact_candidate_read_frac:.4f}",
-                    "strand_concordance":    f"{well_sm.strand_concordance:.4f}",
-                    "chimeric_read_frac":    f"{well_sm.chimeric_read_frac:.4f}",
-                    "multimapper_read_frac": f"{well_sm.multimapper_read_frac:.4f}",
-                    "full_length_read_frac": (
-                        f"{well_sm.full_length_read_frac:.4f}"
-                        if well_sm.full_length_read_frac is not None else ""
-                    ),
-                    "n_tso_invasion":        well_sm.n_tso_invasion,
-                    "n_polya_priming":       well_sm.n_polya_priming,
-                    "n_tso_concatemer":      well_sm.n_tso_concatemer,
-                    "bam_path":              str(bam_path),
-                }
-                if well_meta_from_sheet:
-                    row.update({
-                        "i5_name": well_meta_from_sheet.get("i5_name", ""),
-                        "i7_name": well_meta_from_sheet.get("i7_name", ""),
-                        "i5_seq":  well_meta_from_sheet.get("i5_seq",  ""),
-                        "i7_seq":  well_meta_from_sheet.get("i7_seq",  ""),
-                    })
-                    for k, v in well_meta_from_sheet.items():
-                        if k not in {"well_id", "plate_id", "i5_name", "i7_name",
-                                     "i5_seq", "i7_seq"} and k not in row:
-                            row[k] = v
-                per_well_rows.append(row)
+                per_well_rows.append(_build_per_well_metrics_row(
+                    well_sm, plate_id=plate_id, well_id=well_id, bam_path=bam_path,
+                    well_meta_from_sheet=lookup_well(well_metadata, plate_id, well_id),
+                ))
                 if plate_result is None:
                     plate_result = well_result
                 else:
@@ -2201,41 +2392,10 @@ def run_plate_cmd(
                         unstranded=_is_unstranded_library(meta, library_strand),
                     )
 
-                    well_meta_from_sheet = lookup_well(well_metadata, plate_id, well_id)
-                    row = {
-                        "plate_id":              plate_id,
-                        "well_id":               well_id,
-                        "n_reads_total":         well_sm.n_reads_total,
-                        "n_reads_classified":    well_sm.n_reads_classified,
-                        "noise_read_frac":       f"{well_sm.noise_read_frac:.4f}",
-                        "noise_base_frac":       f"{well_sm.noise_base_frac:.4f}",
-                        "broad_noncanonical_read_frac": f"{well_sm.broad_noncanonical_read_frac:.4f}",
-                        "artifact_candidate_read_frac": f"{well_sm.artifact_candidate_read_frac:.4f}",
-                        "strand_concordance":    f"{well_sm.strand_concordance:.4f}",
-                        "chimeric_read_frac":    f"{well_sm.chimeric_read_frac:.4f}",
-                        "multimapper_read_frac": f"{well_sm.multimapper_read_frac:.4f}",
-                        "full_length_read_frac": (
-                            f"{well_sm.full_length_read_frac:.4f}"
-                            if well_sm.full_length_read_frac is not None else ""
-                        ),
-                        "n_tso_invasion":        well_sm.n_tso_invasion,
-                        "n_polya_priming":       well_sm.n_polya_priming,
-                        "n_tso_concatemer":      well_sm.n_tso_concatemer,
-                        "bam_path":              str(bam_path),
-                    }
-                    if well_meta_from_sheet:
-                        row.update({
-                            "i5_name": well_meta_from_sheet.get("i5_name", ""),
-                            "i7_name": well_meta_from_sheet.get("i7_name", ""),
-                            "i5_seq":  well_meta_from_sheet.get("i5_seq",  ""),
-                            "i7_seq":  well_meta_from_sheet.get("i7_seq",  ""),
-                        })
-                        for k, v in well_meta_from_sheet.items():
-                            if k not in {"well_id", "plate_id", "i5_name", "i7_name",
-                                         "i5_seq", "i7_seq"} and k not in row:
-                                row[k] = v
-
-                    per_well_rows.append(row)
+                    per_well_rows.append(_build_per_well_metrics_row(
+                        well_sm, plate_id=plate_id, well_id=well_id, bam_path=bam_path,
+                        well_meta_from_sheet=lookup_well(well_metadata, plate_id, well_id),
+                    ))
                     click.echo(
                         f"  [{well_id}] {well_sm.n_reads_total:,} reads, "
                         f"broad={well_sm.broad_noncanonical_read_frac:.1%}"
@@ -2265,7 +2425,7 @@ def run_plate_cmd(
             plate_result,
             index,
             reference=reference,
-            polya_sites=getattr(plate_result, "_polya_site_dict", None) or {},
+            polya_sites=plate_result._polya_site_dict,
         )
 
         plate_sm, plate_ct = compute_metrics(
@@ -2273,19 +2433,17 @@ def run_plate_cmd(
             platform=plate_meta.platform.value,
             unstranded=_is_unstranded_library(plate_meta, library_strand),
         )
-        plate_sm._gtf_info   = {"version": gtf_version, "source": gtf_source, "path": gtf}
-        plate_sm._polya_info = {
-            "version": polya_version, "source": polya_source,
-            "path": polya_paths[0] if polya_paths else None, "db": polya_db,
-        }
-        plate_sm._tss_info = {
-            "db": tss_db, "source": "auto-downloaded",
-            "path": tss_paths[0] if tss_paths else None,
-        } if tss_paths else None
-        plate_sm._tso_info = _make_tso_info(tso_seqs, tso_min_match, check_polyg=tso_check_polyg)
+        _attach_result_provenance(
+            plate_sm,
+            gtf_path=gtf, gtf_version=gtf_version, gtf_source=gtf_source,
+            polya_paths=polya_paths, polya_version=polya_version,
+            polya_source=polya_source, polya_db=polya_db,
+            tss_paths=tss_paths, tss_db=tss_db, tss_user_supplied=bool(tss_sites),
+            tso_seqs=tso_seqs, tso_min_match=tso_min_match,
+            tso_check_polyg=tso_check_polyg,
+            version_warning=version_warning,
+        )
         plate_sm._cell_barcodes_info = None
-        if version_warning:
-            plate_sm.warnings.append(version_warning)
 
         _write_run_outputs(
             plate_sm, plate_ct, plate_result, plate_output_dir, plate_label,
@@ -2579,8 +2737,49 @@ def _load_numt_bed(path: str) -> dict:
     return intervals
 
 
+def _write_run_info(sm, output_dir: Path, sample_name: str) -> None:
+    """
+    Machine-readable provenance next to the metrics.
+
+    `read_metrics.tsv` carries only numbers, so nothing downstream could tell
+    which tool version, platform or annotation produced them.  `cohort` needs
+    exactly that to refuse to pool incomparable samples, and it is the record a
+    reader of an archived result set needs anyway.
+    """
+    gtf   = getattr(sm, "_gtf_info", None)   or {}
+    polya = getattr(sm, "_polya_info", None) or {}
+    tss   = getattr(sm, "_tss_info", None)   or {}
+    tso   = getattr(sm, "_tso_info", None)   or {}
+    info = {
+        "scnoisemeter_version": __version__,
+        "sample_name":    sm.sample_name,
+        "bam_path":       sm.bam_path,
+        "platform":       sm.platform,
+        "pipeline_stage": sm.pipeline_stage,
+        "aligner":        sm.aligner,
+        "unstranded":     bool(getattr(sm, "is_unstranded", False)),
+        "n_reads_total":      sm.n_reads_total,
+        "n_reads_classified": sm.n_reads_classified,
+        "n_cells":            sm.n_cells,
+        "gtf_version":  gtf.get("version"),
+        "gtf_source":   gtf.get("source"),
+        "gtf_path":     gtf.get("path"),
+        "polya_db":     polya.get("db"),
+        "polya_version": polya.get("version"),
+        "polya_source": polya.get("source"),
+        "tss_db":       tss.get("db"),
+        "tss_source":   tss.get("source"),
+        "tso_sequences": tso.get("sequences"),
+        "tso_source":    tso.get("source"),
+    }
+    path = output_dir / f"{sample_name}.run_info.json"
+    path.write_text(json.dumps(info, indent=2) + "\n")
+    logger.info("Wrote %s", path)
+
+
 def _write_run_outputs(sm, ct, result, output_dir: Path, sample_name: str,
                        cluster_df=None, intergenic_loci=None, platform=None) -> None:
+    _write_run_info(sm, output_dir, sample_name)
 
     # Sample-wide metrics TSV
     metrics_path = output_dir / f"{sample_name}.read_metrics.tsv"
@@ -2591,8 +2790,7 @@ def _write_run_outputs(sm, ct, result, output_dir: Path, sample_name: str,
                  "n_qcfail", "n_duplicate", "n_reads_classified", "n_reads_unassigned",
                  "n_cells", "broad_noncanonical_read_frac",
                  "broad_noncanonical_base_frac", "artifact_candidate_read_frac",
-                 "artifact_candidate_base_frac", "noise_read_frac", "noise_base_frac",
-                 "noise_read_frac_strict", "noise_base_frac_strict",
+                 "artifact_candidate_base_frac",
                  "strand_concordance", "chimeric_read_frac",
                  "multimapper_read_frac", "unmapped_read_frac", "low_mapq_read_frac",
                  "mean_mapq", "mean_edit_distance", "softclip_base_frac",
@@ -2768,11 +2966,16 @@ def _write_category_tagged_bam(
     logger.info("Wrote category-tagged BAM (%d alignments): %s", n_tagged, output_bam)
 
 
-def _write_compare_outputs(results: dict, output_dir: Path, label_a: str, label_b: str) -> None:
-    """Write matched read retention/transitions and paired cell effect sizes.
+def _write_compare_outputs(results: dict, output_dir: Path, label_a: str, label_b: str,
+                           *, matched_reads: bool = True) -> None:
+    """Write composition effects, and for a nested pair the matched-read tables.
 
     No read-level chi-squared p-values are produced: pre/post-filter BAMs are
     dependent, and reads nested within UMIs/cells are not experimental units.
+
+    When `matched_reads` is False the two BAMs are independent samples, so
+    retention, transitions and the matching summary are undefined and omitted
+    rather than written as NaN.
     """
     from collections import Counter
     import pandas as pd
@@ -2814,9 +3017,9 @@ def _write_compare_outputs(results: dict, output_dir: Path, label_a: str, label_
             )
             paired_median = float(np.median(deltas))
             if len(deltas) > 1:
-                boots = np.empty(1000, dtype=float)
-                for i in range(len(boots)):
-                    boots[i] = np.median(rng.choice(deltas, size=len(deltas), replace=True))
+                boots = np.median(
+                    rng.choice(deltas, size=(1000, len(deltas)), replace=True), axis=1
+                )
                 ci_low, ci_high = map(float, np.quantile(boots, [0.025, 0.975]))
         stats_rows.append({
             "category": cat.value,
@@ -2833,55 +3036,57 @@ def _write_compare_outputs(results: dict, output_dir: Path, label_a: str, label_
     stats_path = output_dir / "comparison.stats.tsv"
     stats_df.to_csv(stats_path, sep="\t", index=False)
 
-    # Exact read-key matching for subset retention and category transitions.
     _sm_a, _ct_a, result_a = results[label_a]
     _sm_b, _ct_b, result_b = results[label_b]
-    assignments_a = result_a.read_assignments
-    assignments_b = result_b.read_assignments
-    keys_a, keys_b = set(assignments_a), set(assignments_b)
-    shared_keys = keys_a & keys_b
 
-    retention_rows = []
-    for cat in CATEGORY_ORDER:
-        cat_keys = {k for k, (c, _cb) in assignments_a.items() if c == cat}
-        n_initial = len(cat_keys)
-        n_retained = len(cat_keys & keys_b)
-        n_same = sum(
-            1 for key in cat_keys & shared_keys
-            if assignments_b[key][0] == cat
+    # Exact read-key matching for subset retention and category transitions.
+    if matched_reads:
+        assignments_a = result_a.read_assignments
+        assignments_b = result_b.read_assignments
+        keys_a, keys_b = set(assignments_a), set(assignments_b)
+        shared_keys = keys_a & keys_b
+
+        retention_rows = []
+        for cat in CATEGORY_ORDER:
+            cat_keys = {k for k, (c, _cb) in assignments_a.items() if c == cat}
+            n_initial = len(cat_keys)
+            n_retained = len(cat_keys & keys_b)
+            n_same = sum(
+                1 for key in cat_keys & shared_keys
+                if assignments_b[key][0] == cat
+            )
+            retention_rows.append({
+                "category_a": cat.value,
+                "n_in_a": n_initial,
+                "n_present_in_b": n_retained,
+                "retention_fraction": n_retained / n_initial if n_initial else float("nan"),
+                "n_same_category_in_b": n_same,
+                "same_category_fraction": n_same / n_retained if n_retained else float("nan"),
+            })
+        pd.DataFrame(retention_rows).to_csv(
+            output_dir / "comparison.retention.tsv", sep="\t", index=False
         )
-        retention_rows.append({
-            "category_a": cat.value,
-            "n_in_a": n_initial,
-            "n_present_in_b": n_retained,
-            "retention_fraction": n_retained / n_initial if n_initial else float("nan"),
-            "n_same_category_in_b": n_same,
-            "same_category_fraction": n_same / n_retained if n_retained else float("nan"),
-        })
-    pd.DataFrame(retention_rows).to_csv(
-        output_dir / "comparison.retention.tsv", sep="\t", index=False
-    )
 
-    transitions = Counter(
-        (assignments_a[key][0].value, assignments_b[key][0].value)
-        for key in shared_keys
-    )
-    transition_rows = [
-        {"category_a": a, "category_b": b, "n_reads": n}
-        for (a, b), n in sorted(transitions.items())
-    ]
-    pd.DataFrame(
-        transition_rows, columns=["category_a", "category_b", "n_reads"]
-    ).to_csv(output_dir / "comparison.transitions.tsv", sep="\t", index=False)
+        transitions = Counter(
+            (assignments_a[key][0].value, assignments_b[key][0].value)
+            for key in shared_keys
+        )
+        transition_rows = [
+            {"category_a": a, "category_b": b, "n_reads": n}
+            for (a, b), n in sorted(transitions.items())
+        ]
+        pd.DataFrame(
+            transition_rows, columns=["category_a", "category_b", "n_reads"]
+        ).to_csv(output_dir / "comparison.transitions.tsv", sep="\t", index=False)
 
-    summary_path = output_dir / "comparison.matching.tsv"
-    pd.DataFrame([{
-        "n_read_keys_a": len(keys_a),
-        "n_read_keys_b": len(keys_b),
-        "n_shared": len(shared_keys),
-        "n_only_a": len(keys_a - keys_b),
-        "n_only_b": len(keys_b - keys_a),
-    }]).to_csv(summary_path, sep="\t", index=False)
+        summary_path = output_dir / "comparison.matching.tsv"
+        pd.DataFrame([{
+            "n_read_keys_a": len(keys_a),
+            "n_read_keys_b": len(keys_b),
+            "n_shared": len(shared_keys),
+            "n_only_a": len(keys_a - keys_b),
+            "n_only_b": len(keys_b - keys_a),
+        }]).to_csv(summary_path, sep="\t", index=False)
 
     report_path = output_dir / "comparison.report.html"
     write_compare_report(
@@ -2890,7 +3095,10 @@ def _write_compare_outputs(results: dict, output_dir: Path, label_a: str, label_
         stats_df,
         report_path,
     )
-    logger.info("Wrote matched comparison outputs to %s", output_dir)
+    logger.info(
+        "Wrote %s comparison outputs to %s",
+        "matched" if matched_reads else "composition-only", output_dir,
+    )
 
 
 # ---------------------------------------------------------------------------

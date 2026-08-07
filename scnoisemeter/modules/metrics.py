@@ -52,9 +52,8 @@ from scnoisemeter.constants import (
     LENGTH_BIN_LABELS_LONG,
     LENGTH_BIN_LABELS_SHORT,
     LENGTH_SHORT_READ_THRESHOLD,
+    ARTIFACT_CANDIDATE_CATEGORIES,
     NOISE_CATEGORIES,
-    NOISE_CATEGORIES_STRICT,
-    NOISE_CATEGORIES_STRICT_UNSTRANDED,
     NOISE_CATEGORIES_UNSTRANDED,
     ReadCategory,
 )
@@ -111,19 +110,13 @@ class SampleMetrics:
     # Per-category base fractions (sample-wide)
     base_fracs:            dict = field(default_factory=dict)
 
-    # Preferred, descriptive aggregate names.
+    # Descriptive aggregate composition.  broad_noncanonical_* is everything
+    # outside canonical exonic-sense signal; artifact_candidate_* is the subset
+    # carrying positive artifact evidence.  Neither is a causal noise estimate.
     broad_noncanonical_read_frac: float = 0.0
     broad_noncanonical_base_frac: float = 0.0
     artifact_candidate_read_frac: float = 0.0
     artifact_candidate_base_frac: float = 0.0
-
-    # Deprecated compatibility aliases for pre-v0.7 consumers.
-    noise_read_frac:       float = 0.0
-    noise_base_frac:       float = 0.0
-
-    # ``strict`` now aliases artifact_candidate_*; it is not a lower bound.
-    noise_read_frac_strict: float = 0.0
-    noise_base_frac_strict: float = 0.0
 
     # Strand concordance
     strand_concordance:    float = 0.0
@@ -140,7 +133,7 @@ class SampleMetrics:
     softclip_base_frac:    Optional[float] = None
 
     # True when the protocol is non-stranded (e.g. Smart-seq2 / FLASH-seq).
-    # When True, noise_read_frac excludes EXONIC_ANTISENSE — those reads are
+    # When True, broad_noncanonical_* excludes EXONIC_ANTISENSE — those reads are
     # genuine cDNA signal from the reverse strand, not artifacts.
     is_unstranded: bool = False
 
@@ -184,7 +177,7 @@ class CellTable:
 
     Index: cell_barcode (str)
     Columns include: n_reads, n_bases, read_frac_*, base_frac_*,
-    umi_complexity_*, noise_read_frac, noise_base_frac,
+    umi_complexity_*, broad_noncanonical_read_frac, broad_noncanonical_base_frac,
     n_tso, n_polya, n_noncanon, n_tso_concat.
     """
     df: pd.DataFrame
@@ -263,26 +256,20 @@ def compute_metrics(
             row[f"umi_sequence_diversity_{cat.value}"] = diversity
             row[f"umi_complexity_{cat.value}"] = diversity
 
-        # Aggregate noise — use unstranded set for non-stranded protocols
-        _noise_cats = NOISE_CATEGORIES_UNSTRANDED if unstranded else NOISE_CATEGORIES
-        noise_reads = sum(cat_read_counts.get(cat, 0) for cat in _noise_cats)
-        row["noise_read_frac"] = noise_reads / total_reads if total_reads else 0.0
+        # Aggregate composition — the unstranded set drops EXONIC_ANTISENSE,
+        # which is expected signal rather than an artifact in those protocols.
+        _broad_cats = NOISE_CATEGORIES_UNSTRANDED if unstranded else NOISE_CATEGORIES
+        broad_reads = sum(cat_read_counts.get(cat, 0) for cat in _broad_cats)
+        broad_bases = sum(result.base_counts[cb].get(cat, 0) for cat in _broad_cats)
+        row["broad_noncanonical_read_frac"] = broad_reads / total_reads if total_reads else 0.0
+        row["broad_noncanonical_base_frac"] = broad_bases / total_bases if total_bases else 0.0
 
-        noise_bases = sum(result.base_counts[cb].get(cat, 0) for cat in _noise_cats)
-        row["noise_base_frac"] = noise_bases / total_bases if total_bases else 0.0
-
-        _candidate_cats = (
-            NOISE_CATEGORIES_STRICT_UNSTRANDED if unstranded
-            else NOISE_CATEGORIES_STRICT
-        )
-        candidate_reads = sum(cat_read_counts.get(cat, 0) for cat in _candidate_cats)
-        candidate_bases = sum(result.base_counts[cb].get(cat, 0) for cat in _candidate_cats)
-        row["broad_noncanonical_read_frac"] = row["noise_read_frac"]
-        row["broad_noncanonical_base_frac"] = row["noise_base_frac"]
+        # ARTIFACT_CANDIDATE_CATEGORIES excludes EXONIC_ANTISENSE already, so it
+        # needs no stranded/unstranded split.
+        candidate_reads = sum(cat_read_counts.get(cat, 0) for cat in ARTIFACT_CANDIDATE_CATEGORIES)
+        candidate_bases = sum(result.base_counts[cb].get(cat, 0) for cat in ARTIFACT_CANDIDATE_CATEGORIES)
         row["artifact_candidate_read_frac"] = candidate_reads / total_reads if total_reads else 0.0
         row["artifact_candidate_base_frac"] = candidate_bases / total_bases if total_bases else 0.0
-        row["noise_read_frac_strict"] = row["artifact_candidate_read_frac"]
-        row["noise_base_frac_strict"] = row["artifact_candidate_base_frac"]
 
         # Artifact flags
         flags = result.artifact_flags.get(cb, {})
@@ -361,25 +348,23 @@ def compute_metrics(
         for cat in CATEGORY_ORDER
     }
 
-    # Aggregate noise fractions — use unstranded set for non-stranded protocols
-    _noise_cats = NOISE_CATEGORIES_UNSTRANDED if unstranded else NOISE_CATEGORIES
-    sm.noise_read_frac = sum(
-        sm.read_fracs.get(cat.value, 0.0) for cat in _noise_cats
+    # Aggregate composition — the unstranded set drops EXONIC_ANTISENSE, which
+    # is expected signal rather than an artifact in those protocols.
+    _broad_cats = NOISE_CATEGORIES_UNSTRANDED if unstranded else NOISE_CATEGORIES
+    sm.broad_noncanonical_read_frac = sum(
+        sm.read_fracs.get(cat.value, 0.0) for cat in _broad_cats
     )
-    sm.noise_base_frac = sum(
-        sm.base_fracs.get(cat.value, 0.0) for cat in _noise_cats
+    sm.broad_noncanonical_base_frac = sum(
+        sm.base_fracs.get(cat.value, 0.0) for cat in _broad_cats
     )
-    _noise_cats_strict = NOISE_CATEGORIES_STRICT_UNSTRANDED if unstranded else NOISE_CATEGORIES_STRICT
-    sm.noise_read_frac_strict = sum(
-        sm.read_fracs.get(cat.value, 0.0) for cat in _noise_cats_strict
+    # ARTIFACT_CANDIDATE_CATEGORIES excludes EXONIC_ANTISENSE already, so it
+    # needs no stranded/unstranded split.
+    sm.artifact_candidate_read_frac = sum(
+        sm.read_fracs.get(cat.value, 0.0) for cat in ARTIFACT_CANDIDATE_CATEGORIES
     )
-    sm.noise_base_frac_strict = sum(
-        sm.base_fracs.get(cat.value, 0.0) for cat in _noise_cats_strict
+    sm.artifact_candidate_base_frac = sum(
+        sm.base_fracs.get(cat.value, 0.0) for cat in ARTIFACT_CANDIDATE_CATEGORIES
     )
-    sm.broad_noncanonical_read_frac = sm.noise_read_frac
-    sm.broad_noncanonical_base_frac = sm.noise_base_frac
-    sm.artifact_candidate_read_frac = sm.noise_read_frac_strict
-    sm.artifact_candidate_base_frac = sm.noise_base_frac_strict
 
     # Strand concordance
     es = total_reads_all.get(ReadCategory.EXONIC_SENSE, 0)
@@ -433,8 +418,8 @@ def compute_metrics(
                 sm.umi_complexity[cat.value] = value
 
     # Per-cell noise summary stats
-    if not cell_df.empty and "noise_read_frac" in cell_df.columns:
-        vals = cell_df["noise_read_frac"].dropna().values
+    if not cell_df.empty and "broad_noncanonical_read_frac" in cell_df.columns:
+        vals = cell_df["broad_noncanonical_read_frac"].dropna().values
         if len(vals) > 0:
             sm.per_cell_noise_median = float(np.median(vals))
             sm.per_cell_noise_iqr    = float(np.percentile(vals, 75) - np.percentile(vals, 25))
@@ -598,7 +583,7 @@ def compute_cluster_metrics(
     -------
     cluster_df : pd.DataFrame
         One row per cluster, columns include:
-        n_cells, median_noise_read_frac, iqr_noise_read_frac,
+        n_cells, median_broad_noncanonical_read_frac,
         median_exonic_sense_frac, median_intronic_pure_frac,
         median_chimeric_frac, median_tso_rate, median_polya_rate.
     """
@@ -629,8 +614,6 @@ def compute_cluster_metrics(
         for col, out_name in [
             ("broad_noncanonical_read_frac", "median_broad_noncanonical_read_frac"),
             ("artifact_candidate_read_frac", "median_artifact_candidate_read_frac"),
-            ("noise_read_frac",        "median_noise_read_frac"),
-            ("noise_base_frac",        "median_noise_base_frac"),
             (f"read_frac_{ReadCategory.EXONIC_SENSE.value}",    "median_exonic_sense_frac"),
             (f"read_frac_{ReadCategory.INTRONIC_PURE.value}",   "median_intronic_pure_frac"),
             (f"read_frac_{ReadCategory.CHIMERIC.value}",        "median_chimeric_frac"),
@@ -714,10 +697,8 @@ def to_multiqc_json(sm: SampleMetrics) -> dict:
     data = {
         "broad_noncanonical_read_frac": round(sm.broad_noncanonical_read_frac, 4),
         "artifact_candidate_read_frac": round(sm.artifact_candidate_read_frac, 4),
-        "noise_read_frac":          round(sm.noise_read_frac,          4),
-        "noise_base_frac":          round(sm.noise_base_frac,          4),
-        "noise_read_frac_strict":   round(sm.noise_read_frac_strict,   4),
-        "noise_base_frac_strict":   round(sm.noise_base_frac_strict,   4),
+        "broad_noncanonical_base_frac": round(sm.broad_noncanonical_base_frac, 4),
+        "artifact_candidate_base_frac": round(sm.artifact_candidate_base_frac, 4),
         "strand_concordance":       round(sm.strand_concordance,       4),
         "chimeric_read_frac":       round(sm.chimeric_read_frac,       4),
         "multimapper_read_frac":    round(sm.multimapper_read_frac,    4),
