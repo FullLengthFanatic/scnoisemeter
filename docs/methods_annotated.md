@@ -1,6 +1,6 @@
 # scNoiseMeter annotated methods
 
-**Code-linked implementation companion for version 0.7.2**
+**Code-linked implementation companion for version 0.8.0**
 
 This document maps the scientific rules to modules and functions. It avoids fixed line numbers because they become stale during refactoring. See [whitepaper.md](whitepaper.md) for rationale and literature context, and [documentation.md](documentation.md) for the CLI/output reference.
 
@@ -284,7 +284,7 @@ aggregate sets from `constants.py` so they cannot drift from the classifier agai
 | Require exact TSO evidence | Use `--no-polyg-tso` and increase `--tso-min-match` |
 | Enable context/junction checks | Supply `--reference` |
 | Interpret repeats | Supply a matching RepeatMasker BED |
-| Reproduce reservoirs | Supply `--seed` and keep thread count fixed |
+| Reproduce reservoirs | Seeded by default (42); keep thread count fixed |
 | Alter intergenic thresholds | Change named constants, document them, and revalidate |
 
 Do not tune `--chimeric-distance`; it is deprecated and has no scientific decision role in version 0.7.

@@ -1,6 +1,6 @@
 # scNoiseMeter documentation
 
-Version 0.7.2 operational reference.
+Version 0.8.0 operational reference.
 
 This file documents installation, inputs, commands, options, outputs, and interpretation. The scientific rationale is in [whitepaper.md](whitepaper.md); the code map is in [methods_annotated.md](methods_annotated.md).
 
@@ -108,7 +108,7 @@ BED coordinates are zero-based, half-open; midpoint is used for end-site resourc
 | `--library-strand` | `auto` | `stranded` or `unstranded`; explicit is preferred |
 | `--pipeline-stage` | `auto` | `raw`, `pre_filter`, `post_filter`, or `custom` metadata |
 | `--threads` | 4 | chromosome workers within a BAM |
-| `--seed` | none | deterministic reservoir sampling given identical threads/input |
+| `--seed` | 42 | reservoir sampling is seeded by default, so runs agree given identical threads/input; pass another value to draw a different sample |
 | `--no-cache` | off | rebuild annotation index |
 | `--offline` | off | forbid downloads and require cached/provided resources |
 | `--exclude-biotypes` | none | repeatable gene biotype exclusion |
@@ -409,7 +409,9 @@ flag rates on a log axis, and per-cell spread for the samples that have barcodes
 
 Default cache directory is `~/.cache/scnoisemeter`. Annotation, polyA, and TSS caches are separately fingerprinted. `--offline` prevents network access. `--no-cache` affects annotation-index reuse.
 
-`--seed` controls read-length, insert-size, endpoint, and intergenic reservoir selection. Reservoirs are merged using seen-record weights. Identical seed, inputs, software, and thread count make tabular sampling reproducible; generated HTML may contain non-deterministic Plotly element identifiers.
+`--seed` controls read-length, insert-size, endpoint, and intergenic reservoir selection, and defaults to 42. Reservoirs are merged using seen-record weights. Identical seed, inputs, software, and thread count make tabular sampling reproducible; generated HTML may contain non-deterministic Plotly element identifiers.
+
+Seeding is on by default because several reported values derive from reservoir samples: before 0.8.0 an unseeded run moved `broad_noncanonical_read_frac` in the third decimal between identical invocations, which is larger than many of the differences a comparison is trying to resolve. A residual difference around the seventeenth significant digit remains, from the order in which parallel per-contig results are summed, and is not meaningful.
 
 For archival work, preserve explicit input files or checksums, command line, version/commit, seed, and output denominators.
 

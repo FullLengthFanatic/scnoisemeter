@@ -53,6 +53,7 @@ from scnoisemeter.constants import (
     Chemistry,
     COMPARE_NESTED_MIN_OVERLAP,
     COMPARE_PROBE_SAMPLE_SIZE,
+    DEFAULT_SEED,
     DEFAULT_CHIMERIC_DISTANCE,
     DEFAULT_THREADS,
     INTERGENIC_LOCUS_WINDOW,
@@ -201,11 +202,11 @@ def _shared_options(func):
                      help="Use only cached annotation files; never make network calls. "
                           "Raises an error if the cache is empty. "
                           "Ignored when --gtf / --polya-sites are supplied explicitly."),
-        click.option("--seed",               default=None,   type=int,
+        click.option("--seed",               default=DEFAULT_SEED, show_default=True, type=int,
                      help="Integer seed for reservoir sampling (read-length, insert-size, "
-                          "intergenic, exonic-end position samples). When set, runs are "
-                          "byte-reproducible given identical inputs and thread count. "
-                          "Default: nondeterministic."),
+                          "intergenic, exonic-end position samples). Runs are reproducible "
+                          "given identical inputs and thread count. Pass a different value "
+                          "to draw a different sample."),
         click.option("--verbose", "-v",      is_flag=True,   help="Enable debug logging."),
     ]
     for dec in reversed(decorators):
@@ -1504,7 +1505,7 @@ def cohort_cmd(results_dirs, sample_sheet, output_dir, offline, verbose):
               help="Use only cached annotation files; never make network calls. "
                    "Raises an error if the cache is empty. "
                    "Ignored when --gtf / --polya-sites are supplied explicitly.")
-@click.option("--seed",        default=None,   type=int,
+@click.option("--seed",        default=DEFAULT_SEED, show_default=True, type=int,
               help="Integer seed for reservoir sampling (reproducibility).")
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug logging.")
 def discover_cmd(
