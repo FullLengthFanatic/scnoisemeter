@@ -353,6 +353,18 @@ BARCODE_AUTODETECT_MIN_FRACTION = 0.50
 
 
 # ---------------------------------------------------------------------------
+# Reservoir sampling
+# ---------------------------------------------------------------------------
+
+# Seeded by default so two runs over the same BAM agree.  Several reported
+# values are computed from reservoir samples, so an unseeded run moved
+# broad_noncanonical_read_frac in the third decimal between identical
+# invocations, which is larger than many of the differences being compared.
+# Pass a different --seed to draw a different sample.
+DEFAULT_SEED = 42
+
+
+# ---------------------------------------------------------------------------
 # `compare`: nested-pair detection
 # ---------------------------------------------------------------------------
 
