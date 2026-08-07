@@ -72,6 +72,8 @@ Do not rely on an aligner name alone to identify the sequencer or library. `mini
 
 The interactive HTML report also covers [sample metadata](docs/report_preview1.png), [read and base fractions](docs/report_preview3.png), [length-stratified and per-cell composition](docs/report_preview4.png), [read-length distributions and artifact flags](docs/report_preview5.png), and [the top intergenic loci](docs/report_preview6.png).
 
+These screenshots come from chr17, chr19-chr22 and chrM of a 10x Kinnex sample, kept small so the previews stay current. Restricting to six contigs raises the mitochondrial share well above what the whole sample shows, so read the panels as a tour of the layout rather than as typical values.
+
 ## Classification
 
 Unmapped, secondary, and supplementary records are counted separately and excluded from the genomic-category denominator. Remaining primary alignments are processed in this priority order. The historical `read_*` names mean alignment records; paired mates count separately. Version 0.7 also emits precise `n_records_*` and `n_alignments_classified` aliases.

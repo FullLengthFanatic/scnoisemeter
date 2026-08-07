@@ -571,8 +571,21 @@ def _artifact_flags(sm: SampleMetrics) -> go.Figure:
     fracs = [v / denom for v in values]
     max_frac = max(fracs) if fracs else 0.01
 
+    def _pct(f: float) -> str:
+        """Enough decimals for this value, not for the largest bar.
+
+        Keying precision to the axis maximum rendered a measured 196 reads as
+        "0.00%" next to a 2.42% bar, which reads as "none found".
+        """
+        if f == 0:
+            return "0%"
+        dec = 2 if f >= 0.01 else 3 if f >= 0.001 else 4
+        return f"{f:.{dec}%}"
+
+    # Axis ticks follow the largest bar; the labels above carry their own scale.
+    _dec = 2 if max_frac >= 0.01 else 3 if max_frac >= 0.001 else 4
     hover = [
-        f"<b>{lbl}</b><br>{f:.3%} of classified reads<br><i>{desc}</i>"
+        f"<b>{lbl}</b><br>{_pct(f)} of classified reads<br><i>{desc}</i>"
         for lbl, f, desc in zip(labels, fracs, descriptions)
     ]
 
@@ -581,16 +594,19 @@ def _artifact_flags(sm: SampleMetrics) -> go.Figure:
         y=labels,
         orientation="h",
         marker_color=colors,
-        text=[f"{f:.3%}" for f in fracs],
+        text=[_pct(f) for f in fracs],
         textposition=["inside" if f > max_frac * 0.5 else "outside" for f in fracs],
         hovertext=hover,
         hoverinfo="text",
     ))
     fig.update_layout(
-        title=dict(text="Artifact flag rates (fraction of classified reads)", x=0.5),
+        title=dict(text="Artifact flag rates (fraction of classified reads)",
+                   x=0.5, xanchor="center", xref="container"),
         xaxis=dict(
             title="Fraction",
-            tickformat=".2%",
+            # Flag rates run from ~1e-5 to ~1e-2 across real samples; a fixed
+            # two-decimal percent collapsed the whole axis to "0.00%" repeated.
+            tickformat=f".{_dec}%",
             range=[0, max_frac * 1.05],  # tight — text inside or on bars
         ),
         yaxis=dict(autorange="reversed", automargin=True),
