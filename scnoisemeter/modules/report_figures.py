@@ -1144,7 +1144,7 @@ def _cohort_composition_bars(cohort) -> go.Figure:
             x=total, y=label, xref="x", yref="y",
             text=f"  exonic sense {es:.1%}" if es is not None else "  exonic sense n/a",
             showarrow=False, xanchor="left",
-            font=dict(size=10, color="#636e72"),
+            font=dict(size=12, color="#636e72"),
         )
 
     x_max = max(totals) if totals else 1.0
@@ -1155,7 +1155,7 @@ def _cohort_composition_bars(cohort) -> go.Figure:
                    range=[0, x_max * 1.32]),
         yaxis=dict(autorange="reversed", automargin=True),
         legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.18,
-                    font=dict(size=10), traceorder="normal"),
+                    font=dict(size=12), traceorder="normal"),
         height=max(360, len(labels) * 34 + 220),
         margin=dict(t=60, b=120, l=190, r=40),
     )
@@ -1182,6 +1182,12 @@ def _cohort_deviation_heatmap(cohort) -> go.Figure:
     raw = [[s.get(m) for s in cohort.samples] for m in metrics]
 
     use_deviation = len(cohort.samples) >= 4
+    # Exonic sense is the one row where a higher value means MORE canonical
+    # signal; everywhere else a higher value means more of a non-canonical or
+    # ambiguous category. Without flipping it, the same red meant "best" on that
+    # row and "worst" on every other one.
+    _invert = {f"read_frac_{ReadCategory.EXONIC_SENSE.value}",
+               f"base_frac_{ReadCategory.EXONIC_SENSE.value}"}
     # A row where every sample sits near zero has a spread of ~0, and scaling by
     # it would paint a 0.0003 percentage-point difference as the strongest
     # signal in the figure.  Such rows stay neutral; the text still shows the
@@ -1190,17 +1196,28 @@ def _cohort_deviation_heatmap(cohort) -> go.Figure:
     MIN_ROW_MAX = 0.001      # 0.1% of reads
     MIN_ROW_SAMPLES = 3
     z, text = [], []
-    for row in raw:
-        present = [v for v in row if v is not None]
-        median = sorted(present)[len(present) // 2] if present else 0.0
-        spread = (max(present) - min(present)) if present else 0.0
+    for metric, row in zip(metrics, raw):
+        sign = -1.0 if metric in _invert else 1.0
+        present = sorted(v for v in row if v is not None)
+        median = present[len(present) // 2] if present else 0.0
+        full_spread = (present[-1] - present[0]) if present else 0.0
         informative = (
-            use_deviation and spread > 0
+            use_deviation and full_spread > 0
             and len(present) >= MIN_ROW_SAMPLES
-            and max(present) >= MIN_ROW_MAX
+            and present[-1] >= MIN_ROW_MAX
         )
+        # Scale on the interquartile spread, not the full range, and clip.
+        # One extreme sample would otherwise consume the entire colour range:
+        # on a real 12-sample cohort that left 10 of 12 cells indistinguishable
+        # from white in several rows, hiding all the variation among the
+        # remaining samples. Outliers now saturate at the ends instead.
+        q1 = present[len(present) // 4] if present else 0.0
+        q3 = present[(3 * len(present)) // 4] if present else 0.0
+        robust = max(q3 - median, median - q1) or (full_spread / 2)
         z.append([
-            None if v is None else ((v - median) / spread if informative else 0.0)
+            None if v is None else
+            (max(-1.0, min(1.0, sign * (v - median) / (1.5 * robust)))
+             if informative else 0.0)
             for v in row
         ])
         text.append(["n/a" if v is None else f"{v:.2%}" for v in row])
@@ -1215,10 +1232,12 @@ def _cohort_deviation_heatmap(cohort) -> go.Figure:
     fig = go.Figure(go.Heatmap(
         z=z, x=labels, y=y_labels,
         colorscale="RdBu_r", zmid=0, zmin=-1, zmax=1,
-        text=text, texttemplate="%{text}", textfont=dict(size=9),
+        text=text, texttemplate="%{text}", textfont=dict(size=13),
         hovertemplate="%{x}<br>%{y}<br>%{text}<extra></extra>",
-        colorbar=dict(title="vs cohort<br>median",
-                      tickvals=[-1, 0, 1], ticktext=["lowest", "median", "highest"]),
+        colorbar=dict(tickvals=[-1, 0, 1],
+                      ticktext=["closer to<br>canonical", "cohort<br>median",
+                                "further from<br>canonical"],
+                      tickfont=dict(size=12), thickness=18, len=0.9),
     ))
 
     # Mark the cells whose meaning changes with library strandedness.
@@ -1233,19 +1252,21 @@ def _cohort_deviation_heatmap(cohort) -> go.Figure:
                                   line=dict(color="#2d3436", width=2, dash="dot"),
                                   fillcolor="rgba(0,0,0,0)")
 
-    subtitle = ("Colour is deviation from the cohort median; cell text is the raw fraction"
+    subtitle = ("Red is further from canonical exonic-sense signal, blue is closer, "
+                "in every row. Scaled on the interquartile spread so one outlier "
+                "cannot flatten the rest; cell text is the raw fraction"
                 if use_deviation else
                 "Fewer than 4 samples: no cohort median, so colour is not scaled")
-    subtitle += "; rows that are near-zero everywhere are left neutral"
+    subtitle += ". Rows near zero everywhere are left neutral"
     if cohort.has_mixed_strandedness:
         subtitle += " · dotted cells are unstranded and not comparable here"
 
     fig.update_layout(
         title=dict(text=f"Category signature by sample<br><sup>{subtitle}</sup>", x=0.5),
-        xaxis=dict(tickangle=-30, automargin=True),
-        yaxis=dict(autorange="reversed", automargin=True),
-        height=max(340, len(metrics) * 30 + 190),
-        margin=dict(t=100, b=90, l=210, r=70),
+        xaxis=dict(tickangle=-30, automargin=True, tickfont=dict(size=13)),
+        yaxis=dict(autorange="reversed", automargin=True, tickfont=dict(size=13)),
+        height=max(420, len(metrics) * 42 + 230),
+        margin=dict(t=110, b=110, l=250, r=90),
     )
     return fig
 
