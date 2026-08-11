@@ -1252,88 +1252,81 @@ def _cohort_deviation_heatmap(cohort) -> go.Figure:
 
 def _cohort_artifact_dots(cohort) -> go.Figure:
     """
-    One row per artifact flag, one dot per sample, log x-axis.
+    One row per sample, one coloured dot per artifact flag, log x-axis.
 
-    These rates span roughly four orders of magnitude across real samples, so a
-    linear axis collapses all but the largest onto zero.  Dots rather than bars
-    because bar length measured from an arbitrary log baseline means nothing.
-    The vertical tick is the cohort median for that flag.
+    Samples go on the axis rather than the flags: with the flags on the axis
+    every dot in a row was the same colour and the only way to tell which sample
+    a point belonged to was to hover it, which is useless in a static figure or
+    a printed one.  Now the row names the sample and the colour names the flag.
 
-    Every flag keeps its row even when no sample reports it, so a missing
-    measurement is visible as an empty row rather than as an absent concept.
+    The log axis is not decorative: across real cohorts these rates span about
+    five orders of magnitude, from ~3e-06 TSO invasion to ~8e-02 internal
+    priming, and a linear axis puts everything except the largest on zero.
     """
     from scnoisemeter.modules.cohort import ARTIFACT_FLAG_COUNTS
 
     if not cohort.samples:
         return go.Figure()
 
-    group_colours = _group_colour_map(cohort)
-    has_groups = any(s.group for s in cohort.samples)
-    n_samples = len(cohort.samples)
-
-    row_labels, rates_by_row = [], []
-    for key, flag_label in ARTIFACT_FLAG_COUNTS.items():
-        rates = [(s, s.flag_rate(key)) for s in cohort.samples]
-        n_missing = sum(1 for _, r in rates if r is None)
-        n_zero = sum(1 for _, r in rates if r == 0)
-        note = ""
-        if n_missing:
-            note = f"<br><sup>not reported by {n_missing}/{n_samples}</sup>"
-        elif n_zero == n_samples:
-            note = f"<br><sup>zero in all {n_samples}</sup>"
-        row_labels.append(flag_label + note)
-        rates_by_row.append([(s, r) for s, r in rates if r is not None and r > 0])
+    flag_colours = {
+        "n_tso_invasion":      "#c50037",
+        "n_polya_priming":     "#e4a067",
+        "n_noncanon_junction": "#393eca",
+        "n_tso_concatemer":    "#8316a4",
+    }
+    labels = [s.label for s in cohort.samples]
 
     fig = go.Figure()
-    seen_groups: set = set()
-    for label, present in zip(row_labels, rates_by_row):
-        if not present:
-            # Register the category so a flag nothing reported still gets a row.
-            # Dropping it would read as "this artifact does not exist".
-            fig.add_trace(go.Scatter(x=[None], y=[label], mode="markers",
-                                     showlegend=False, hoverinfo="skip"))
-        if present:
-            values = sorted(r for _, r in present)
-            median = values[len(values) // 2]
-            fig.add_trace(go.Scatter(
-                x=[median], y=[label], mode="markers",
-                marker=dict(symbol="line-ns-open", size=26, color="#2d3436",
-                            line=dict(width=2)),
-                showlegend=False,
-                hovertemplate=f"cohort median {median:.2e}<extra></extra>",
-            ))
-        for s, rate in present:
-            group = s.group or "sample"
-            fig.add_trace(go.Scatter(
-                x=[rate], y=[label], mode="markers",
-                name=group, legendgroup=group,
-                showlegend=has_groups and group not in seen_groups,
-                marker=dict(size=12, opacity=0.85,
-                            color=group_colours.get(s.group, "#393eca"),
-                            line=dict(width=1.5, color="white")),
-                customdata=[[s.label]],
-                hovertemplate="%{customdata[0]}<br>%{x:.3e}<extra></extra>",
-            ))
-            seen_groups.add(group)
+    any_point = False
+    for key, flag_label in ARTIFACT_FLAG_COUNTS.items():
+        xs, ys, custom = [], [], []
+        for s in cohort.samples:
+            rate = s.flag_rate(key)
+            if rate is None or rate <= 0:
+                continue          # absent or zero cannot be placed on a log axis
+            xs.append(rate)
+            ys.append(s.label)
+            custom.append([flag_label])
+        if not xs:
+            continue
+        any_point = True
+        fig.add_trace(go.Scatter(
+            x=xs, y=ys, mode="markers", name=flag_label,
+            marker=dict(size=13, opacity=0.9, color=flag_colours.get(key, "#2d3436"),
+                        line=dict(width=1.5, color="white")),
+            customdata=custom,
+            hovertemplate="%{y}<br>%{customdata[0]}: %{x:.3e}<extra></extra>",
+        ))
 
-    if not any(rates_by_row):
+    if not any_point:
         return go.Figure()
+
+    # Say plainly what is not plotted, rather than leaving a silent gap.
+    missing = []
+    for key, flag_label in ARTIFACT_FLAG_COUNTS.items():
+        absent = sum(1 for s in cohort.samples if s.flag_rate(key) is None)
+        zero   = sum(1 for s in cohort.samples if s.flag_rate(key) == 0)
+        if absent:
+            missing.append(f"{flag_label} not reported by {absent}")
+        elif zero == len(cohort.samples):
+            missing.append(f"{flag_label} zero in all {zero}")
+        elif zero:
+            missing.append(f"{flag_label} zero in {zero}")
+    note = (" · " + "; ".join(missing)) if missing else ""
 
     fig.update_layout(
         title=dict(
             text="Artifact flag rates by sample"
-                 "<br><sup>Log axis: these rates span orders of magnitude · "
-                 "vertical tick is the cohort median</sup>",
-            x=0.5,
+                 f"<br><sup>Log axis: rates span orders of magnitude{note}</sup>",
+            x=0.5, xanchor="center", xref="container",
         ),
         xaxis=dict(title="Fraction of classified reads", type="log",
-                   showgrid=True, dtick=1, tickformat=".0e",
-                   minor=dict(showgrid=False)),
+                   showgrid=True, dtick=1, tickformat=".0e"),
         yaxis=dict(automargin=True, categoryorder="array",
-                   categoryarray=row_labels[::-1]),   # first flag at the top
-        legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.3),
-        height=max(300, len(row_labels) * 52 + 190),
-        margin=dict(t=95, b=110 if has_groups else 80, l=210, r=50),
+                   categoryarray=labels[::-1]),
+        legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.16),
+        height=max(340, len(labels) * 30 + 190),
+        margin=dict(t=95, b=95, l=210, r=50),
     )
     return fig
 
