@@ -6,7 +6,7 @@ Barcode-aware alignment artifact and read-distribution QC for single-cell RNA-se
 
 scNoiseMeter assigns each mapped primary alignment to one of 17 mutually exclusive output categories, partitions its aligned reference bases without double-counting, and reports independent artifact-evidence flags. It supports barcode-aware droplet data, barcode-free BAMs, pre/post-filter comparisons, and Smart-seq/FLASH-seq plate aggregation.
 
-Version **0.8.0** deliberately avoids presenting a single category sum as a causal estimate of “technical noise.” It reports:
+Version **0.8.1** deliberately avoids presenting a single category sum as a causal estimate of “technical noise.” It reports:
 
 - `broad_noncanonical_*`: a descriptive composition of antisense, selected intronic and intergenic categories, hotspots, and chimeric alignments;
 - `artifact_candidate_*`: the narrower subset with positive alignment/context evidence (`intergenic_hotspot` and `chimeric`);

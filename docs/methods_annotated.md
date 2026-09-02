@@ -1,6 +1,6 @@
 # scNoiseMeter annotated methods
 
-**Code-linked implementation companion for version 0.8.0**
+**Code-linked implementation companion for version 0.8.1**
 
 This document maps the scientific rules to modules and functions. It avoids fixed line numbers because they become stale during refactoring. See [whitepaper.md](whitepaper.md) for rationale and literature context, and [documentation.md](documentation.md) for the CLI/output reference.
 

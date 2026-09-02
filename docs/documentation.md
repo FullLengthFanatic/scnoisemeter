@@ -1,6 +1,6 @@
 # scNoiseMeter documentation
 
-Version 0.8.0 operational reference.
+Version 0.8.1 operational reference.
 
 This file documents installation, inputs, commands, options, outputs, and interpretation. The scientific rationale is in [whitepaper.md](whitepaper.md); the code map is in [methods_annotated.md](methods_annotated.md).
 

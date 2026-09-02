@@ -11,6 +11,7 @@ annotation, no BAM.
 from __future__ import annotations
 
 import random
+import re
 import sys
 from pathlib import Path
 
@@ -342,3 +343,56 @@ class TestSiteContigOverlapGuard:
 
     def test_near_polya_site_is_none_safe(self):
         assert _near_polya_site(None, "chr1", 100) is False
+
+
+# ---------------------------------------------------------------------------
+# Version strings must not drift apart
+# ---------------------------------------------------------------------------
+
+class TestVersionConsistency:
+    """0.8.1 bumped pyproject and __init__ but not the four doc banners.
+
+    Nothing linked them mechanically, so the docs shipped claiming 0.8.0 while
+    the package reported 0.8.1. These assertions make the next bump fail loudly
+    if any one of them is forgotten.
+    """
+
+    ROOT = Path(__file__).parent.parent
+
+    # file -> pattern capturing the version in that file's banner
+    DOC_BANNERS = {
+        "README.md": r"Version \*\*(\d+\.\d+\.\d+)\*\* deliberately avoids",
+        "docs/documentation.md": r"Version (\d+\.\d+\.\d+) operational reference\.",
+        "docs/methods_annotated.md": r"companion for version (\d+\.\d+\.\d+)\*\*",
+        "docs/whitepaper.md": r"Version (\d+\.\d+\.\d+)\. This document explains",
+    }
+
+    @staticmethod
+    def _package_version() -> str:
+        from scnoisemeter import __version__
+        return __version__
+
+    def test_pyproject_matches_dunder_version(self):
+        text = (self.ROOT / "pyproject.toml").read_text()
+        match = re.search(r'^version = "(\d+\.\d+\.\d+)"', text, re.MULTILINE)
+        assert match, "no version field found in pyproject.toml"
+        assert match.group(1) == self._package_version()
+
+    @pytest.mark.parametrize("rel_path", sorted(DOC_BANNERS))
+    def test_doc_banner_matches_package_version(self, rel_path):
+        text = (self.ROOT / rel_path).read_text()
+        match = re.search(self.DOC_BANNERS[rel_path], text)
+        assert match, (
+            f"{rel_path}: version banner not found. If the wording changed, "
+            f"update DOC_BANNERS in this test rather than deleting the check."
+        )
+        assert match.group(1) == self._package_version(), (
+            f"{rel_path} claims version {match.group(1)} but the package "
+            f"reports {self._package_version()}"
+        )
+
+    def test_changelog_has_a_section_for_the_current_version(self):
+        text = (self.ROOT / "CHANGELOG.md").read_text()
+        assert f"## {self._package_version()}" in text, (
+            f"CHANGELOG.md has no '## {self._package_version()}' section"
+        )
