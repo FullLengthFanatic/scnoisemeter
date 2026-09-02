@@ -45,18 +45,17 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from scnoisemeter.modules.pipeline import SampleResult
-
 from scnoisemeter.constants import (
+    ARTIFACT_CANDIDATE_CATEGORIES,
     CATEGORY_ORDER,
     LENGTH_BIN_LABELS_LONG,
     LENGTH_BIN_LABELS_SHORT,
     LENGTH_SHORT_READ_THRESHOLD,
-    ARTIFACT_CANDIDATE_CATEGORIES,
     NOISE_CATEGORIES,
     NOISE_CATEGORIES_UNSTRANDED,
     ReadCategory,
 )
+from scnoisemeter.modules.pipeline import SampleResult
 
 # Ensure new sub-categories are excluded from noise (they go in ambiguous bucket)
 _AMBIGUOUS_SUB = {ReadCategory.AMBIGUOUS_COD_COD, ReadCategory.AMBIGUOUS_COD_NCOD}
@@ -126,8 +125,11 @@ class SampleMetrics:
 
     # Multimapper rate
     multimapper_read_frac: float = 0.0
-    unmapped_read_frac:    float = 0.0
-    low_mapq_read_frac:    float = 0.0
+    # None when the denominator does not exist: no BAM-index counters for
+    # unmapped_read_frac, no classified alignments for low_mapq_read_frac.
+    # Zero would read as "measured, and there were none".
+    unmapped_read_frac:    Optional[float] = None
+    low_mapq_read_frac:    Optional[float] = None
     mean_mapq:             Optional[float] = None
     mean_edit_distance:    Optional[float] = None
     softclip_base_frac:    Optional[float] = None
@@ -162,9 +164,11 @@ class SampleMetrics:
     tss_anchored_frac:     Optional[float] = None   # deprecated endpoint alias
     n_numt_intervals_loaded: Optional[int] = None
 
-    # Per-cell summary statistics (median ± IQR of noise fraction)
-    per_cell_noise_median: float = 0.0
-    per_cell_noise_iqr:    float = 0.0
+    # Per-cell summary statistics (median ± IQR of noise fraction).  None for a
+    # barcode-free BAM, where there are no cells to summarise -- reporting 0.0
+    # there would be a fabricated proxy for a missing measurement.
+    per_cell_noise_median: Optional[float] = None
+    per_cell_noise_iqr:    Optional[float] = None
 
     # Warnings from the BAM inspector
     warnings:              list = field(default_factory=list)
@@ -280,7 +284,7 @@ def compute_metrics(
         row["n_discordant_pair"] = flags.get("discordant_pair", 0)
         row["n_low_mapq"] = flags.get("low_mapq", 0)
         row["low_mapq_read_frac"] = (
-            row["n_low_mapq"] / total_reads if total_reads else 0.0
+            row["n_low_mapq"] / total_reads if total_reads else float("nan")
         )
 
         alignment = getattr(result, "alignment_sums", {}).get(cb, {})
@@ -375,7 +379,7 @@ def compute_metrics(
     sm.chimeric_read_frac    = sm.read_fracs.get(ReadCategory.CHIMERIC.value, 0.0)
     sm.multimapper_read_frac = sm.read_fracs.get(ReadCategory.MULTIMAPPER.value, 0.0)
     sm.unmapped_read_frac = (
-        sm.n_reads_unmapped / sm.n_reads_total if sm.n_reads_total else 0.0
+        sm.n_reads_unmapped / sm.n_reads_total if sm.n_reads_total else None
     )
 
     # Artifact flag totals
@@ -430,8 +434,8 @@ def compute_metrics(
     tss_site_dict   = getattr(result, "_tss_site_dict", None)
     endpoints = getattr(result, "exonic_sense_endpoints", [])
     if endpoints and not unstranded:
-        from scnoisemeter.modules.intergenic_profiler import _near_polya_site
         from scnoisemeter.constants import TSS_SITE_PROXIMITY
+        from scnoisemeter.modules.intergenic_profiler import _near_polya_site
         three_hits = []
         five_hits = []
         for contig, strand, five_pos, three_pos, _read_key in endpoints:
@@ -702,14 +706,10 @@ def to_multiqc_json(sm: SampleMetrics) -> dict:
         "strand_concordance":       round(sm.strand_concordance,       4),
         "chimeric_read_frac":       round(sm.chimeric_read_frac,       4),
         "multimapper_read_frac":    round(sm.multimapper_read_frac,    4),
-        "unmapped_read_frac":       round(sm.unmapped_read_frac,       4),
-        "low_mapq_read_frac":       round(sm.low_mapq_read_frac,       4),
         "n_cells":                  sm.n_cells,
         "n_reads_classified":       sm.n_reads_classified,
         "n_records_total":          sm.n_records_total,
         "n_alignments_classified":  sm.n_alignments_classified,
-        "per_cell_noise_median":    round(sm.per_cell_noise_median,    4),
-        "per_cell_noise_iqr":       round(sm.per_cell_noise_iqr,       4),
         "tso_invasion_frac":        round(sm.n_tso_invasion    / (sm.n_reads_classified or 1), 4),
         "polya_priming_frac":       round(sm.n_polya_priming   / (sm.n_reads_classified or 1), 4),
         "tso_concatemer_frac":      round(sm.n_tso_concatemer  / (sm.n_reads_classified or 1), 4),
@@ -718,6 +718,14 @@ def to_multiqc_json(sm: SampleMetrics) -> dict:
     # Add per-category read fractions
     for cat_name, frac in sm.read_fracs.items():
         data[f"read_frac_{cat_name}"] = round(frac, 4)
+
+    # Metrics that are absent rather than zero when their denominator is
+    # missing are omitted from the JSON entirely, so MultiQC shows a gap.
+    for _name in ("unmapped_read_frac", "low_mapq_read_frac",
+                  "per_cell_noise_median", "per_cell_noise_iqr"):
+        _value = getattr(sm, _name, None)
+        if _value is not None:
+            data[_name] = round(_value, 4)
 
     if sm.full_length_read_frac is not None:
         data["full_length_read_frac"] = round(sm.full_length_read_frac, 4)

@@ -18,8 +18,8 @@ from plotly.subplots import make_subplots
 
 from scnoisemeter.constants import (
     ADAPTIVE_PVALUE_THRESHOLD,
-    INTERGENIC_SCATTER_MAX_SPARSE,
     CATEGORY_ORDER,
+    INTERGENIC_SCATTER_MAX_SPARSE,
     LENGTH_BIN_LABELS_LONG,
     LENGTH_BIN_LABELS_SHORT,
     ReadCategory,

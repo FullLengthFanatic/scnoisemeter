@@ -4,10 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scnoisemeter"
-version = "0.8.0"
+version = "0.8.1"
 description = "Barcode-aware alignment artifact and read-distribution QC for single-cell RNA-seq"
 readme = "README.md"
-requires-python = ">=3.9"
+# classifier.ReadResult uses @dataclass(slots=True), which is 3.10+.
+requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "scNoiseMeter contributors" }]
 classifiers = [
@@ -15,6 +16,10 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 
@@ -30,7 +35,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "pytest-cov", "black", "ruff"]
+# ruff is pinned: CI treats a lint failure as a build failure, so an unpinned
+# linter turns every upstream default-rule change into a red build on an
+# untouched commit.
+dev = ["pytest>=7", "pytest-cov", "black", "ruff>=0.16,<0.17"]
 
 [project.scripts]
 scnoisemeter = "scnoisemeter.cli:cli"
@@ -44,11 +52,19 @@ Documentation = "https://github.com/FullLengthFanatic/scnoisemeter/tree/main/doc
 where = ["."]
 include = ["scnoisemeter*"]
 
-[tool.setuptools.package-data]
-"scnoisemeter.data" = ["whitelists/*.txt.gz", "references/*.bed.gz"]
-
 [tool.ruff]
 line-length = 100
+
+[tool.ruff.lint]
+# Ruff's default set (E4/E7/E9/F) plus import ordering.  Cosmetic modernisation
+# rules (UP, C4, SIM) are deliberately not enabled here: they would rewrite most
+# of the package in one commit and bury behavioural changes in the diff.
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.isort]
+# report.py re-exports several figure helpers as `X as X`; without this the
+# import sorter splits one readable block into four.
+combine-as-imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

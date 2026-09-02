@@ -50,23 +50,22 @@ from typing import Optional
 
 import pysam
 
-from scnoisemeter.modules.annotation import AnnotationIndex
-
 from scnoisemeter.constants import (
-    BamTag,
     CANONICAL_SPLICE_SITES,
     DEFAULT_CHIMERIC_DISTANCE,
     ILLUMINA_CHIMERIC_INSERT_SIZE,
     MITO_CONTIG_NAMES,
     POLYA_CONTEXT_WINDOW,
     POLYA_RUN_MIN_LENGTH,
-    ReadCategory,
-    SamFlag,
     TSO_10X,
     TSO_MIN_MATCH_LENGTH,
     TSO_PACBIO,
     TSO_POLYG_MIN_LENGTH,
+    BamTag,
+    ReadCategory,
+    SamFlag,
 )
+from scnoisemeter.modules.annotation import AnnotationIndex
 
 # Import new sub-categories (defined in constants but also referenced directly)
 _AMBIGUOUS_COD_COD  = ReadCategory.AMBIGUOUS_COD_COD
