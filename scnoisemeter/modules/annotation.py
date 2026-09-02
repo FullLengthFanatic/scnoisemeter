@@ -45,9 +45,12 @@ Design decisions
 
 Performance
 -----------
-pyranges operations on GENCODE v45 (~2.9M exon records) complete in under
-60 seconds on a modern laptop.  The result is cached to a compressed pickle
-alongside the GTF so that subsequent runs skip the build step.
+A full build on GENCODE v47 takes roughly three minutes, most of it in
+``pr.read_gtf``.  The result is cached to a compressed pickle (~75 MB without
+a repeats BED) next to the GTF so that subsequent runs skip the build step.
+Two spots in this module are row-wise and dominate the remainder if changed
+carelessly: see the ``observed=True`` note in _extract_splice_junctions and
+the grouped set-construction in _extract_splice_sites.
 """
 
 from __future__ import annotations
@@ -545,15 +548,16 @@ def _extract_splice_sites(exon_df: pd.DataFrame) -> dict:
     Returns: dict[contig_name, set[tuple[position_int, strand_str]]]
     """
     sites: dict[str, set] = {}
-    for _, row in exon_df.iterrows():
-        chrom  = row["Chromosome"]
-        start  = int(row["Start"])
-        end    = int(row["End"])
-        strand = row["Strand"]
-        if chrom not in sites:
-            sites[chrom] = set()
-        sites[chrom].add((start, strand))
-        sites[chrom].add((end,   strand))
+    if exon_df.empty:
+        return sites
+    # Grouped set-construction rather than ``iterrows``: the row-wise loop ran
+    # at ~102k rows/s, i.e. ~21 s for the 2.16M exon records in GENCODE v47.
+    sub = exon_df[["Chromosome", "Start", "End", "Strand"]]
+    for chrom, grp in sub.groupby("Chromosome", observed=True):
+        strands = grp["Strand"].astype(str).tolist()
+        starts = grp["Start"].astype(int).tolist()
+        ends = grp["End"].astype(int).tolist()
+        sites[str(chrom)] = set(zip(starts, strands)) | set(zip(ends, strands))
     return sites
 
 
@@ -571,8 +575,13 @@ def _extract_splice_junctions(exon_df: pd.DataFrame) -> dict:
     junctions: dict[str, set] = {}
     required = ["Chromosome", "Start", "End", "Strand", "transcript_id"]
     sub = exon_df[required].dropna(subset=["transcript_id"]).drop_duplicates()
+    # ``observed=True`` is load-bearing, not a style choice.  ``pr.read_gtf``
+    # returns Chromosome and Strand as pandas Categoricals, so ``observed=False``
+    # iterates the full category cartesian product rather than the transcripts
+    # that exist: 2,634,150 groups instead of 35,122 on chr1 alone, which turned
+    # a 187 s genome-wide index build into 3551 s for identical output.
     for (_chrom, _strand, _tx), grp in sub.groupby(
-        ["Chromosome", "Strand", "transcript_id"], observed=False
+        ["Chromosome", "Strand", "transcript_id"], observed=True
     ):
         exons = sorted(
             (int(row.Start), int(row.End))
@@ -654,7 +663,7 @@ def _manual_complement(gene_bodies_df: pd.DataFrame) -> pr.PyRanges:
     )
 
     gaps = []
-    for chrom, grp in merged.groupby("Chromosome", observed=False):
+    for chrom, grp in merged.groupby("Chromosome", observed=True):
         grp = grp.sort_values("Start")
         prev_end = 0
         for _, row in grp.iterrows():

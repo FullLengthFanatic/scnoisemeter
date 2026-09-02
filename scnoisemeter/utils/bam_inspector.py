@@ -34,8 +34,8 @@ from scnoisemeter.constants import (
     BARCODE_AUTODETECT_MIN_FRACTION,
     BARCODE_AUTODETECT_SAMPLE_SIZE,
     BamTag,
-    Platform,
     PipelineStage,
+    Platform,
 )
 
 logger = logging.getLogger(__name__)

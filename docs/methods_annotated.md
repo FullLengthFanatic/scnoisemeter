@@ -94,7 +94,7 @@ Independent artifact/context checks run for every classified primary alignment, 
 
 ### Multimapper
 
-`_is_multimapper()` uses only `NH > 1`. MAPQ alone does not establish how many alignments were reported: it is a mapping-confidence score, and aligner conventions differ. `XA` is not interpreted generically because the SAM specification reserves tags beginning with `X` for local use, so its meaning is producer-specific. Low-MAPQ records retain their genomic category and are reported through the independent low-MAPQ metric. When an aligner does not emit `NH`, scNoiseMeter does not infer primary-read multimapping from unrelated fields.
+`_is_multimapper()` uses only `NH > 1`. MAPQ alone does not establish how many alignments were reported: it is a mapping-confidence score, and aligner conventions differ. `XA` is not interpreted generically because the SAM specification reserves tags beginning with `X` for local use, so its meaning is producer-specific. Low-MAPQ records retain their genomic category and are reported through the independent low-MAPQ metric. When an aligner does not emit `NH`, scNoiseMeter does not infer primary-read multimapping from unrelated fields. `minimap2` and `pbmm2` fall in that group: they report secondary alignments through the `tp` tag and score secondaries through `s1`/`s2`, and write no `NH`. On those BAMs the multimapper category is empty by construction, and the affected alignments are counted under their genomic category rather than held out, which shifts the classification denominator relative to a STAR-derived BAM.
 
 ### Chimeric alignment
 
@@ -265,7 +265,7 @@ Explicit platform hints have priority. Minimap2 alone maps to `unknown`; bare ST
   handling, the version / annotation / strandedness comparability warnings, ranking fallback when
   a metric predates some samples, sample-sheet labelling and ordering, and that the deviation
   heatmap leaves a near-zero row neutral instead of painting it as the strongest signal.
-- `.github/workflows/tests.yml`: Python 3.9 and 3.12 CI with Ruff and pytest.
+- `.github/workflows/tests.yml`: Python 3.10-3.13 CI with Ruff (pinned) and pytest.
 
 `tests/benchmark/` builds a synthetic BAM with known per-read truth and scores the classifier
 against it. It covers 16 of the 17 classified categories; `INTERGENIC_ENRICHED` has no ground

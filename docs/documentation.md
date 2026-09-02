@@ -6,7 +6,7 @@ This file documents installation, inputs, commands, options, outputs, and interp
 
 ## 1. Requirements
 
-- Python 3.9+
+- Python 3.10+
 - coordinate-sorted BAM
 - BAM index (`.bam.bai` or `.bai`)
 - matching GTF annotation
@@ -266,7 +266,7 @@ Barcode-free well results are relabeled to `<PlateID>_<WellID>` before merging. 
 |---|---|
 | `read_frac_<category>` | classified mapped-primary alignments |
 | `base_frac_<category>` | classified aligned reference bases |
-| `unmapped_read_frac` | mapped + unmapped BAM-index records |
+| `unmapped_read_frac` | mapped + unmapped BAM-index records; absent when the index carries no counters |
 | artifact flag fractions in MultiQC | classified mapped-primary alignments |
 | per-cell fractions | classified reads/bases for that retained cell |
 | endpoint fractions | reservoir-sampled exonic-sense reads with the required atlas |

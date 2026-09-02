@@ -36,10 +36,6 @@ import plotly.io as pio
 
 from scnoisemeter.modules.metrics import CellTable, SampleMetrics
 from scnoisemeter.modules.report_figures import (
-    _cohort_artifact_dots,
-    _cohort_composition_bars,
-    _cohort_deviation_heatmap,
-    _cohort_percell_boxes,
     CATEGORY_COLOURS as CATEGORY_COLOURS,
     CATEGORY_LABELS as CATEGORY_LABELS,
     _artifact_flags,
@@ -47,6 +43,10 @@ from scnoisemeter.modules.report_figures import (
     _category_legend,
     _cluster_heatmap,
     _cluster_noise_plot,
+    _cohort_artifact_dots,
+    _cohort_composition_bars,
+    _cohort_deviation_heatmap,
+    _cohort_percell_boxes,
     _comparison_bars,
     _comparison_lengths,
     _comparison_violin,
@@ -299,7 +299,9 @@ def _metadata_table(sm: SampleMetrics) -> str:
          if _is_smartseq else sm.pipeline_stage),
         ("Aligner",         sm.aligner or "unknown"),
         ("Total reads",     f"{sm.n_reads_total:,}"),
-        ("Unmapped reads",  f"{sm.n_reads_unmapped:,} ({sm.unmapped_read_frac:.2%})"),
+        ("Unmapped reads",  f"{sm.n_reads_unmapped:,} ({sm.unmapped_read_frac:.2%})"
+                            if sm.unmapped_read_frac is not None
+                            else f"{sm.n_reads_unmapped:,} (fraction unavailable)"),
         ("Classified reads", f"{sm.n_reads_classified:,}"),
         ("Cells detected",
          "N/A (Smart-seq: 1 cell per BAM)" if _is_smartseq
