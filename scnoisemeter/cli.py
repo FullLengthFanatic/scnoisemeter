@@ -2554,7 +2554,19 @@ def _harmonise_chrom_style(sites: dict, chrom_style: str) -> dict:
             "Stripping 'chr' prefix from %d/%d BED contig keys to match "
             "Ensembl-style BAM naming.", n_chr, len(sites),
         )
-        return _rekey_site_dict(sites, lambda c: c.removeprefix("chr"))
+
+        def _to_ensembl(contig: str) -> str:
+            if not contig.startswith("chr"):
+                return contig
+            bare = contig.removeprefix("chr")
+            # Ensembl and GENCODE spell the mitochondrion MT, not M -- a plain
+            # prefix strip would produce a key that never matches the BAM, which
+            # is the same silent-miss failure this function exists to prevent.
+            # _detect_chrom_style's own primary-contig set agrees: MT for
+            # Ensembl, chrM for UCSC.
+            return "MT" if bare in {"M", "MT"} else bare
+
+        return _rekey_site_dict(sites, _to_ensembl)
 
     # chrom_style == "ucsc": add the prefix to keys that lack it.  MT is spelled
     # chrM in UCSC naming; the rest are a plain prefix.
