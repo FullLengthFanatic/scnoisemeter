@@ -1095,11 +1095,17 @@ def run_cmd(
     _bam_chrom_style = _detect_chrom_style(meta.reference_names)
 
     # Attach polyA site dict (merged from resolved polya-site files)
-    result._polya_site_dict = _load_polya_sites(polya_paths, chrom_style=_bam_chrom_style)
+    result._polya_site_dict = _check_site_contig_overlap(
+        _load_polya_sites(polya_paths, chrom_style=_bam_chrom_style),
+        meta.reference_names, label="polyA site atlas", meta=meta,
+    )
 
     # Attach TSS site dict (resolved: auto-download or user-supplied)
     tss_paths = _resolve_tss_sites(tss_sites, tss_db=tss_db, offline=offline)
-    result._tss_site_dict = _load_tss_sites(tss_paths, chrom_style=_bam_chrom_style) if tss_paths else None
+    result._tss_site_dict = _check_site_contig_overlap(
+        _load_tss_sites(tss_paths, chrom_style=_bam_chrom_style) if tss_paths else None,
+        meta.reference_names, label="TSS/CAGE atlas", meta=meta,
+    )
 
     # Attach NUMT intervals
     if numt_bed:
@@ -1348,8 +1354,14 @@ def compare_cmd(
             store_read_assignments=matched_reads,
         )
         _bam_cs = _detect_chrom_style(meta.reference_names)
-        result._polya_site_dict = _load_polya_sites(polya_paths, chrom_style=_bam_cs)
-        result._tss_site_dict = _load_tss_sites(tss_paths, chrom_style=_bam_cs) if tss_paths else None
+        result._polya_site_dict = _check_site_contig_overlap(
+            _load_polya_sites(polya_paths, chrom_style=_bam_cs),
+            meta.reference_names, label="polyA site atlas", meta=meta,
+        )
+        result._tss_site_dict = _check_site_contig_overlap(
+            _load_tss_sites(tss_paths, chrom_style=_bam_cs) if tss_paths else None,
+            meta.reference_names, label="TSS/CAGE atlas", meta=meta,
+        )
         _profile_intergenic_result(
             result, index, reference=reference,
             polya_sites=result._polya_site_dict,
@@ -1754,9 +1766,15 @@ def _run_single_bam_for_discover(
     )
 
     _bam_cs = _detect_chrom_style(meta.reference_names)
-    result._polya_site_dict = _load_polya_sites(polya_paths, chrom_style=_bam_cs)
+    result._polya_site_dict = _check_site_contig_overlap(
+        _load_polya_sites(polya_paths, chrom_style=_bam_cs),
+        meta.reference_names, label="polyA site atlas", meta=meta,
+    )
 
-    result._tss_site_dict = _load_tss_sites(tss_paths, chrom_style=_bam_cs) if tss_paths else None
+    result._tss_site_dict = _check_site_contig_overlap(
+        _load_tss_sites(tss_paths, chrom_style=_bam_cs) if tss_paths else None,
+        meta.reference_names, label="TSS/CAGE atlas", meta=meta,
+    )
 
     result._numt_intervals = None
 
@@ -1842,7 +1860,8 @@ _worker_state: dict = {}
 
 
 def _plate_worker_init(gtf, repeats_path, exclude_biotypes,
-                       polya_paths, tss_paths, chrom_style):
+                       polya_paths, tss_paths, chrom_style,
+                       reference_names=None):
     """Initialiser for each worker process: loads shared read-only data once."""
     import logging as _log
     _log.disable(_log.WARNING)  # suppress per-well INFO/WARNING spam in workers
@@ -1854,11 +1873,13 @@ def _plate_worker_init(gtf, repeats_path, exclude_biotypes,
         exclude_biotypes=list(exclude_biotypes),
         cache=True,
     )
-    _worker_state["polya"] = (
-        _load_polya_sites(polya_paths, chrom_style=chrom_style) if polya_paths else {}
+    _worker_state["polya"] = _check_site_contig_overlap(
+        _load_polya_sites(polya_paths, chrom_style=chrom_style) if polya_paths else {},
+        reference_names, label="polyA site atlas",
     )
-    _worker_state["tss"] = (
-        _load_tss_sites(tss_paths, chrom_style=chrom_style) if tss_paths else None
+    _worker_state["tss"] = _check_site_contig_overlap(
+        _load_tss_sites(tss_paths, chrom_style=chrom_style) if tss_paths else None,
+        reference_names, label="TSS/CAGE atlas",
     )
 
 
@@ -2225,8 +2246,14 @@ def run_plate_cmd(
     # Loading from the compressed BED takes ~35 s; doing it per-well would
     # multiply that cost by the number of wells (thousands for a full plate run).
     _shared_bam_cs    = _detect_chrom_style(_first_meta.reference_names)
-    _shared_polya     = _load_polya_sites(polya_paths, chrom_style=_shared_bam_cs)
-    _shared_tss       = _load_tss_sites(tss_paths, chrom_style=_shared_bam_cs) if tss_paths else None
+    _shared_polya     = _check_site_contig_overlap(
+        _load_polya_sites(polya_paths, chrom_style=_shared_bam_cs),
+        _first_meta.reference_names, label="polyA site atlas", meta=_first_meta,
+    )
+    _shared_tss       = _check_site_contig_overlap(
+        _load_tss_sites(tss_paths, chrom_style=_shared_bam_cs) if tss_paths else None,
+        _first_meta.reference_names, label="TSS/CAGE atlas", meta=_first_meta,
+    )
 
     # ------------------------------------------------------------------ #
     # Process plates
@@ -2301,6 +2328,7 @@ def run_plate_cmd(
                 initargs=(
                     gtf, repeats, list(exclude_biotypes),
                     polya_paths, tss_paths, _shared_bam_cs,
+                    list(_first_meta.reference_names),
                 ),
             ) as executor:
                 futures = {executor.submit(_plate_well_task, t): t["well_id"] for t in _tasks}
@@ -2483,29 +2511,106 @@ def _open_bed(path: str):
     return open(path, "rt", encoding="utf-8")
 
 
-def _strip_chr_if_needed(sites: dict, chrom_style: str) -> dict:
-    """
-    If the BAM uses Ensembl-style chromosome names (no chr prefix) but the BED
-    uses UCSC-style (chr prefix), strip the chr prefix so lookups succeed.
-    No-op when styles already match or when style is unknown.
-    """
-    if chrom_style != "ensembl":
-        return sites
-    # Check if the keys actually have the chr prefix before stripping
-    def _chrom(key):
-        return key[0] if isinstance(key, tuple) else key
+def _site_dict_chrom(key):
+    """Contig component of a site-dict key, which may be ``(contig, strand)``."""
+    return key[0] if isinstance(key, tuple) else key
 
-    has_chr = any(str(_chrom(k)).startswith("chr") for k in sites)
-    if not has_chr:
-        return sites
-    stripped = {}
+
+def _rekey_site_dict(sites: dict, rename) -> dict:
+    """Return *sites* with the contig component of every key passed through *rename*."""
+    out: dict = {}
     for k, v in sites.items():
         if isinstance(k, tuple):
-            stripped[(str(k[0]).removeprefix("chr"), k[1])] = v
+            out[(rename(str(k[0])), *k[1:])] = v
         else:
-            stripped[str(k).removeprefix("chr")] = v
-    logger.debug("Stripped 'chr' prefix from BED chromosome names to match Ensembl BAM naming.")
-    return stripped
+            out[rename(str(k))] = v
+    return out
+
+
+def _harmonise_chrom_style(sites: dict, chrom_style: str) -> dict:
+    """
+    Rewrite BED contig names into the BAM's naming style, in whichever
+    direction is needed.
+
+    This used to strip a ``chr`` prefix only, which silently broke the common
+    case rather than a rare one: PolyASite 3.0 ships Ensembl-named contigs
+    (``1``, ``2``, ``MT``) while a BAM aligned to the GENCODE primary assembly
+    is UCSC-named (``chr1``), so every lookup missed.  The dict was still
+    non-empty, so the truthiness guards downstream passed and the endpoint
+    fractions were reported as a measured 0.0 instead of as absent.  FANTOM5
+    CAGE is UCSC-named, so the failure was asymmetric and hit exactly the
+    configuration this tool targets.
+
+    No-op when the styles already agree or when the BAM style is unknown.
+    """
+    if chrom_style not in {"ucsc", "ensembl"} or not sites:
+        return sites
+
+    n_chr = sum(1 for k in sites if str(_site_dict_chrom(k)).startswith("chr"))
+    if chrom_style == "ensembl":
+        if not n_chr:
+            return sites
+        logger.info(
+            "Stripping 'chr' prefix from %d/%d BED contig keys to match "
+            "Ensembl-style BAM naming.", n_chr, len(sites),
+        )
+        return _rekey_site_dict(sites, lambda c: c.removeprefix("chr"))
+
+    # chrom_style == "ucsc": add the prefix to keys that lack it.  MT is spelled
+    # chrM in UCSC naming; the rest are a plain prefix.
+    n_bare = len(sites) - n_chr
+    if not n_bare:
+        return sites
+    logger.info(
+        "Adding 'chr' prefix to %d/%d BED contig keys to match UCSC-style "
+        "BAM naming.", n_bare, len(sites),
+    )
+
+    def _to_ucsc(contig: str) -> str:
+        if contig.startswith("chr"):
+            return contig
+        if contig in {"MT", "M"}:
+            return "chrM"
+        return f"chr{contig}"
+
+    return _rekey_site_dict(sites, _to_ucsc)
+
+
+def _check_site_contig_overlap(
+    sites: Optional[dict],
+    reference_names,
+    *,
+    label: str,
+    meta=None,
+) -> Optional[dict]:
+    """
+    Drop a site atlas that shares no contig with the BAM.
+
+    A non-empty dict whose keys never match makes every proximity test fail
+    while leaving the downstream truthiness guards satisfied, so the derived
+    metrics get reported as measured zeros.  Returning ``None`` instead routes
+    them through the same "absent" path as a missing atlas, and the warning is
+    surfaced in the report and in run_info.json.
+    """
+    if not sites or not reference_names:
+        return sites
+    refs = set(reference_names)
+    site_contigs = {str(_site_dict_chrom(k)) for k in sites}
+    if site_contigs & refs:
+        return sites
+
+    warning = (
+        f"{label}: none of the {len(site_contigs)} contig names in the atlas "
+        f"match the BAM reference names (atlas e.g. "
+        f"{sorted(site_contigs)[:3]}, BAM e.g. {sorted(refs)[:3]}). "
+        f"The atlas has been discarded and every metric derived from it is "
+        f"reported as absent rather than zero. Check that the atlas and the "
+        f"alignment reference are the same assembly and naming style."
+    )
+    logger.error(warning)
+    if meta is not None and warning not in meta.warnings:
+        meta.warnings.append(warning)
+    return None
 
 
 def _site_cache_path(paths, chrom_style: str, prefix: str) -> Optional[Path]:
@@ -2593,7 +2698,7 @@ def _load_polya_sites(paths, chrom_style: str = "ucsc") -> dict:
         logger.info("Loaded polyA sites from %s", path)
     for chrom in sites:
         sites[chrom] = sorted(set(sites[chrom]))
-    sites = _strip_chr_if_needed(sites, chrom_style)
+    sites = _harmonise_chrom_style(sites, chrom_style)
     logger.info(
         "Total polyA site positions: %d across %d contig/strand groups",
         sum(len(v) for v in sites.values()), len(sites),
@@ -2662,7 +2767,7 @@ def _load_tss_sites(paths, chrom_style: str = "ucsc") -> dict:
         logger.info("Loaded TSS sites from %s", path)
     for chrom in sites:
         sites[chrom] = sorted(set(sites[chrom]))
-    sites = _strip_chr_if_needed(sites, chrom_style)
+    sites = _harmonise_chrom_style(sites, chrom_style)
     logger.info(
         "Total TSS positions: %d across %d contig/strand groups",
         sum(len(v) for v in sites.values()), len(sites),

@@ -517,10 +517,10 @@ def _check_polya_context(reference, contig: str, position: int, strand: str = "+
 # ---------------------------------------------------------------------------
 
 def _near_polya_site(
-    polya_sites: dict,
+    polya_sites: Optional[dict],
     contig: str,
     position: int,
-    proximity: int = None,
+    proximity: Optional[int] = None,
     strand: Optional[str] = None,
 ) -> bool:
     """
@@ -532,7 +532,16 @@ def _near_polya_site(
 
     polya_sites[contig] must be a sorted list of integer positions.
     Uses binary search (bisect) for O(log n) lookup.
+
+    ``polya_sites`` may be ``None`` when no atlas was supplied, or when one was
+    discarded for sharing no contig with the BAM.  A False return then means
+    "no evidence available", which is not the same as "not near a site": the
+    hotspot rule's polyA exclusion cannot fire, so every A-rich monoexonic
+    locus is eligible for INTERGENIC_HOTSPOT.  ``_polya_sites_used`` on the
+    sample metrics records whether an atlas was in play.
     """
+    if not polya_sites:
+        return False
     if proximity is None:
         proximity = POLYA_SITE_PROXIMITY
     keys = [contig]  # legacy BED3/cache representation
