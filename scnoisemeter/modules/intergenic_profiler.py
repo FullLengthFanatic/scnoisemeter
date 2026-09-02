@@ -54,7 +54,10 @@ is measured after assignment and is therefore independent evidence.
 
 from __future__ import annotations
 
+import bisect
 import logging
+import re
+from collections import Counter
 from dataclasses import dataclass
 from typing import Optional
 
@@ -202,6 +205,10 @@ def profile_intergenic_loci(
     """
     if not records:
         return [], []
+
+    # Normalise the repeat union once per run rather than per locus per read.
+    if repeat_intervals:
+        repeat_intervals = merge_repeat_intervals(repeat_intervals)
 
     # ------------------------------------------------------------------
     # 1. Group reads into fixed, pre-defined 3'-end windows. Strand is not part
@@ -361,7 +368,7 @@ def _score_locus(
     # RepeatMasker overlap
     repeat_fraction = 0.0
     if repeat_intervals is not None:
-        repeat_fraction = _repeat_overlap_fraction(
+        repeat_fraction = _repeat_overlap_fraction_merged(
             repeat_intervals, contig, records
         )
     overlaps_repeat = repeat_fraction >= INTERGENIC_REPEAT_MIN_FRACTION
@@ -473,7 +480,6 @@ def _cluster_reads(records: list[IntergenicReadRecord]) -> list[int]:
 
 def _modal_three_prime(records: list[IntergenicReadRecord]) -> int:
     """Return the most common read 3′ end position in the locus."""
-    from collections import Counter
     counts = Counter(r.three_prime for r in records)
     return counts.most_common(1)[0][0]
 
@@ -493,7 +499,6 @@ def _check_polya_context(reference, contig: str, position: int, strand: str = "+
     (lower coordinate).  Checking only the + strand downstream under-detected
     minus-strand internal priming.
     """
-    import re
     try:
         if strand == "-":
             lo = max(0, position - POLYA_CONTEXT_WINDOW)
@@ -528,7 +533,6 @@ def _near_polya_site(
     polya_sites[contig] must be a sorted list of integer positions.
     Uses binary search (bisect) for O(log n) lookup.
     """
-    import bisect
     if proximity is None:
         proximity = POLYA_SITE_PROXIMITY
     keys = [contig]  # legacy BED3/cache representation
@@ -575,7 +579,55 @@ def _repeat_overlap_fraction(
     records: list[IntergenicReadRecord],
 ) -> float:
     """Fraction of sampled aligned record span overlapping repeat union."""
-    ivls = repeat_intervals.get(contig, [])
+    if not repeat_intervals or not records:
+        return 0.0
+    ivls = repeat_intervals.get(contig)
+    if not ivls:
+        return 0.0
+    normalised = merge_repeat_intervals({contig: ivls})
+    return _repeat_overlap_fraction_merged(normalised, contig, records)
+
+
+def merge_repeat_intervals(repeat_intervals: dict) -> dict:
+    """Sort and merge each contig's repeat intervals into a disjoint union.
+
+    Run once per profiling run so the per-locus overlap test can binary-search
+    instead of re-normalising the contig's whole interval list for every read.
+    Keys are preserved exactly as supplied.
+    """
+    merged_by_contig: dict = {}
+    for contig, ivls in (repeat_intervals or {}).items():
+        merged: list = []
+        for start, end in sorted((int(a), int(b)) for a, b in ivls):
+            if end <= start:
+                continue
+            if merged and start <= merged[-1][1]:
+                if end > merged[-1][1]:
+                    merged[-1] = (merged[-1][0], end)
+            else:
+                merged.append((start, end))
+        merged_by_contig[contig] = merged
+    return merged_by_contig
+
+
+def _repeat_overlap_fraction_merged(
+    merged_intervals: dict,
+    contig: str,
+    records: list[IntergenicReadRecord],
+) -> float:
+    """Fraction of sampled aligned record span covered by the repeat union.
+
+    Requires intervals already merged into a disjoint, ascending list — use
+    :func:`merge_repeat_intervals`.  Two costs used to sit in this loop, both
+    per *record* rather than per locus: ``sorted(ivls)`` copied the contig's
+    entire interval list on every iteration (470k intervals on hg38 chr1), and
+    the scan then started from index 0, so a read late on a chromosome walked
+    every preceding interval before breaking.  Measured at chr1 RepeatMasker
+    scale that was 200 ms for a single 5-read locus, i.e. hours across the
+    20k-130k windows a real sample produces.  Binary search makes it
+    O(log n + overlaps).
+    """
+    ivls = merged_intervals.get(contig, [])
     if not ivls or not records:
         return 0.0
     overlap = 0
@@ -585,7 +637,13 @@ def _repeat_overlap_fraction(
         width = max(end - start, 0)
         total += width
         covered_end = start
-        for ivl_start, ivl_end in sorted(ivls):
+        # First interval that can reach into [start, end).  On a disjoint list
+        # at most one interval starts before `start` and still spans it.
+        first = bisect.bisect_left(ivls, (start,))
+        if first > 0 and ivls[first - 1][1] > start:
+            first -= 1
+        for idx in range(first, len(ivls)):
+            ivl_start, ivl_end = ivls[idx]
             if ivl_start >= end:
                 break
             lo, hi = max(start, ivl_start), min(end, ivl_end)
@@ -631,7 +689,7 @@ def compute_intergenic_bases(
                 (int(row.Start), int(row.End))
                 for row in grp.itertuples(index=False)
             )
-            for chrom, grp in genes.groupby("Chromosome", observed=False)
+            for chrom, grp in genes.groupby("Chromosome", observed=True)
         }
         result = {}
         for contig, raw_length in contig_lengths.items():
@@ -661,7 +719,7 @@ def compute_intergenic_bases(
     df = index.intergenic.df
     if by_contig:
         widths = (df["End"] - df["Start"]).groupby(
-            df["Chromosome"], observed=False
+            df["Chromosome"], observed=True
         ).sum()
         return {str(chrom): int(width) for chrom, width in widths.items()}
     return int((df["End"] - df["Start"]).sum())

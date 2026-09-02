@@ -50,52 +50,57 @@ from scnoisemeter import __version__
 from scnoisemeter.constants import (
     BARCODE_AUTODETECT_MIN_FRACTION,
     CATEGORY_ORDER,
-    Chemistry,
     COMPARE_NESTED_MIN_OVERLAP,
     COMPARE_PROBE_SAMPLE_SIZE,
-    DEFAULT_SEED,
     DEFAULT_CHIMERIC_DISTANCE,
+    DEFAULT_SEED,
     DEFAULT_THREADS,
     INTERGENIC_LOCUS_WINDOW,
     MITO_CONTIG_NAMES,
-    Platform,
-    PipelineStage,
-    ReadCategory,
     TSO_10X,
     TSO_MIN_MATCH_LENGTH,
     TSO_PACBIO,
+    Chemistry,
+    PipelineStage,
+    Platform,
+    ReadCategory,
 )
 from scnoisemeter.modules.annotation import build_annotation_index
-from scnoisemeter.modules.metrics import (
-    compute_metrics, to_multiqc_json,
-    compute_cluster_metrics, load_obs_metadata,
-    compute_length_stratification,
-)
-from scnoisemeter.modules.intergenic_profiler import (
-    profile_intergenic_loci, extract_intergenic_records,
-    compute_intergenic_bases,
-)
 from scnoisemeter.modules.cohort import (
     build_composition_table,
     build_summary_table,
     load_cohort,
     ranking_metric,
 )
-from scnoisemeter.modules.report import (
-    write_cohort_report, write_compare_report, write_run_report,
+from scnoisemeter.modules.intergenic_profiler import (
+    compute_intergenic_bases,
+    extract_intergenic_records,
+    profile_intergenic_loci,
+)
+from scnoisemeter.modules.metrics import (
+    compute_cluster_metrics,
+    compute_length_stratification,
+    compute_metrics,
+    load_obs_metadata,
+    to_multiqc_json,
 )
 from scnoisemeter.modules.pipeline import run_pipeline
-from scnoisemeter.utils.bam_inspector import inspect_bam, BamMetadata
+from scnoisemeter.modules.report import (
+    write_cohort_report,
+    write_compare_report,
+    write_run_report,
+)
 from scnoisemeter.utils.annotation_fetcher import (
-    fetch_latest_gencode_gtf,
-    fetch_gencode_gtf_version,
-    fetch_latest_polyasite_atlas,
-    fetch_polyadb4_atlas,
-    fetch_fantom5_cage_peaks,
-    fetch_10x_whitelist,
     extract_gencode_version_from_filename,
     extract_polyasite_version_from_filename,
+    fetch_10x_whitelist,
+    fetch_fantom5_cage_peaks,
+    fetch_gencode_gtf_version,
+    fetch_latest_gencode_gtf,
+    fetch_latest_polyasite_atlas,
+    fetch_polyadb4_atlas,
 )
+from scnoisemeter.utils.bam_inspector import BamMetadata, inspect_bam
 
 logger = logging.getLogger("scnoisemeter")
 
@@ -816,19 +821,11 @@ def _profile_intergenic_result(result, index, *, reference: Optional[str], polya
 
     repeat_dict = None
     if index.repeats is not None and not index.repeats.df.empty:
-        repeat_dict = {}
-        for chrom, grp in index.repeats.df.groupby("Chromosome", observed=False):
-            intervals = sorted(
-                (int(row.Start), int(row.End))
-                for row in grp.itertuples(index=False)
-            )
-            merged = []
-            for start, end in intervals:
-                if not merged or start > merged[-1][1]:
-                    merged.append([start, end])
-                else:
-                    merged[-1][1] = max(merged[-1][1], end)
-            repeat_dict[str(chrom)] = [tuple(ivl) for ivl in merged]
+        # profile_intergenic_loci() sorts and merges these itself.
+        repeat_dict = {
+            str(chrom): list(zip(grp["Start"].astype(int), grp["End"].astype(int)))
+            for chrom, grp in index.repeats.df.groupby("Chromosome", observed=True)
+        }
 
     ref_handle = None
     if reference:
@@ -1522,9 +1519,12 @@ def discover_cmd(
     inferable parameters are run automatically.
     """
     from scnoisemeter.utils.discover_inspector import (
-        DiscoverBamInfo, inspect_bam_for_discover,
-        format_discovery_table, _collect_selected_indices,
-        _prompt_platform, _normalise_platform,
+        DiscoverBamInfo,
+        _collect_selected_indices,
+        _normalise_platform,
+        _prompt_platform,
+        format_discovery_table,
+        inspect_bam_for_discover,
     )
 
     _setup_logging(verbose)
@@ -2095,9 +2095,11 @@ def run_plate_cmd(
     from scnoisemeter.modules.annotation import build_annotation_index
     from scnoisemeter.modules.metrics import compute_metrics
     from scnoisemeter.modules.pipeline import (
-        run_pipeline, merge_sample_results, relabel_barcode,
+        merge_sample_results,
+        relabel_barcode,
+        run_pipeline,
     )
-    from scnoisemeter.utils.sample_sheet import parse_sample_sheet, lookup_well
+    from scnoisemeter.utils.sample_sheet import lookup_well, parse_sample_sheet
 
     _setup_logging(verbose)
 
@@ -2979,8 +2981,9 @@ def _write_compare_outputs(results: dict, output_dir: Path, label_a: str, label_
     rather than written as NaN.
     """
     from collections import Counter
-    import pandas as pd
+
     import numpy as np
+    import pandas as pd
 
     sm_a, ct_a, _ = results[label_a]
     sm_b, ct_b, _ = results[label_b]

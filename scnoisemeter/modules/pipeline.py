@@ -8,7 +8,8 @@ Architecture
 One worker process per chromosome (or chromosome chunk for very large contigs).
 Each worker:
   1. Opens the BAM by region using pysam.fetch(contig)
-  2. Instantiates a ReadClassifier (annotation index is shared read-only)
+  2. Instantiates a ReadClassifier over the annotation index, which is passed
+     to the pool once via the initializer rather than per task
   3. Streams reads, classifies each, and accumulates:
        - Per-cell read-level counts  (cell_barcode → category → n_reads)
        - Per-cell base-level counts  (cell_barcode → category → n_bases)
@@ -52,13 +53,12 @@ from scnoisemeter.constants import (
     DEFAULT_THREADS,
     LENGTH_BIN_BREAKS,
     LOW_MAPQ_THRESHOLD,
-    ReadCategory,
     TSO_MIN_MATCH_LENGTH,
+    ReadCategory,
 )
 from scnoisemeter.modules.annotation import AnnotationIndex
 from scnoisemeter.modules.classifier import ReadClassifier
 from scnoisemeter.utils.bam_inspector import BamMetadata
-
 
 # ---------------------------------------------------------------------------
 # Picklable defaultdict factory functions
@@ -126,6 +126,22 @@ def _make_endpoint_reservoir():
 logger = logging.getLogger(__name__)
 
 MAX_LENGTH_SAMPLE = 5_000   # per category, per contig worker
+
+# The annotation index is large (~75 MB pickled on GENCODE v47 with no repeats
+# BED, several times that with one) and read-only once built.  It used to travel
+# inside every per-contig task dict, so Pool.map serialised and re-parsed a
+# fresh copy for each contig -- ~1.9 GB of transfer and ~110 s of pure pickling
+# on a 25-contig run, and worse under spawn where nothing is shared by fork.
+# It is now handed to the workers once through the pool initializer and read
+# from this module global; task dicts may still carry an explicit "index" for
+# direct callers and tests.
+_WORKER_INDEX: Optional[AnnotationIndex] = None
+
+
+def _init_worker(index: AnnotationIndex) -> None:
+    """Pool initializer: bind the shared annotation index in each worker."""
+    global _WORKER_INDEX
+    _WORKER_INDEX = index
 
 
 def _get_length_bin(read_length: int) -> int:
@@ -286,7 +302,14 @@ def _contig_worker(args: dict) -> ContigResult:
     chimeric_dist       = args["chimeric_distance"]
     paired_end_chimeric = args.get("paired_end_chimeric", False)
     store_umis          = args["store_umis"]
-    index               = args["index"]
+    index               = args.get("index")
+    if index is None:
+        index = _WORKER_INDEX
+    if index is None:
+        raise RuntimeError(
+            "no annotation index available in worker: pass it in the task dict "
+            "or initialise the pool with _init_worker()"
+        )
     reference_path      = args.get("reference_path")
     cell_barcodes       = args.get("cell_barcodes")  # set or None
     worker_seed         = args.get("seed")
@@ -598,7 +621,6 @@ def run_pipeline(
             "chimeric_distance":   chimeric_distance,
             "paired_end_chimeric": paired_end_chimeric,
             "store_umis":          store_umis,
-            "index":               index,
             "reference_path":      reference_path,
             "seed":                _worker_seed(contig),
             "tso_sequences":       tso_sequences,
@@ -616,10 +638,13 @@ def run_pipeline(
     contig_results = []
     if threads == 1:
         # Single-threaded path (easier to debug)
+        _init_worker(index)
         for args in worker_args:
             contig_results.append(_contig_worker(args))
     else:
-        with Pool(processes=threads) as pool:
+        with Pool(
+            processes=threads, initializer=_init_worker, initargs=(index,)
+        ) as pool:
             contig_results = pool.map(_contig_worker, worker_args)
 
     # Merge

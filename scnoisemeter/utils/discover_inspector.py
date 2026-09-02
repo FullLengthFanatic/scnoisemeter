@@ -27,8 +27,8 @@ import pysam
 from scnoisemeter.constants import (
     BARCODE_AUTODETECT_MIN_FRACTION,
     Chemistry,
-    Platform,
     PipelineStage,
+    Platform,
 )
 from scnoisemeter.utils.bam_inspector import BamMetadata, inspect_bam
 
