@@ -29,7 +29,7 @@ pip install -e ".[dev]"
 pytest -q
 ```
 
-Python 3.9 or newer is required. Input BAMs must be coordinate-sorted and indexed:
+Python 3.10 or newer is required. Input BAMs must be coordinate-sorted and indexed:
 
 ```bash
 samtools sort -o sorted.bam input.bam
@@ -81,7 +81,7 @@ Unmapped, secondary, and supplementary records are counted separately and exclud
 | Category | Interpretation |
 |---|---|
 | `unassigned` | Barcode missing/off-whitelist when a whitelist is enforced |
-| `multimapper` | Explicit `NH>1` evidence. MAPQ and producer-specific `X*` tags do not replace the genomic category; low MAPQ is reported separately |
+| `multimapper` | Explicit `NH>1` evidence. MAPQ and producer-specific `X*` tags do not replace the genomic category; low MAPQ is reported separately. **`minimap2` and `pbmm2` do not emit `NH`**, so this category is empty by construction on most long-read BAMs and those alignments are counted in their genomic category instead — see [Scope and limitations](#scope-and-limitations) |
 | `mitochondrial` | Primary alignment is on `chrM`, `MT`, `chrMT`, or `mitochondrion` |
 | `chimeric` | Inter-contig or strand-discordant `SA`, incompatible query/genomic split order, or extreme paired insert size |
 | `ambiguous_cod_cod` | Same-strand region shared by protein-coding genes |
@@ -109,6 +109,8 @@ Intergenic reads are assigned by their strand-correct 3′ coordinate to predefi
 Strand consistency is measured after window assignment. A window can therefore fail strand evidence rather than being split into artificial strand-specific loci. Significant unresolved windows become `intergenic_enriched`, not `intergenic_hotspot`.
 
 For datasets larger than the 500,000-record intergenic reservoir, promoted read/base totals are estimated from a uniform reservoir. UMI-diversity fields for affected categories are emitted as missing because exact category-specific UMI sets cannot be reconstructed from a sample.
+
+The Poisson test itself also runs on that reservoir, not only the totals derived from it: both the background rate and the per-window counts come from the sampled records. A sample well above the cap is therefore tested at reduced depth and a sample below it at full depth, so promotion to `intergenic_hotspot` or `intergenic_novel` is depth-dependent. `<sample>.run_info.json` records whether reclassification was reservoir-estimated; treat these two categories as not directly rankable across samples of very different intergenic depth. The Bonferroni denominator is every 500 bp window of every non-mitochondrial contig, which is a deliberate upper bound and larger than the number of windows actually tested.
 
 ## Independent evidence flags
 
@@ -233,6 +235,8 @@ Barcode-free well BAMs are relabeled to `<plate>_<well>` before aggregation, pre
 - `intergenic_novel` is a candidate label, not gene discovery. Validate with independent end, splice, expression, and replication evidence.
 - A global Poisson background is approximate, especially near highly transcribed or poorly mappable regions.
 - SA evidence can represent technical chimeras or genuine fusions.
+- Multimapping is only detected where the aligner writes `NH`. STAR, STARsolo and Cell Ranger do; `minimap2` and `pbmm2` do not. Comparing `multimapper_read_frac`, or any category whose denominator it shifts, between a long-read and a short-read sample is therefore not meaningful.
+- Duplicate- and QC-fail-flagged records are counted and reported, but are still classified. Composition from a BAM that has been through `MarkDuplicates` is duplicate-weighted; a Cell Ranger BAM is not.
 - NUMT BED input records annotation provenance only. A NUMT read fraction is not claimed without competing-alignment evidence.
 - Coordinate and annotation compatibility remain the user’s responsibility; the current automatic reference resources target human GRCh38.
 
