@@ -254,11 +254,37 @@ class TestHarmoniseChromStyle:
 
     def test_strips_prefix_for_ensembl_bam(self):
         out = _harmonise_chrom_style(self.UCSC_ATLAS, "ensembl")
-        assert set(out) == {("1", "+"), ("M", "-")}
+        # chrM -> MT, not M: Ensembl and GENCODE spell the mitochondrion MT, so
+        # a plain prefix strip yields a key that never matches the BAM.
+        assert set(out) == {("1", "+"), ("MT", "-")}
 
-    def test_mt_maps_to_chrm_not_chrmt(self):
+    def test_mito_contig_uses_each_style_own_spelling(self):
         assert ("chrM", "-") in _harmonise_chrom_style({("MT", "-"): [1]}, "ucsc")
         assert ("chrMT", "-") not in _harmonise_chrom_style({("MT", "-"): [1]}, "ucsc")
+        assert ("MT", "-") in _harmonise_chrom_style({("chrM", "-"): [1]}, "ensembl")
+        assert ("M", "-") not in _harmonise_chrom_style({("chrM", "-"): [1]}, "ensembl")
+
+    @pytest.mark.parametrize("style,other,contigs", [
+        ("ucsc", "ensembl", ["1", "MT", "X"]),
+        ("ensembl", "ucsc", ["chr1", "chrM", "chrX"]),
+    ])
+    def test_round_trip_is_identity(self, style, other, contigs):
+        """Harmonising to the other style and back must recover the input.
+
+        This is the property that catches an asymmetric special case: without
+        chrM -> MT, MT survives one hop and is lost on the return.
+        """
+        original = {(c, "+"): [1] for c in contigs}
+        there = _harmonise_chrom_style(original, style)
+        assert _harmonise_chrom_style(there, other) == original
+
+    def test_mito_lookup_succeeds_in_both_directions(self):
+        """The end-to-end consequence: the proximity test must fire on the mito
+        contig whichever naming the BAM uses."""
+        ucsc_bam = _harmonise_chrom_style({("MT", "-"): [500]}, "ucsc")
+        assert _near_polya_site(ucsc_bam, "chrM", 505, proximity=50, strand="-")
+        ensembl_bam = _harmonise_chrom_style({("chrM", "-"): [500]}, "ensembl")
+        assert _near_polya_site(ensembl_bam, "MT", 505, proximity=50, strand="-")
 
     def test_noop_when_styles_already_agree(self):
         assert _harmonise_chrom_style(self.UCSC_ATLAS, "ucsc") == self.UCSC_ATLAS
