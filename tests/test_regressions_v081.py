@@ -19,15 +19,16 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from scnoisemeter.cli import _check_site_contig_overlap, _harmonise_chrom_style
 from scnoisemeter.modules.annotation import _extract_splice_junctions, _extract_splice_sites
 from scnoisemeter.modules.intergenic_profiler import (
     IntergenicReadRecord,
+    _near_polya_site,
     _repeat_overlap_fraction,
     _repeat_overlap_fraction_merged,
     merge_repeat_intervals,
 )
 from scnoisemeter.modules.metrics import SampleMetrics, to_multiqc_json
-
 
 # ---------------------------------------------------------------------------
 # Categorical groupby in the annotation build
@@ -233,3 +234,85 @@ class TestUndefinedMetricsAreAbsent:
         # a genuine zero must survive; only *absent* is suppressed
         assert data["per_cell_noise_median"] == pytest.approx(0.0)
         assert "low_mapq_read_frac" not in data
+
+
+# ---------------------------------------------------------------------------
+# Site-atlas chromosome naming (v0.9.0-dev)
+# ---------------------------------------------------------------------------
+
+class TestHarmoniseChromStyle:
+    """The old helper only stripped `chr`, so an Ensembl-named atlas against a
+    UCSC-named BAM matched nothing while staying non-empty."""
+
+    ENSEMBL_ATLAS = {("1", "+"): [100, 200], ("MT", "-"): [50], ("X", "+"): [7]}
+    UCSC_ATLAS = {("chr1", "+"): [100, 200], ("chrM", "-"): [50]}
+
+    def test_adds_prefix_for_ucsc_bam(self):
+        out = _harmonise_chrom_style(self.ENSEMBL_ATLAS, "ucsc")
+        assert set(out) == {("chr1", "+"), ("chrM", "-"), ("chrX", "+")}
+        assert out[("chr1", "+")] == [100, 200]
+
+    def test_strips_prefix_for_ensembl_bam(self):
+        out = _harmonise_chrom_style(self.UCSC_ATLAS, "ensembl")
+        assert set(out) == {("1", "+"), ("M", "-")}
+
+    def test_mt_maps_to_chrm_not_chrmt(self):
+        assert ("chrM", "-") in _harmonise_chrom_style({("MT", "-"): [1]}, "ucsc")
+        assert ("chrMT", "-") not in _harmonise_chrom_style({("MT", "-"): [1]}, "ucsc")
+
+    def test_noop_when_styles_already_agree(self):
+        assert _harmonise_chrom_style(self.UCSC_ATLAS, "ucsc") == self.UCSC_ATLAS
+        assert _harmonise_chrom_style(self.ENSEMBL_ATLAS, "ensembl") == self.ENSEMBL_ATLAS
+
+    def test_noop_on_unknown_style_or_empty(self):
+        assert _harmonise_chrom_style(self.ENSEMBL_ATLAS, "unknown") == self.ENSEMBL_ATLAS
+        assert _harmonise_chrom_style({}, "ucsc") == {}
+
+    def test_plain_string_keys_are_supported(self):
+        # BED3 / legacy cache representation carries no strand in the key
+        assert set(_harmonise_chrom_style({"1": [5], "2": [6]}, "ucsc")) == {"chr1", "chr2"}
+
+    def test_lookup_succeeds_after_harmonisation(self):
+        """The end-to-end point: the proximity test must actually fire."""
+        atlas = _harmonise_chrom_style(self.ENSEMBL_ATLAS, "ucsc")
+        assert _near_polya_site(atlas, "chr1", 105, proximity=50, strand="+")
+        # and would not have, before harmonisation
+        assert not _near_polya_site(self.ENSEMBL_ATLAS, "chr1", 105, proximity=50, strand="+")
+
+
+class TestSiteContigOverlapGuard:
+
+    def test_discards_atlas_sharing_no_contig(self):
+        sites = {("1", "+"): [100]}
+        assert _check_site_contig_overlap(
+            sites, ["chr1", "chr2"], label="polyA site atlas"
+        ) is None
+
+    def test_keeps_atlas_with_any_shared_contig(self):
+        sites = {("chr1", "+"): [100], ("weird_contig", "+"): [5]}
+        assert _check_site_contig_overlap(
+            sites, ["chr1", "chr2"], label="polyA site atlas"
+        ) is sites
+
+    def test_records_a_warning_on_the_metadata(self):
+        class _Meta:
+            warnings: list = []
+        meta = _Meta()
+        meta.warnings = []
+        _check_site_contig_overlap(
+            {("1", "+"): [100]}, ["chr1"], label="polyA site atlas", meta=meta
+        )
+        assert len(meta.warnings) == 1
+        assert "polyA site atlas" in meta.warnings[0]
+        # the message must name both namings so the user can act on it
+        assert "'1'" in meta.warnings[0] and "'chr1'" in meta.warnings[0]
+
+    def test_passthrough_for_absent_or_empty_inputs(self):
+        assert _check_site_contig_overlap(None, ["chr1"], label="x") is None
+        assert _check_site_contig_overlap({}, ["chr1"], label="x") == {}
+        # no reference names to compare against: cannot judge, so keep
+        sites = {("1", "+"): [1]}
+        assert _check_site_contig_overlap(sites, [], label="x") is sites
+
+    def test_near_polya_site_is_none_safe(self):
+        assert _near_polya_site(None, "chr1", 100) is False
