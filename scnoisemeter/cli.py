@@ -2532,16 +2532,23 @@ def _harmonise_chrom_style(sites: dict, chrom_style: str) -> dict:
     Rewrite BED contig names into the BAM's naming style, in whichever
     direction is needed.
 
-    This used to strip a ``chr`` prefix only, which silently broke the common
-    case rather than a rare one: PolyASite 3.0 ships Ensembl-named contigs
-    (``1``, ``2``, ``MT``) while a BAM aligned to the GENCODE primary assembly
-    is UCSC-named (``chr1``), so every lookup missed.  The dict was still
-    non-empty, so the truthiness guards downstream passed and the endpoint
-    fractions were reported as a measured 0.0 instead of as absent.  FANTOM5
-    CAGE is UCSC-named, so the failure was asymmetric and hit exactly the
-    configuration this tool targets.
+    This used to strip a ``chr`` prefix only, never add one.  Both
+    auto-downloaded atlases are UCSC-named -- PolyASite 3.0 is fetched in its
+    GENCODE flavour (``atlas.clusters.3.0.GRCh38.GENCODE_NN.bed.gz``, contigs
+    ``chr1`` ...) and FANTOM5 CAGE likewise -- so the default path matched a
+    UCSC-named BAM directly and worked.  Two narrower cases did not:
 
-    No-op when the styles already agree or when the BAM style is unknown.
+    - a **user-supplied Ensembl-named BED** (``--polya-bed`` / ``--tss-bed``)
+      against a UCSC-named BAM: no rewrite happened in that direction, so every
+      lookup missed while the dict stayed non-empty, and the endpoint fractions
+      were reported as a measured 0.0 instead of as absent;
+    - the **mitochondrion under an Ensembl-named BAM**: stripping turned the
+      atlas's ``chrM`` into ``M`` where Ensembl and GENCODE spell it ``MT``, so
+      mitochondrial polyA/TSS proximity was silently lost.
+
+    Rewriting in both directions, with ``M``/``MT`` mapped per style, covers
+    both.  No-op when the styles already agree or when the BAM style is
+    unknown.
     """
     if chrom_style not in {"ucsc", "ensembl"} or not sites:
         return sites

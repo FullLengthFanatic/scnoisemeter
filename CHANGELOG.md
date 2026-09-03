@@ -5,6 +5,45 @@ detected can move a reported value by orders of magnitude, so `cohort` refuses
 to pool result sets silently across versions. Any release that alters a
 reported number says so here.
 
+## Unreleased
+
+### Corrected
+
+- The v0.8.1 commit `c6f50a4` and its source comment stated that PolyASite 3.0
+  ships Ensembl-named contigs and that therefore "every lookup missed" for a
+  UCSC-named BAM, making the endpoint-anchoring metrics and
+  `intergenic_hotspot` wrong for the tool's default configuration. **That was
+  incorrect.** `annotation_fetcher` requests PolyASite 3.0 in its GENCODE
+  flavour (`atlas.clusters.3.0.GRCh38.GENCODE_NN.bed.gz`), whose contigs are
+  `chr`-prefixed, as is the FANTOM5 CAGE atlas. The default auto-download path
+  therefore matched a UCSC-named BAM directly and reported correct anchoring
+  fractions; the committed report screenshots, from a UCSC-named BAM with both
+  atlases auto-downloaded, show 99.62% 3'-end and 84.02% 5'-end anchoring and
+  corroborate this.
+
+  The claim was traced to a misreading of a docstring example in
+  `annotation_fetcher.extract_polyasite_version_from_filename`, where
+  `atlas.clusters.2.0.GRCh38.96.bed.gz -> None (Ensembl, not GENCODE)`
+  documents that the *older 2.0 file* yields no GENCODE version number. It does
+  not describe what the tool downloads.
+
+  What was genuinely broken, and what the 0.8.1 change actually fixes, is
+  narrower:
+
+  - a **user-supplied Ensembl-named BED** (`--polya-bed` / `--tss-bed`) against
+    a UCSC-named BAM. The old helper only ever stripped a `chr` prefix, so
+    nothing rewrote in that direction and every lookup missed while the dict
+    stayed non-empty — the silent-zero failure, but confined to users supplying
+    their own atlas;
+  - the **mitochondrion under an Ensembl-named BAM**, where stripping turned the
+    atlas's `chrM` into `M` while the BAM says `MT`, silently dropping
+    mitochondrial polyA/TSS proximity. Fixed in the follow-up commit.
+
+  No reported value changes for the default auto-download path as a result of
+  the 0.8.1 atlas work. `_check_site_contig_overlap` remains worthwhile as a
+  guard: it turns a non-matching atlas into an absent metric plus a loud error
+  rather than a measured zero.
+
 ## 0.8.1
 
 ### Reported values that change
