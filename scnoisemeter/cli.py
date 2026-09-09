@@ -57,6 +57,11 @@ from scnoisemeter.constants import (
     DEFAULT_THREADS,
     INTERGENIC_LOCUS_WINDOW,
     MITO_CONTIG_NAMES,
+    POLYA_ATLAS_DENSITY_WARN,
+    POLYA_MIN_SUPPORT_DEFAULT,
+    POLYA_MIN_SUPPORT_RECOMMENDED,
+    POLYA_SITE_PROXIMITY,
+    PRIMING_CRITERION_DEFAULT,
     TSO_10X,
     TSO_MIN_MATCH_LENGTH,
     TSO_PACBIO,
@@ -162,6 +167,27 @@ def _shared_options(func):
                      help="Disable the poly-G heuristic for TSO invasion (a soft-clip with ≥6 G's). "
                           "Use this to count only true TSO-sequence matches, e.g. on data where "
                           "G-rich genomic regions or sequencing artifacts inflate the poly-G signal."),
+        click.option("--polya-min-support",  default=POLYA_MIN_SUPPORT_DEFAULT,
+                     show_default=True, type=float,
+                     help="Discard polyA atlas records supported in fewer than this "
+                          "percentage of samples (column 7 of a PolyASite BED). "
+                          f"{POLYA_MIN_SUPPORT_RECOMMENDED:g} is recommended: loaded "
+                          "unfiltered, PolyASite 3.0 puts 38.6% of the genome within "
+                          "50 bp of a site, which makes polyA-site proximity a constant "
+                          "rather than a test. Default 0 keeps pre-0.9 behaviour so "
+                          "upgrading does not move a reported number."),
+        click.option("--priming-criterion",
+                     type=click.Choice(["a_run", "perc_a", "either"], case_sensitive=False),
+                     default=PRIMING_CRITERION_DEFAULT, show_default=True,
+                     help="Internal-priming test. 'a_run' is a run of consecutive genomic "
+                          "A's (pre-0.9 behaviour); 'perc_a' is the SQANTI3/pigeon "
+                          "perc_A_downstream_TTS convention (>=60% A over 20 bp); 'either' "
+                          "flags a read satisfying one or both. The two agree on ~97% of "
+                          "windows, so this is for comparability, not correction."),
+        click.option("--anchor-veto-internal-priming", is_flag=True,
+                     help="Require the absence of an internal-priming signature for a read "
+                          "to count towards the 3'-end anchoring fractions. Off by default "
+                          "because it lowers three_prime_anchored_frac."),
         click.option("--repeats",            default=None,   type=click.Path(exists=True), help="RepeatMasker BED for hg38 (optional)."),
         click.option("--reference",          default=None,   type=click.Path(exists=True), help="Reference FASTA (.fa/.fa.gz + .fai) for polyA and junction checks."),
         click.option("--threads",            default=DEFAULT_THREADS, show_default=True, type=int, help="Parallel worker processes."),
@@ -430,6 +456,9 @@ def _attach_result_provenance(
     polya_paths, polya_version, polya_source, polya_db,
     tss_paths, tss_db, tss_user_supplied,
     tso_seqs, tso_min_match, tso_check_polyg,
+    polya_min_support: float = POLYA_MIN_SUPPORT_DEFAULT,
+    priming_criterion: str = PRIMING_CRITERION_DEFAULT,
+    anchor_veto_internal_priming: bool = False,
     version_warning: Optional[str] = None,
 ) -> dict:
     """
@@ -454,11 +483,19 @@ def _attach_result_provenance(
             "path": tss_paths[0] if tss_paths else None,
         } if tss_paths else None,
         "tso": _make_tso_info(tso_seqs, tso_min_match, check_polyg=tso_check_polyg),
+        # Settings that change what a reported number means, so a cohort
+        # comparison can refuse to pool runs that disagree on them.
+        "priming": {
+            "polya_min_support": float(polya_min_support),
+            "criterion": priming_criterion,
+            "anchor_veto_internal_priming": bool(anchor_veto_internal_priming),
+        },
     }
     sm._gtf_info   = provenance["gtf"]
     sm._polya_info = provenance["polya"]
     sm._tss_info   = provenance["tss"]
     sm._tso_info   = provenance["tso"]
+    sm._priming_info = provenance["priming"]
     if version_warning:
         sm.warnings.append(version_warning)
     return provenance
@@ -880,6 +917,7 @@ def run_cmd(
     bam, sample_name, tagged_bam, cell_barcodes,
     gtf, gtf_version, barcode_whitelist, whitelist_db, barcode_tag, umi_tag,
     chemistry, platform, library_strand, pipeline_stage, chimeric_distance, tso, tso_min_match, no_polyg_tso,
+    polya_min_support, priming_criterion, anchor_veto_internal_priming,
     repeats, reference, threads, no_umi_dedup, no_cache,
     exclude_biotypes, output_dir, obs_metadata, polya_sites, polya_db,
     tss_sites, tss_db, numt_bed, offline, seed, verbose,
@@ -1058,6 +1096,7 @@ def run_cmd(
         tso_sequences=tso_seqs,
         tso_min_match=tso_min_match,
         tso_check_polyg=tso_check_polyg,
+        priming_criterion=priming_criterion,
         threads=threads,
         store_umis=not no_umi_dedup,
         reference_path=reference,
@@ -1095,10 +1134,15 @@ def run_cmd(
     _bam_chrom_style = _detect_chrom_style(meta.reference_names)
 
     # Attach polyA site dict (merged from resolved polya-site files)
+    _pas_sites: dict = {}
     result._polya_site_dict = _check_site_contig_overlap(
-        _load_polya_sites(polya_paths, chrom_style=_bam_chrom_style),
+        _load_polya_sites(polya_paths, chrom_style=_bam_chrom_style,
+                          min_support=polya_min_support, pas_out=_pas_sites),
         meta.reference_names, label="polyA site atlas", meta=meta,
     )
+    result._polya_pas_dict = _pas_sites if result._polya_site_dict else None
+    result._anchor_veto_internal_priming = bool(anchor_veto_internal_priming)
+    _warn_if_atlas_too_dense(result._polya_site_dict, meta, polya_min_support)
 
     # Attach TSS site dict (resolved: auto-download or user-supplied)
     tss_paths = _resolve_tss_sites(tss_sites, tss_db=tss_db, offline=offline)
@@ -1134,6 +1178,9 @@ def run_cmd(
         tss_paths=tss_paths, tss_db=tss_db, tss_user_supplied=bool(tss_sites),
         tso_seqs=tso_seqs, tso_min_match=tso_min_match,
         tso_check_polyg=tso_check_polyg,
+        polya_min_support=polya_min_support,
+        priming_criterion=priming_criterion,
+        anchor_veto_internal_priming=anchor_veto_internal_priming,
         version_warning=version_warning,
     )
 
@@ -1246,6 +1293,7 @@ def compare_cmd(
     bam_a, bam_b, label_a, label_b, matched_reads, tso_a, tso_b,
     gtf, gtf_version, barcode_whitelist, whitelist_db, barcode_tag, umi_tag,
     chemistry, platform, library_strand, pipeline_stage, chimeric_distance, tso, tso_min_match, no_polyg_tso,
+    polya_min_support, priming_criterion, anchor_veto_internal_priming,
     repeats, reference, threads, no_umi_dedup, no_cache,
     exclude_biotypes, output_dir, obs_metadata, polya_sites, polya_db,
     tss_sites, tss_db, numt_bed, offline, seed, verbose,
@@ -1347,6 +1395,7 @@ def compare_cmd(
             tso_sequences=tso_seqs,
             tso_min_match=tso_min_match,
             tso_check_polyg=tso_check_polyg,
+            priming_criterion=priming_criterion,
             threads=threads,
             store_umis=not no_umi_dedup,
             reference_path=reference,
@@ -1354,10 +1403,15 @@ def compare_cmd(
             store_read_assignments=matched_reads,
         )
         _bam_cs = _detect_chrom_style(meta.reference_names)
+        _pas_sites = {}
         result._polya_site_dict = _check_site_contig_overlap(
-            _load_polya_sites(polya_paths, chrom_style=_bam_cs),
+            _load_polya_sites(polya_paths, chrom_style=_bam_cs,
+                              min_support=polya_min_support, pas_out=_pas_sites),
             meta.reference_names, label="polyA site atlas", meta=meta,
         )
+        result._polya_pas_dict = _pas_sites if result._polya_site_dict else None
+        result._anchor_veto_internal_priming = bool(anchor_veto_internal_priming)
+        _warn_if_atlas_too_dense(result._polya_site_dict, meta, polya_min_support)
         result._tss_site_dict = _check_site_contig_overlap(
             _load_tss_sites(tss_paths, chrom_style=_bam_cs) if tss_paths else None,
             meta.reference_names, label="TSS/CAGE atlas", meta=meta,
@@ -1379,6 +1433,9 @@ def compare_cmd(
             tss_paths=tss_paths, tss_db=tss_db, tss_user_supplied=bool(tss_sites),
             tso_seqs=tso_seqs, tso_min_match=tso_min_match,
             tso_check_polyg=tso_check_polyg,
+            polya_min_support=polya_min_support,
+            priming_criterion=priming_criterion,
+            anchor_veto_internal_priming=anchor_veto_internal_priming,
             version_warning=version_warning,
         )
         results[label] = (sm, ct, result)
@@ -2095,6 +2152,7 @@ def run_plate_cmd(
     plate_dir, sample_sheet, sequencer, sample_name, plate_ids, parallel_wells,
     gtf, gtf_version, barcode_whitelist, whitelist_db, barcode_tag, umi_tag,
     chemistry, platform, library_strand, pipeline_stage, chimeric_distance, tso, tso_min_match, no_polyg_tso,
+    polya_min_support, priming_criterion, anchor_veto_internal_priming,
     repeats, reference, threads, no_umi_dedup, no_cache,
     exclude_biotypes, output_dir, obs_metadata, polya_sites, polya_db,
     tss_sites, tss_db, numt_bed, offline, seed, verbose,
@@ -2246,10 +2304,13 @@ def run_plate_cmd(
     # Loading from the compressed BED takes ~35 s; doing it per-well would
     # multiply that cost by the number of wells (thousands for a full plate run).
     _shared_bam_cs    = _detect_chrom_style(_first_meta.reference_names)
+    _shared_pas: dict = {}
     _shared_polya     = _check_site_contig_overlap(
-        _load_polya_sites(polya_paths, chrom_style=_shared_bam_cs),
+        _load_polya_sites(polya_paths, chrom_style=_shared_bam_cs,
+                          min_support=polya_min_support, pas_out=_shared_pas),
         _first_meta.reference_names, label="polyA site atlas", meta=_first_meta,
     )
+    _warn_if_atlas_too_dense(_shared_polya, _first_meta, polya_min_support)
     _shared_tss       = _check_site_contig_overlap(
         _load_tss_sites(tss_paths, chrom_style=_shared_bam_cs) if tss_paths else None,
         _first_meta.reference_names, label="TSS/CAGE atlas", meta=_first_meta,
@@ -2403,6 +2464,7 @@ def run_plate_cmd(
                         tso_sequences=tso_seqs,
                         tso_min_match=tso_min_match,
                         tso_check_polyg=tso_check_polyg,
+                        priming_criterion=priming_criterion,
                         threads=threads,
                         store_umis=not no_umi_dedup,
                         reference_path=reference,
@@ -2472,6 +2534,9 @@ def run_plate_cmd(
             tss_paths=tss_paths, tss_db=tss_db, tss_user_supplied=bool(tss_sites),
             tso_seqs=tso_seqs, tso_min_match=tso_min_match,
             tso_check_polyg=tso_check_polyg,
+            polya_min_support=polya_min_support,
+            priming_criterion=priming_criterion,
+            anchor_veto_internal_priming=anchor_veto_internal_priming,
             version_warning=version_warning,
         )
         plate_sm._cell_barcodes_info = None
@@ -2661,10 +2726,26 @@ def _site_cache_path(paths, chrom_style: str, prefix: str) -> Optional[Path]:
     return cache_dir / f".scnoisemeter_{prefix}_{h}.pkl.gz"
 
 
-def _load_polya_sites(paths, chrom_style: str = "ucsc") -> dict:
+def _load_polya_sites(
+    paths,
+    chrom_style: str = "ucsc",
+    min_support: float = POLYA_MIN_SUPPORT_DEFAULT,
+    pas_out: Optional[dict] = None,
+) -> dict:
     """
     Load one or more polyA site BED files into a merged dict of
     contig → sorted list of midpoint positions.
+
+    *min_support*, when > 0, keeps only records whose column 7 (the percentage
+    of samples supporting the site in a PolyASite atlas) is at least that
+    value.  Records without a parseable column 7 are kept, so a plain BED3 is
+    unaffected.  See POLYA_MIN_SUPPORT_DEFAULT for why this is not on by
+    default and what the density costs.
+
+    *pas_out*, when a dict is supplied, is filled with the same
+    ``(contig, strand) -> sorted positions`` shape but restricted to records
+    whose column 11 names a polyA signal hexamer.  PolyASite already carries
+    that column, so this is positive cleavage-site evidence at no extra cost.
 
     Accepts a single path string or a list/tuple of paths. Multiple
     databases (e.g. PolyASite 2.0 + APADB) are merged transparently —
@@ -2681,11 +2762,18 @@ def _load_polya_sites(paths, chrom_style: str = "ucsc") -> dict:
     """
     import gzip as _gz
     import pickle as _pkl
-    _cache = _site_cache_path(paths, chrom_style, "polya_v2_stranded")
+    # min_support is part of the cache identity: a cached unfiltered dict must
+    # not be served to a run that asked for a filtered one.
+    _cache = _site_cache_path(
+        paths, chrom_style, f"polya_v3_stranded_sup{min_support:g}"
+    )
     if _cache and _cache.exists():
         try:
             with _gz.open(_cache, "rb") as fh:
-                sites = _pkl.load(fh)
+                cached = _pkl.load(fh)
+            sites = cached["sites"] if isinstance(cached, dict) and "sites" in cached else cached
+            if pas_out is not None and isinstance(cached, dict):
+                pas_out.update(cached.get("pas", {}))
             logger.info("Loaded polyA site dict from cache: %s", _cache.name)
             return sites
         except Exception:
@@ -2698,6 +2786,7 @@ def _load_polya_sites(paths, chrom_style: str = "ucsc") -> dict:
         paths = [paths]
     sites: dict = {}
     total = 0
+    n_dropped = 0
     for path in paths:
         with _open_bed(path) as fh:
             for line in fh:
@@ -2710,14 +2799,38 @@ def _load_polya_sites(paths, chrom_style: str = "ucsc") -> dict:
                     chrom, start, end = parts[0], int(parts[1]), int(parts[2])
                 except ValueError:
                     continue
+                if min_support > 0 and len(parts) > 6:
+                    try:
+                        if float(parts[6]) < min_support:
+                            n_dropped += 1
+                            continue
+                    except ValueError:
+                        pass          # not a PolyASite atlas; keep the record
                 mid = (start + end) // 2
                 strand = parts[5] if len(parts) > 5 and parts[5] in {"+", "-"} else "."
                 sites.setdefault((chrom, strand), []).append(mid)
+                if pas_out is not None and len(parts) > 10:
+                    hexamer = parts[10].strip().upper().replace("U", "T")
+                    if hexamer and hexamer != "NAN":
+                        pas_out.setdefault((chrom, strand), []).append(mid)
                 total += 1
         logger.info("Loaded polyA sites from %s", path)
     for chrom in sites:
         sites[chrom] = sorted(set(sites[chrom]))
     sites = _harmonise_chrom_style(sites, chrom_style)
+    if pas_out is not None:
+        for key in list(pas_out):
+            pas_out[key] = sorted(set(pas_out[key]))
+        pas_out.update(
+            {k: v for k, v in _harmonise_chrom_style(dict(pas_out), chrom_style).items()}
+        )
+        for key in [k for k in pas_out if k not in sites]:
+            pas_out.pop(key, None)
+    if n_dropped:
+        logger.info(
+            "Dropped %d polyA records below --polya-min-support=%g (kept %d)",
+            n_dropped, min_support, total,
+        )
     logger.info(
         "Total polyA site positions: %d across %d contig/strand groups",
         sum(len(v) for v in sites.values()), len(sites),
@@ -2727,11 +2840,70 @@ def _load_polya_sites(paths, chrom_style: str = "ucsc") -> dict:
         try:
             _cache.parent.mkdir(parents=True, exist_ok=True)
             with _gz.open(_cache, "wb") as fh:
-                _pkl.dump(sites, fh, protocol=5)
+                _pkl.dump({"sites": sites, "pas": dict(pas_out or {})}, fh, protocol=5)
         except Exception:
             pass
 
     return sites
+
+
+def _warn_if_atlas_too_dense(sites, meta, min_support: float) -> None:
+    """Record a warning when the loaded atlas cannot act as a proximity test.
+
+    Density is a property of the file, not of the data, so this is measured
+    once per run and surfaced in the report rather than left for the reader to
+    infer from an implausibly high anchoring fraction.
+    """
+    if not sites or not getattr(meta, "reference_lengths", None):
+        return
+    frac = _polya_atlas_density(sites, meta.reference_lengths)
+    if frac < POLYA_ATLAS_DENSITY_WARN:
+        return
+    msg = (
+        f"{frac:.1%} of the reference lies within {POLYA_SITE_PROXIMITY} bp of a "
+        f"loaded polyA site (--polya-min-support={min_support:g}). PolyA-site "
+        f"proximity is close to a constant at this density: it suppresses "
+        f"intergenic_hotspot and satisfies one of the two intergenic_novel "
+        f"evidence routes for free. Consider "
+        f"--polya-min-support={POLYA_MIN_SUPPORT_RECOMMENDED:g}."
+    )
+    logger.warning(msg)
+    if msg not in meta.warnings:
+        meta.warnings.append(msg)
+
+
+def _polya_atlas_density(sites: dict, reference_lengths: dict,
+                         proximity: int = POLYA_SITE_PROXIMITY) -> float:
+    """Fraction of the reference within *proximity* bp of a loaded polyA site.
+
+    An atlas dense enough to cover much of the genome cannot function as a
+    proximity test, so this is measured rather than assumed.  Returns 0.0 when
+    there is nothing to measure.
+    """
+    if not sites or not reference_lengths:
+        return 0.0
+    by_contig: dict = {}
+    for (contig, _strand), positions in sites.items():
+        by_contig.setdefault(contig, []).extend(positions)
+    covered = 0
+    total = 0
+    for contig, length in reference_lengths.items():
+        if contig in MITO_CONTIG_NAMES:
+            continue
+        total += int(length)
+        positions = by_contig.get(contig)
+        if not positions:
+            continue
+        merged_end = -1
+        for pos in sorted(positions):
+            lo, hi = max(0, pos - proximity), min(int(length), pos + proximity)
+            if lo > merged_end:
+                covered += hi - lo
+                merged_end = hi
+            elif hi > merged_end:
+                covered += hi - merged_end
+                merged_end = hi
+    return (covered / total) if total else 0.0
 
 
 def _load_tss_sites(paths, chrom_style: str = "ucsc") -> dict:

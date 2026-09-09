@@ -149,12 +149,19 @@ class SampleMetrics:
     # both_ends_anchored_frac and is only populated when both atlases exist.
     full_length_read_frac: Optional[float] = None
     three_prime_anchored_frac: Optional[float] = None
+    # Subset of the above restricted to atlas records carrying a polyA signal
+    # hexamer (column 11 of a PolyASite BED).  None when no such column exists.
+    three_prime_at_pas_site_frac: Optional[float] = None
     five_prime_anchored_frac: Optional[float] = None
     both_ends_anchored_frac: Optional[float] = None
 
     # Artifact flags (sample-wide counts)
     n_tso_invasion:        int = 0
     n_polya_priming:       int = 0
+    # Reads whose own 3' soft clip carried an untemplated polyA tail.  Counted
+    # independently of n_polya_priming: a read in both is a real cleavage site
+    # in A-rich context, which the genomic test alone calls internal priming.
+    n_polya_tail:          int = 0
     n_noncanon_junction:   int = 0
     n_tso_concatemer:      int = 0
     n_discordant_pair:     int = 0
@@ -386,6 +393,7 @@ def compute_metrics(
     for cb, flags in result.artifact_flags.items():
         sm.n_tso_invasion      += flags.get("tso",        0)
         sm.n_polya_priming     += flags.get("polya",      0)
+        sm.n_polya_tail        += flags.get("polya_tail", 0)
         sm.n_noncanon_junction += flags.get("noncanon",   0)
         sm.n_tso_concatemer    += flags.get("tso_concat", 0)
         sm.n_discordant_pair   += flags.get("discordant_pair", 0)
@@ -438,10 +446,20 @@ def compute_metrics(
         from scnoisemeter.modules.intergenic_profiler import _near_polya_site
         three_hits = []
         five_hits = []
-        for contig, strand, five_pos, three_pos, _read_key in endpoints:
-            three_hits.append(
-                bool(polya_site_dict) and _near_polya_site(
-                    polya_site_dict, contig, three_pos, strand=strand
+        pas_hits = []
+        pas_site_dict = getattr(result, "_polya_pas_dict", None)
+        veto = bool(getattr(result, "_anchor_veto_internal_priming", False))
+        for record in endpoints:
+            # 0.8 wrote five fields; 0.9 appends the per-read priming flag.
+            contig, strand, five_pos, three_pos = record[0], record[1], record[2], record[3]
+            primed = bool(record[5]) if len(record) > 5 else False
+            near_three = bool(polya_site_dict) and _near_polya_site(
+                polya_site_dict, contig, three_pos, strand=strand
+            )
+            three_hits.append(near_three and not (veto and primed))
+            pas_hits.append(
+                bool(pas_site_dict) and _near_polya_site(
+                    pas_site_dict, contig, three_pos, strand=strand
                 )
             )
             five_hits.append(
@@ -452,6 +470,10 @@ def compute_metrics(
             )
         if polya_site_dict:
             sm.three_prime_anchored_frac = float(np.mean(three_hits))
+        if pas_site_dict:
+            # Proximity to a site the atlas annotates with a polyA signal
+            # hexamer -- a stricter anchor than proximity to any record.
+            sm.three_prime_at_pas_site_frac = float(np.mean(pas_hits))
         if tss_site_dict:
             sm.five_prime_anchored_frac = float(np.mean(five_hits))
             sm.tss_anchored_frac = sm.five_prime_anchored_frac
@@ -712,6 +734,7 @@ def to_multiqc_json(sm: SampleMetrics) -> dict:
         "n_alignments_classified":  sm.n_alignments_classified,
         "tso_invasion_frac":        round(sm.n_tso_invasion    / (sm.n_reads_classified or 1), 4),
         "polya_priming_frac":       round(sm.n_polya_priming   / (sm.n_reads_classified or 1), 4),
+        "polya_tail_frac":          round(sm.n_polya_tail      / (sm.n_reads_classified or 1), 4),
         "tso_concatemer_frac":      round(sm.n_tso_concatemer  / (sm.n_reads_classified or 1), 4),
         "discordant_pair_frac":     round(sm.n_discordant_pair / (sm.n_reads_classified or 1), 4),
     }
@@ -731,6 +754,8 @@ def to_multiqc_json(sm: SampleMetrics) -> dict:
         data["full_length_read_frac"] = round(sm.full_length_read_frac, 4)
     if sm.three_prime_anchored_frac is not None:
         data["three_prime_anchored_frac"] = round(sm.three_prime_anchored_frac, 4)
+    if sm.three_prime_at_pas_site_frac is not None:
+        data["three_prime_at_pas_site_frac"] = round(sm.three_prime_at_pas_site_frac, 4)
     if sm.five_prime_anchored_frac is not None:
         data["five_prime_anchored_frac"] = round(sm.five_prime_anchored_frac, 4)
     if sm.both_ends_anchored_frac is not None:

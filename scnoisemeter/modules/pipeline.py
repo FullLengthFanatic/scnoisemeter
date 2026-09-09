@@ -53,6 +53,7 @@ from scnoisemeter.constants import (
     DEFAULT_THREADS,
     LENGTH_BIN_BREAKS,
     LOW_MAPQ_THRESHOLD,
+    PRIMING_CRITERION_DEFAULT,
     TSO_MIN_MATCH_LENGTH,
     ReadCategory,
 )
@@ -75,6 +76,7 @@ def _dd_flags():
     return {
         "tso": 0,
         "polya": 0,
+        "polya_tail": 0,
         "noncanon": 0,
         "tso_concat": 0,
         "discordant_pair": 0,
@@ -187,7 +189,7 @@ class ContigResult:
     # umi_sets[cb][category] = set of UMI strings
     umi_sets:     dict = field(default_factory=lambda: defaultdict(_dd_set))
 
-    # artifact_flags[cb] = {"tso": int, "polya": int, "noncanon": int, "tso_concat": int}
+    # artifact_flags[cb] = {"tso", "polya", "polya_tail", "noncanon", "tso_concat", ...} -> int
     artifact_flags: dict = field(default_factory=lambda: defaultdict(_dd_flags))
     alignment_sums: dict = field(default_factory=lambda: defaultdict(_dd_alignment))
 
@@ -316,6 +318,7 @@ def _contig_worker(args: dict) -> ContigResult:
     tso_sequences       = args.get("tso_sequences")
     tso_min_match       = args.get("tso_min_match", TSO_MIN_MATCH_LENGTH)
     tso_check_polyg     = args.get("tso_check_polyg", True)
+    priming_criterion   = args.get("priming_criterion", PRIMING_CRITERION_DEFAULT)
     store_read_assignments = args.get("store_read_assignments", False)
 
     if worker_seed is not None:
@@ -339,6 +342,7 @@ def _contig_worker(args: dict) -> ContigResult:
         tso_min_match=tso_min_match,
         tso_check_polyg=tso_check_polyg,
         reference=reference,
+        priming_criterion=priming_criterion,
     )
 
     result = ContigResult(contig=contig)
@@ -400,6 +404,8 @@ def _contig_worker(args: dict) -> ContigResult:
                     result.artifact_flags[cb]["tso"] += 1
                 if res.is_polya_priming:
                     result.artifact_flags[cb]["polya"] += 1
+                if res.has_polya_tail:
+                    result.artifact_flags[cb]["polya_tail"] += 1
                 if res.has_noncanonical_junction:
                     result.artifact_flags[cb]["noncanon"] += 1
                 if res.is_tso_concatemer:
@@ -502,6 +508,12 @@ def _contig_worker(args: dict) -> ContigResult:
                             five_prime,
                             three_prime,
                             read_key,
+                            # Sixth field added in 0.9: the per-read priming
+                            # flag, so an anchoring fraction can optionally
+                            # require the absence of contrary evidence rather
+                            # than counting proximity alone.  Consumers must
+                            # tolerate the five-field form from older results.
+                            res.is_polya_priming,
                         ),
                         MAX_LENGTH_SAMPLE,
                     )
@@ -538,6 +550,7 @@ def run_pipeline(
     tso_sequences: Optional[list] = None,
     tso_min_match: int = TSO_MIN_MATCH_LENGTH,
     tso_check_polyg: bool = True,
+    priming_criterion: str = PRIMING_CRITERION_DEFAULT,
     store_read_assignments: bool = False,
 ) -> SampleResult:
     """
@@ -626,6 +639,7 @@ def run_pipeline(
             "tso_sequences":       tso_sequences,
             "tso_min_match":       tso_min_match,
             "tso_check_polyg":     tso_check_polyg,
+            "priming_criterion":   priming_criterion,
             "store_read_assignments": store_read_assignments,
         }
         for contig in contigs

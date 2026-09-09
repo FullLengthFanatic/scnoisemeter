@@ -56,7 +56,13 @@ from scnoisemeter.constants import (
     ILLUMINA_CHIMERIC_INSERT_SIZE,
     MITO_CONTIG_NAMES,
     POLYA_CONTEXT_WINDOW,
+    POLYA_PERC_A_MIN,
+    POLYA_PERC_A_WINDOW,
     POLYA_RUN_MIN_LENGTH,
+    POLYA_TAIL_MIN_FRAC,
+    POLYA_TAIL_MIN_LENGTH,
+    POLYA_TAIL_SCAN,
+    PRIMING_CRITERION_DEFAULT,
     TSO_10X,
     TSO_MIN_MATCH_LENGTH,
     TSO_PACBIO,
@@ -107,6 +113,13 @@ class ReadResult:
         True if TSO sequence detected in 5′ soft-clip.
     is_polya_priming : bool
         True if A-rich stretch detected immediately downstream of 3′ end.
+        This is a property of the locus in the reference, not of the molecule.
+    has_polya_tail : bool
+        True if the 3′ SOFT clip carries an untemplated A-run of at least
+        POLYA_TAIL_MIN_LENGTH.  Independent per-molecule evidence: a read with
+        both this and ``is_polya_priming`` is a real cleavage site in an A-rich
+        context, which the genomic test alone reports as internal priming.
+        Always False on a hard-clipped BAM, where the bases are unavailable.
     has_noncanonical_junction : bool
         True if any CIGAR N operation falls at a non-canonical splice site
         not present in the annotation.
@@ -142,6 +155,7 @@ class ReadResult:
     edit_distance:          Optional[int] = None
     softclip_bases:         int = 0
     query_bases:            int = 0
+    has_polya_tail:         bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -200,12 +214,18 @@ class ReadClassifier:
         tso_min_match: int = TSO_MIN_MATCH_LENGTH,
         tso_check_polyg: bool = True,
         reference: Optional[pysam.FastaFile] = None,
+        priming_criterion: str = PRIMING_CRITERION_DEFAULT,
     ):
         self.index = index
         self.barcode_tag = barcode_tag
         self.umi_tag = umi_tag
         self.whitelist = whitelist
         self.chimeric_distance = chimeric_distance
+        if priming_criterion not in {"a_run", "perc_a", "either"}:
+            raise ValueError(
+                f"priming_criterion must be a_run|perc_a|either, got {priming_criterion!r}"
+            )
+        self.priming_criterion = priming_criterion
         self.paired_end_chimeric = paired_end_chimeric
         # ``None`` preserves the programmatic API's historical defaults;
         # an explicit empty list disables motif matching.  The CLI supplies
@@ -365,6 +385,7 @@ class ReadClassifier:
         result.is_tso_concatemer = self._check_tso_concatemer(read)
         result.is_tso_invasion = self._check_tso_invasion(read)
         result.is_polya_priming = self._check_polya_priming(read)
+        result.has_polya_tail = self._has_polya_tail(read)
         result.is_discordant_pair = self._is_discordant_pair(read)
         result.has_noncanonical_junction = (
             self._has_noncanonical_junction(read)
@@ -667,7 +688,72 @@ class ReadClassifier:
         except (ValueError, KeyError):
             return False
 
-        return bool(run_re.search(context))
+        if self.priming_criterion == "a_run":
+            return bool(run_re.search(context))
+        window = context[:POLYA_PERC_A_WINDOW]
+        if not window:
+            return False
+        base = "T" if read.is_reverse else "A"
+        # For a reverse alignment the transcript-orientation A's read as T's on
+        # the + strand, so the fraction is counted on the matching base rather
+        # than reverse-complementing the slice.
+        perc_a = 100.0 * window.count(base) / len(window)
+        if self.priming_criterion == "perc_a":
+            return perc_a >= POLYA_PERC_A_MIN
+        return perc_a >= POLYA_PERC_A_MIN or bool(run_re.search(context))
+
+    def _polya_tail_stats(self, read: pysam.AlignedSegment) -> tuple[int, int, float]:
+        """``(soft_clip_len, terminal untemplated A-run, A-fraction)`` at the 3' end.
+
+        A genomic A-run downstream says the *locus* is A-rich; it cannot tell a
+        real cleavage site from a stretch that primes internally in every
+        library.  An A-run in the soft clip immediately outside the aligned
+        block is not templated by the reference, so it is per-molecule evidence
+        that this read carried a polyA tail.
+
+        Only SOFT clips are counted: hard-clipped bases are absent from
+        ``query_sequence``, so a hard-clipped BAM reports 0 rather than
+        silently indexing into the wrong bases.  Index 0 of the examined slice
+        is always the base adjacent to the cleavage site, so the run is
+        measured outward from the alignment in transcript orientation.
+        """
+        cigar = read.cigartuples
+        seq = read.query_sequence
+        if not cigar or not seq:
+            return 0, 0, 0.0
+        if read.is_reverse:
+            # transcript 3' end is the leftmost coordinate; the tail is the
+            # leading clip and reads as poly-T in reference orientation
+            if cigar[0][0] != 4:
+                return 0, 0, 0.0
+            clip_len = cigar[0][1]
+            clip = seq[:clip_len][::-1]
+            base = "T"
+        else:
+            if cigar[-1][0] != 4:
+                return 0, 0, 0.0
+            clip_len = cigar[-1][1]
+            clip = seq[len(seq) - clip_len:] if clip_len else ""
+            base = "A"
+        if not clip:
+            return 0, 0, 0.0
+        run = 0
+        for ch in clip:
+            if ch.upper() != base:
+                break
+            run += 1
+        scanned = clip[:POLYA_TAIL_SCAN]
+        frac = scanned.upper().count(base) / len(scanned) if scanned else 0.0
+        return clip_len, run, frac
+
+    def _has_polya_tail(self, read: pysam.AlignedSegment) -> bool:
+        """True when the 3' soft clip carries an untemplated polyA tail."""
+        _clip, run, frac = self._polya_tail_stats(read)
+        if run < POLYA_TAIL_MIN_LENGTH:
+            return False
+        if POLYA_TAIL_MIN_FRAC > 0 and frac < POLYA_TAIL_MIN_FRAC:
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # Interval-based genomic classification

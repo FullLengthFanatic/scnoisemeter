@@ -315,6 +315,67 @@ POLYA_CONTEXT_WINDOW = 20   # bp of reference to inspect downstream of read end
 # "polyA-site proximal" (used to distinguish novel genes from hotspots)
 POLYA_SITE_PROXIMITY = 50   # bp
 
+# PolyASite 3.0 ships 18.4M records, including sites supported in as little as
+# 5.6% of samples.  Loaded unfiltered, 38.6% of the primary genome falls within
+# POLYA_SITE_PROXIMITY of one, which makes "near an annotated polyA site" a
+# constant rather than a test: it vetoes INTERGENIC_HOTSPOT across a third of
+# the genome and satisfies one of the two _is_novel_gene evidence routes for
+# free.  Column 7 of the atlas BED is the percentage of samples supporting the
+# site; filtering on it restores discrimination (>=25% -> 7.6% of the genome,
+# >=50% -> 3.0%).  The default is 0.0 so that upgrading does not silently move
+# a reported number; POLYA_MIN_SUPPORT_RECOMMENDED is what to pass.
+POLYA_MIN_SUPPORT_DEFAULT = 0.0
+POLYA_MIN_SUPPORT_RECOMMENDED = 25.0
+
+# Fraction of the genome within POLYA_SITE_PROXIMITY of a loaded atlas site
+# above which the atlas is reported as too dense to act as a proximity test.
+POLYA_ATLAS_DENSITY_WARN = 0.20
+
+# The 12 canonical human polyA signal hexamers in descending frequency
+# (Beaudoing et al. 2000); the first two account for ~80% of real sites.
+# POLYA_HEXAMERS_STRICT is the subset used as positive evidence: a strict
+# hexamer 10-40 nt upstream occurs at 9.4% of random genomic positions, so the
+# full list is too permissive to carry evidential weight on its own.
+POLYA_HEXAMERS = (
+    "AATAAA", "ATTAAA", "AGTAAA", "TATAAA", "CATAAA", "GATAAA",
+    "AATATA", "AATACA", "AATAGA", "AAAAAG", "ACTAAA", "AAGAAA",
+)
+POLYA_HEXAMERS_STRICT = (
+    "AATAAA", "ATTAAA", "TATAAA", "AGTAAA", "CATAAA", "GATAAA",
+)
+# Distance window (bp) from hexamer start to the cleavage site.
+POLYA_HEXAMER_MIN_DIST = 10
+POLYA_HEXAMER_MAX_DIST = 40
+
+# Percent-A criterion for internal priming, the SQANTI3/pigeon
+# perc_A_downstream_TTS convention.  The cutoff is on a 0-100 scale: 60, not
+# 0.6.  Measured against PolyASite, this agrees with the A-run criterion on
+# ~97% of windows, so it is offered for comparability with isoform-QC numbers
+# rather than as a correction.
+POLYA_PERC_A_WINDOW = 20
+POLYA_PERC_A_MIN = 60.0
+PRIMING_CRITERION_DEFAULT = "a_run"      # "a_run" | "perc_a" | "either"
+
+# Untemplated 3' polyA tail measured from the read's own soft clip.  A genomic
+# A-run says the locus is A-rich; an untemplated A-run outside the alignment
+# says this molecule carried a tail, which is the per-molecule evidence that
+# separates a real cleavage site in A-rich context from internal priming.
+# Only SOFT clips are read: hard-clipped bases are absent from query_sequence,
+# so a hard-clipped BAM must report "no tail" rather than index wrong bases.
+POLYA_TAIL_MIN_LENGTH = 8
+POLYA_TAIL_SCAN = 60
+# A-fraction over the scanned clip is NOT part of the decision by default: a
+# genuine 12 bp tail inside a 60 bp clip carrying adapter or TSO sequence
+# scores ~0.2, so requiring both silently demands a ~45 bp tail.
+POLYA_TAIL_MIN_FRAC = 0.0
+
+# Direct repeat length at a junction's donor/acceptor above which the junction
+# carries the reverse-transcriptase template-switching signature.  Reported as
+# an independent flag: an RT artifact can carry a canonical GT-AG motif and is
+# invisible to a canonicality test alone.
+RT_SWITCH_REPEAT_MIN = 6
+RT_SWITCH_REPEAT_SCAN = 12
+
 
 # ---------------------------------------------------------------------------
 # Splice site canonicality
