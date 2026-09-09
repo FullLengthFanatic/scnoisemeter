@@ -63,6 +63,8 @@ from scnoisemeter.constants import (
     POLYA_TAIL_MIN_LENGTH,
     POLYA_TAIL_SCAN,
     PRIMING_CRITERION_DEFAULT,
+    RT_SWITCH_REPEAT_MIN,
+    RT_SWITCH_REPEAT_SCAN,
     TSO_10X,
     TSO_MIN_MATCH_LENGTH,
     TSO_PACBIO,
@@ -123,6 +125,12 @@ class ReadResult:
     has_noncanonical_junction : bool
         True if any CIGAR N operation falls at a non-canonical splice site
         not present in the annotation.
+    has_rt_switch_repeat : bool
+        True if any junction's two ends share a direct repeat of at least
+        RT_SWITCH_REPEAT_MIN bases -- the reverse-transcriptase
+        template-switching signature.  Independent of canonicality: an RT
+        artifact can sit on a GT-AG boundary.  Always False without a
+        reference FASTA.
     is_tso_concatemer : bool
         True if the read sequence contains more than one occurrence of a TSO
         sequence or its reverse complement (template-switch concatemer).
@@ -156,6 +164,7 @@ class ReadResult:
     softclip_bases:         int = 0
     query_bases:            int = 0
     has_polya_tail:         bool = False
+    has_rt_switch_repeat:   bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +395,7 @@ class ReadClassifier:
         result.is_tso_invasion = self._check_tso_invasion(read)
         result.is_polya_priming = self._check_polya_priming(read)
         result.has_polya_tail = self._has_polya_tail(read)
+        result.has_rt_switch_repeat = self._has_rt_switch_repeat(read)
         result.is_discordant_pair = self._is_discordant_pair(read)
         result.has_noncanonical_junction = (
             self._has_noncanonical_junction(read)
@@ -832,6 +842,59 @@ class ReadClassifier:
         category = _plurality_category(base_counts)
 
         return category, base_counts, has_noncanonical
+
+    def _has_rt_switch_repeat(self, read: pysam.AlignedSegment) -> bool:
+        """True when any junction of this read carries a direct-repeat signature.
+
+        Reverse transcriptase can switch template between two sites sharing a
+        short direct repeat, producing an alignment that looks spliced.  The
+        signature is sequence identity immediately upstream of the donor and
+        immediately upstream of the acceptor: the polymerase cannot tell which
+        copy it left.
+
+        This is independent of splice-motif canonicality, and that is the
+        point -- an RT artifact can land on a GT-AG boundary and is invisible
+        to a canonicality test.  Reported as a flag, never as a category:
+        genuine junctions in repetitive sequence also carry direct repeats.
+
+        Returns False without a reference FASTA.
+        """
+        if self.reference is None:
+            return False
+        junctions = _get_junctions(read)
+        if not junctions:
+            return False
+        contig = read.reference_name or ""
+        if not contig:
+            return False
+        for jxn_start, jxn_end in junctions:
+            if self._direct_repeat_len(contig, jxn_start, jxn_end) >= RT_SWITCH_REPEAT_MIN:
+                return True
+        return False
+
+    def _direct_repeat_len(self, contig: str, donor: int, acceptor: int) -> int:
+        """Length of the direct repeat shared by the two ends of one intron.
+
+        ``donor`` is the first intronic base and ``acceptor`` one past the last,
+        matching the CIGAR-N interval convention used elsewhere in this module.
+        The repeat is the longest common suffix of the RT_SWITCH_REPEAT_SCAN
+        bases preceding each boundary, which is the quantity RT template
+        switching would duplicate.
+        """
+        scan = RT_SWITCH_REPEAT_SCAN
+        if donor < scan or acceptor < scan or acceptor <= donor:
+            return 0
+        try:
+            up_donor = self.reference.fetch(contig, donor - scan, donor).upper()
+            up_acceptor = self.reference.fetch(contig, acceptor - scan, acceptor).upper()
+        except (ValueError, KeyError):
+            return 0
+        n = 0
+        for a, b in zip(reversed(up_donor), reversed(up_acceptor)):
+            if a != b or a == "N":
+                break
+            n += 1
+        return n
 
     def _has_noncanonical_junction(self, read: pysam.AlignedSegment) -> bool:
         """Evaluate exact annotation and both splice motifs for every junction."""

@@ -327,6 +327,25 @@ POLYA_SITE_PROXIMITY = 50   # bp
 POLYA_MIN_SUPPORT_DEFAULT = 0.0
 POLYA_MIN_SUPPORT_RECOMMENDED = 25.0
 
+# Half-width (bp) of the neighbourhood used for a window's local read share.
+# 10 kb is wide enough to span a diffusely covered region and narrow enough
+# that an isolated locus still scores near 1.0.
+LOCAL_SHARE_FLANK = 10_000
+
+# Fraction of classified reads left UNASSIGNED above which the barcode gate is
+# reported as implausible.  A whitelist or CB tag that matches nothing produces
+# a complete result set describing almost no cells, which reads as a finding
+# rather than a configuration error.  Only checked when the BAM is
+# barcode-aware: a barcode-free BAM is legitimately 100% unassigned.
+UNASSIGNED_GATE_WARN = 0.50
+
+# Fraction of a site atlas's positions falling beyond the end of their contig
+# above which the atlas is reported as assembly-mismatched (warn) or discarded
+# (drop).  Contig names matching does not mean the assembly matches: an hg19
+# BED against an hg38 BAM shares every name while every coordinate is shifted.
+SITE_COORD_OUT_OF_RANGE_WARN = 0.01
+SITE_COORD_OUT_OF_RANGE_DROP = 0.20
+
 # Fraction of the genome within POLYA_SITE_PROXIMITY of a loaded atlas site
 # above which the atlas is reported as too dense to act as a proximity test.
 POLYA_ATLAS_DENSITY_WARN = 0.20

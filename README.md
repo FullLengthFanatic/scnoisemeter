@@ -108,6 +108,10 @@ Intergenic reads are assigned by their strand-correct 3′ coordinate to predefi
 
 Strand consistency is measured after window assignment. A window can therefore fail strand evidence rather than being split into artificial strand-specific loci. Significant unresolved windows become `intergenic_enriched`, not `intergenic_hotspot`.
 
+Each window also reports `local_read_share`: the fraction of intergenic read mass within 10 kb that the window itself holds. A globally significant count says a window exceeds the genome-wide rate; it does not say whether the window is the local event or one of many in a broadly covered neighbourhood. A share near 1 is an isolated locus; a low share is diffuse coverage that the global test still promotes.
+
+**PolyA-site density matters here, and by default it works against you.** Two rules depend on proximity to an annotated polyA site in opposite directions: `intergenic_hotspot` requires the *absence* of a nearby site, and `intergenic_novel` accepts a nearby site as one of its two positive-evidence routes. PolyASite 3.0 ships 18,432,135 records, including sites supported in 5.6% of samples at a normalised score of 6e-05. Loaded unfiltered, 38.6% of the primary genome falls within the 50 bp proximity window, so the test is closer to a constant than a discriminator: hotspots are suppressed across a third of the genome and the novel-gene route is close to free. `--polya-min-support` filters on the atlas's own per-site support column — 25 gives 7.6% of the genome, 50 gives 3.0% — and every run reports the measured density of whatever atlas it actually loaded. The default is 0 so that upgrading moves no previously reported number.
+
 For datasets larger than the 500,000-record intergenic reservoir, promoted read/base totals are estimated from a uniform reservoir. UMI-diversity fields for affected categories are emitted as missing because exact category-specific UMI sets cannot be reconstructed from a sample.
 
 The Poisson test itself also runs on that reservoir, not only the totals derived from it: both the background rate and the per-window counts come from the sampled records. A sample well above the cap is therefore tested at reduced depth and a sample below it at full depth, so promotion to `intergenic_hotspot` or `intergenic_novel` is depth-dependent. `<sample>.run_info.json` records whether reclassification was reservoir-estimated; treat these two categories as not directly rankable across samples of very different intergenic depth. The Bonferroni denominator is every 500 bp window of every non-mitochondrial contig, which is a deliberate upper bound and larger than the number of windows actually tested.
@@ -118,8 +122,10 @@ Flags do not change the mutually exclusive read category:
 
 - TSO invasion: approximate prefix match at the molecularly appropriate soft-clipped end; one substitution is tolerated.
 - TSO concatemer: multiple approximate full-motif occurrences.
-- Internal polyA priming: downstream A-run on `+` or upstream T-run on `-`; requires a reference FASTA.
+- Internal polyA priming: downstream A-run on `+` or upstream T-run on `-`; requires a reference FASTA. This describes the *locus* in the reference, not the molecule: measured against PolyASite, median downstream A-content is 25% both at annotated polyA sites and at random genomic positions, so the genomic test alone barely separates them. `--priming-criterion perc_a` switches to the SQANTI3/pigeon `perc_A_downstream_TTS` convention (≥60% A over 20 bp); the two agree on roughly 97% of windows, so the choice is about comparability with isoform-QC numbers rather than correctness.
+- Untemplated 3′ polyA tail: an A-run in the read's own 3′ **soft** clip, outside the aligned block, so it is not templated by the reference — per-molecule evidence that this read carried a tail. A read flagged for both internal priming and a tail is a real cleavage site in an A-rich context. Reported as `polya_tail_frac`. Hard-clipped BAMs report no tail, because the bases are absent from the record rather than absent from the molecule.
 - Non-canonical junction: exact donor and acceptor checked in transcript orientation; exact annotated junctions are accepted.
+- RT template-switch direct repeat: the two ends of one intron share a direct repeat of at least 6 bp, which reverse transcriptase can duplicate by switching template between the copies. Independent of canonicality — an RT artifact can sit on a GT-AG boundary and is invisible to the motif check. Genuine junctions in repetitive sequence also carry direct repeats, so this is evidence, never a category. Reported as `rt_switch_repeat_frac`; requires a reference FASTA.
 - Discordant pair: orphan or improper paired alignment.
 - Low MAPQ: descriptive `MAPQ < 10` flag; no read is filtered by this threshold.
 
@@ -129,7 +135,8 @@ CLI TSO defaults are protocol-aware. ONT/10x uses the 10x motif, PacBio/Smart-se
 
 “Full-length” is not inferred from read length. For the same reservoir-sampled exonic-sense read, scNoiseMeter reports:
 
-- `three_prime_anchored_frac`: 3′ end near a strand-matched polyA site;
+- `three_prime_anchored_frac`: 3′ end near a strand-matched polyA site. Proximity alone counts by default; `--anchor-veto-internal-priming` additionally requires the absence of an internal-priming signature, which lowers the fraction.
+- `three_prime_at_pas_site_frac`: the same 3′ end near a site the atlas annotates with a polyA signal hexamer (column 11 of a PolyASite BED) — a stricter anchor than proximity to any record;
 - `five_prime_anchored_frac`: 5′ end near a strand-matched TSS/CAGE site;
 - `both_ends_anchored_frac`: both conditions on that same read;
 - deprecated `full_length_read_frac`: alias of `both_ends_anchored_frac`, only when both atlases are available.

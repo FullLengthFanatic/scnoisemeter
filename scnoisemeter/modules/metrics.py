@@ -162,6 +162,10 @@ class SampleMetrics:
     # independently of n_polya_priming: a read in both is a real cleavage site
     # in A-rich context, which the genomic test alone calls internal priming.
     n_polya_tail:          int = 0
+    # Junctions whose two ends share a direct repeat: the RT template-switching
+    # signature.  Independent of n_noncanon_junction, because an RT artifact can
+    # sit on a canonical GT-AG boundary.
+    n_rt_switch_repeat:    int = 0
     n_noncanon_junction:   int = 0
     n_tso_concatemer:      int = 0
     n_discordant_pair:     int = 0
@@ -394,6 +398,7 @@ def compute_metrics(
         sm.n_tso_invasion      += flags.get("tso",        0)
         sm.n_polya_priming     += flags.get("polya",      0)
         sm.n_polya_tail        += flags.get("polya_tail", 0)
+        sm.n_rt_switch_repeat  += flags.get("rt_switch",  0)
         sm.n_noncanon_junction += flags.get("noncanon",   0)
         sm.n_tso_concatemer    += flags.get("tso_concat", 0)
         sm.n_discordant_pair   += flags.get("discordant_pair", 0)
@@ -735,6 +740,7 @@ def to_multiqc_json(sm: SampleMetrics) -> dict:
         "tso_invasion_frac":        round(sm.n_tso_invasion    / (sm.n_reads_classified or 1), 4),
         "polya_priming_frac":       round(sm.n_polya_priming   / (sm.n_reads_classified or 1), 4),
         "polya_tail_frac":          round(sm.n_polya_tail      / (sm.n_reads_classified or 1), 4),
+        "rt_switch_repeat_frac":    round(sm.n_rt_switch_repeat / (sm.n_reads_classified or 1), 4),
         "tso_concatemer_frac":      round(sm.n_tso_concatemer  / (sm.n_reads_classified or 1), 4),
         "discordant_pair_frac":     round(sm.n_discordant_pair / (sm.n_reads_classified or 1), 4),
     }

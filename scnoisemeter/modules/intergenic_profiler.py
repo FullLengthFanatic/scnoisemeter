@@ -72,6 +72,7 @@ from scnoisemeter.constants import (
     ADAPTIVE_PVALUE_THRESHOLD,
     INTERGENIC_LOCUS_WINDOW,
     INTERGENIC_REPEAT_MIN_FRACTION,
+    LOCAL_SHARE_FLANK,
     POLYA_CONTEXT_WINDOW,
     POLYA_RUN_MIN_LENGTH,
     POLYA_SITE_PROXIMITY,
@@ -108,6 +109,7 @@ class IntergenicLocus:
     near_polya_site         Within POLYA_SITE_PROXIMITY of an annotated polyA site
     poisson_pvalue          Raw Poisson p-value
     poisson_pvalue_adj      Bonferroni-adjusted p-value
+    local_read_share        Fraction of nearby intergenic reads in this window
     category                Final sub-category assigned
     """
     contig:              str
@@ -124,6 +126,12 @@ class IntergenicLocus:
     poisson_pvalue_adj:  float
     strand_fraction:     float = 0.0
     repeat_overlap_fraction: float = 0.0
+    # Share of the intergenic read mass within LOCAL_SHARE_FLANK bp of this
+    # window that the window itself holds.  A globally significant count says
+    # a window is above the genome-wide rate; it does not say whether the
+    # window is the local event or one of many in a broadly covered
+    # neighbourhood.  1.0 is an isolated locus, a low value is diffuse cover.
+    local_read_share:    float = 0.0
     category:            ReadCategory = ReadCategory.INTERGENIC_SPARSE
 
 
@@ -280,6 +288,8 @@ def profile_intergenic_loci(
             for i in indices:
                 record_categories[i] = locus.category
 
+    _assign_local_read_share(loci)
+
     n_novel = sum(
         1 for locus in loci if locus.category == ReadCategory.INTERGENIC_NOVEL
     )
@@ -305,6 +315,35 @@ def profile_intergenic_loci(
 # ---------------------------------------------------------------------------
 # Locus scoring
 # ---------------------------------------------------------------------------
+
+def _assign_local_read_share(loci: list, flank: int = LOCAL_SHARE_FLANK) -> None:
+    """Set ``local_read_share`` on every locus, in place.
+
+    Computed once over the whole window set rather than per locus, so the cost
+    is one sort per contig plus a two-pointer sweep instead of a neighbourhood
+    scan for each of the tens of thousands of windows a real sample produces.
+    """
+    if not loci:
+        return
+    by_contig: dict = {}
+    for locus in loci:
+        by_contig.setdefault(locus.contig, []).append(locus)
+    for group in by_contig.values():
+        group.sort(key=lambda x: x.start)
+        starts = [x.start for x in group]
+        counts = [x.n_reads for x in group]
+        # Prefix sums make each window's neighbourhood total a subtraction.
+        cumulative = [0]
+        for n in counts:
+            cumulative.append(cumulative[-1] + n)
+        for idx, locus in enumerate(group):
+            lo = bisect.bisect_left(starts, locus.start - flank)
+            hi = bisect.bisect_right(starts, locus.start + flank)
+            local_total = cumulative[hi] - cumulative[lo]
+            locus.local_read_share = (
+                locus.n_reads / local_total if local_total > 0 else 0.0
+            )
+
 
 def _score_locus(
     locus_id: int,

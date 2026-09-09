@@ -78,6 +78,7 @@ def _dd_flags():
         "polya": 0,
         "polya_tail": 0,
         "noncanon": 0,
+        "rt_switch": 0,
         "tso_concat": 0,
         "discordant_pair": 0,
         "low_mapq": 0,
@@ -406,6 +407,8 @@ def _contig_worker(args: dict) -> ContigResult:
                     result.artifact_flags[cb]["polya"] += 1
                 if res.has_polya_tail:
                     result.artifact_flags[cb]["polya_tail"] += 1
+                if res.has_rt_switch_repeat:
+                    result.artifact_flags[cb]["rt_switch"] += 1
                 if res.has_noncanonical_junction:
                     result.artifact_flags[cb]["noncanon"] += 1
                 if res.is_tso_concatemer:

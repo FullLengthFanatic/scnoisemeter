@@ -62,9 +62,12 @@ from scnoisemeter.constants import (
     POLYA_MIN_SUPPORT_RECOMMENDED,
     POLYA_SITE_PROXIMITY,
     PRIMING_CRITERION_DEFAULT,
+    SITE_COORD_OUT_OF_RANGE_DROP,
+    SITE_COORD_OUT_OF_RANGE_WARN,
     TSO_10X,
     TSO_MIN_MATCH_LENGTH,
     TSO_PACBIO,
+    UNASSIGNED_GATE_WARN,
     Chemistry,
     PipelineStage,
     Platform,
@@ -184,6 +187,11 @@ def _shared_options(func):
                           "perc_A_downstream_TTS convention (>=60% A over 20 bp); 'either' "
                           "flags a read satisfying one or both. The two agree on ~97% of "
                           "windows, so this is for comparability, not correction."),
+        click.option("--no-strict", is_flag=True,
+                     help="Downgrade the pre-report sanity checks from errors to warnings. "
+                          "By default a run whose barcode gate leaves most reads unassigned "
+                          "stops, because the result set would otherwise describe almost no "
+                          "cells while looking complete."),
         click.option("--anchor-veto-internal-priming", is_flag=True,
                      help="Require the absence of an internal-priming signature for a read "
                           "to count towards the 3'-end anchoring fractions. Off by default "
@@ -917,7 +925,7 @@ def run_cmd(
     bam, sample_name, tagged_bam, cell_barcodes,
     gtf, gtf_version, barcode_whitelist, whitelist_db, barcode_tag, umi_tag,
     chemistry, platform, library_strand, pipeline_stage, chimeric_distance, tso, tso_min_match, no_polyg_tso,
-    polya_min_support, priming_criterion, anchor_veto_internal_priming,
+    polya_min_support, priming_criterion, no_strict, anchor_veto_internal_priming,
     repeats, reference, threads, no_umi_dedup, no_cache,
     exclude_biotypes, output_dir, obs_metadata, polya_sites, polya_db,
     tss_sites, tss_db, numt_bed, offline, seed, verbose,
@@ -1135,10 +1143,13 @@ def run_cmd(
 
     # Attach polyA site dict (merged from resolved polya-site files)
     _pas_sites: dict = {}
-    result._polya_site_dict = _check_site_contig_overlap(
-        _load_polya_sites(polya_paths, chrom_style=_bam_chrom_style,
-                          min_support=polya_min_support, pas_out=_pas_sites),
-        meta.reference_names, label="polyA site atlas", meta=meta,
+    result._polya_site_dict = _check_site_coordinate_range(
+        _check_site_contig_overlap(
+            _load_polya_sites(polya_paths, chrom_style=_bam_chrom_style,
+                              min_support=polya_min_support, pas_out=_pas_sites),
+            meta.reference_names, label="polyA site atlas", meta=meta,
+        ),
+        meta.reference_lengths, label="polyA site atlas", meta=meta,
     )
     result._polya_pas_dict = _pas_sites if result._polya_site_dict else None
     result._anchor_veto_internal_priming = bool(anchor_veto_internal_priming)
@@ -1146,9 +1157,12 @@ def run_cmd(
 
     # Attach TSS site dict (resolved: auto-download or user-supplied)
     tss_paths = _resolve_tss_sites(tss_sites, tss_db=tss_db, offline=offline)
-    result._tss_site_dict = _check_site_contig_overlap(
-        _load_tss_sites(tss_paths, chrom_style=_bam_chrom_style) if tss_paths else None,
-        meta.reference_names, label="TSS/CAGE atlas", meta=meta,
+    result._tss_site_dict = _check_site_coordinate_range(
+        _check_site_contig_overlap(
+            _load_tss_sites(tss_paths, chrom_style=_bam_chrom_style) if tss_paths else None,
+            meta.reference_names, label="TSS/CAGE atlas", meta=meta,
+        ),
+        meta.reference_lengths, label="TSS/CAGE atlas", meta=meta,
     )
 
     # Attach NUMT intervals
@@ -1168,6 +1182,10 @@ def run_cmd(
         platform=platform_str,
         unstranded=_is_unstranded_library(meta, library_strand),
     )
+
+    # Sanity-check the barcode gate before anything is written: a result set
+    # describing almost no cells should not be produced silently.
+    _check_barcode_gate(sm, meta, strict=not no_strict)
 
     # Attach annotation provenance for the HTML report
     _attach_result_provenance(
@@ -1293,7 +1311,7 @@ def compare_cmd(
     bam_a, bam_b, label_a, label_b, matched_reads, tso_a, tso_b,
     gtf, gtf_version, barcode_whitelist, whitelist_db, barcode_tag, umi_tag,
     chemistry, platform, library_strand, pipeline_stage, chimeric_distance, tso, tso_min_match, no_polyg_tso,
-    polya_min_support, priming_criterion, anchor_veto_internal_priming,
+    polya_min_support, priming_criterion, no_strict, anchor_veto_internal_priming,
     repeats, reference, threads, no_umi_dedup, no_cache,
     exclude_biotypes, output_dir, obs_metadata, polya_sites, polya_db,
     tss_sites, tss_db, numt_bed, offline, seed, verbose,
@@ -1404,17 +1422,23 @@ def compare_cmd(
         )
         _bam_cs = _detect_chrom_style(meta.reference_names)
         _pas_sites = {}
-        result._polya_site_dict = _check_site_contig_overlap(
-            _load_polya_sites(polya_paths, chrom_style=_bam_cs,
-                              min_support=polya_min_support, pas_out=_pas_sites),
-            meta.reference_names, label="polyA site atlas", meta=meta,
+        result._polya_site_dict = _check_site_coordinate_range(
+            _check_site_contig_overlap(
+                _load_polya_sites(polya_paths, chrom_style=_bam_cs,
+                                  min_support=polya_min_support, pas_out=_pas_sites),
+                meta.reference_names, label="polyA site atlas", meta=meta,
+            ),
+            meta.reference_lengths, label="polyA site atlas", meta=meta,
         )
         result._polya_pas_dict = _pas_sites if result._polya_site_dict else None
         result._anchor_veto_internal_priming = bool(anchor_veto_internal_priming)
         _warn_if_atlas_too_dense(result._polya_site_dict, meta, polya_min_support)
-        result._tss_site_dict = _check_site_contig_overlap(
-            _load_tss_sites(tss_paths, chrom_style=_bam_cs) if tss_paths else None,
-            meta.reference_names, label="TSS/CAGE atlas", meta=meta,
+        result._tss_site_dict = _check_site_coordinate_range(
+            _check_site_contig_overlap(
+                _load_tss_sites(tss_paths, chrom_style=_bam_cs) if tss_paths else None,
+                meta.reference_names, label="TSS/CAGE atlas", meta=meta,
+            ),
+            meta.reference_lengths, label="TSS/CAGE atlas", meta=meta,
         )
         _profile_intergenic_result(
             result, index, reference=reference,
@@ -2152,7 +2176,7 @@ def run_plate_cmd(
     plate_dir, sample_sheet, sequencer, sample_name, plate_ids, parallel_wells,
     gtf, gtf_version, barcode_whitelist, whitelist_db, barcode_tag, umi_tag,
     chemistry, platform, library_strand, pipeline_stage, chimeric_distance, tso, tso_min_match, no_polyg_tso,
-    polya_min_support, priming_criterion, anchor_veto_internal_priming,
+    polya_min_support, priming_criterion, no_strict, anchor_veto_internal_priming,
     repeats, reference, threads, no_umi_dedup, no_cache,
     exclude_biotypes, output_dir, obs_metadata, polya_sites, polya_db,
     tss_sites, tss_db, numt_bed, offline, seed, verbose,
@@ -2660,6 +2684,130 @@ def _harmonise_chrom_style(sites: dict, chrom_style: str) -> dict:
     return _rekey_site_dict(sites, _to_ucsc)
 
 
+def _as_number(value):
+    """Return *value* as a number, or None when it is not one.
+
+    ``bool`` is excluded deliberately: True would otherwise pass as 1.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
+def _fmt_pct(value) -> str:
+    """Percent, or a phrase, when the value is not a number."""
+    return "an unknown share" if _as_number(value) is None else f"{value:.1%}"
+
+
+def _fmt_count(value) -> str:
+    return "?" if _as_number(value) is None else f"{value:,}"
+
+
+def _check_barcode_gate(sm, meta, *, strict: bool) -> None:
+    """Refuse, or warn loudly, when the barcode gate rejected implausibly much.
+
+    A whitelist from the wrong chemistry, or the wrong ``--barcode-tag``,
+    leaves nearly every read UNASSIGNED.  The run still completes and every
+    fraction is still computed, so the failure arrives as a result: a sample
+    with a handful of cells and an unremarkable composition.  The observed
+    numbers are printed rather than a bare threshold message, so the cause is
+    visible without a second run.
+
+    Skipped when the BAM is not barcode-aware, where 100% unassigned is the
+    design rather than a fault.
+    """
+    if getattr(meta, "barcode_aware", False) is not True:
+        return
+    classified = _as_number(getattr(sm, "n_reads_classified", 0))
+    unassigned = _as_number(getattr(sm, "n_reads_unassigned", 0))
+    # A counter that is not a real number cannot be compared to a threshold, so
+    # the check is skipped rather than raised on: this guard runs before every
+    # report is written and must never itself be what fails a run.
+    if classified is None or unassigned is None or classified <= 0:
+        return
+    frac = unassigned / classified
+    if frac < UNASSIGNED_GATE_WARN:
+        return
+    msg = (
+        f"{frac:.1%} of classified reads ({unassigned:,} of {classified:,}) carry no "
+        f"usable cell barcode, leaving {_fmt_count(getattr(sm, 'n_cells', 0))} cells. "
+        f"{_fmt_pct(getattr(meta, 'barcode_fraction', None))} of sampled reads carry "
+        f"the '{getattr(meta, 'barcode_tag', 'CB')}' tag "
+        f"in the BAM header scan, so the tag is present and the whitelist is the likely "
+        f"mismatch: check the chemistry of --barcode-whitelist against this library. "
+        f"Every fraction in this result set is computed over the reads that did pass."
+    )
+    if strict:
+        raise click.ClickException(
+            msg + "\n\nPass --no-strict to report this as a warning and continue."
+        )
+    logger.warning(msg)
+    click.echo(f"\nWarning: {msg}", err=True)
+    warnings = getattr(meta, "warnings", None)
+    if isinstance(warnings, list) and msg not in warnings:
+        warnings.append(msg)
+
+
+def _check_site_coordinate_range(
+    sites: Optional[dict],
+    reference_lengths: Optional[dict],
+    *,
+    label: str,
+    meta=None,
+) -> Optional[dict]:
+    """Drop a site atlas whose coordinates do not fit the BAM's contigs.
+
+    Contig-name agreement is not assembly agreement.  An hg19 atlas against an
+    hg38 BAM shares every contig name, so _check_site_contig_overlap passes,
+    while the coordinates are shifted by megabases and every proximity test
+    fails silently -- the same class of failure as the contig-naming bug, one
+    level down.  Positions beyond the end of their contig are the detectable
+    part of that: they cannot be right under any convention.
+
+    A small number of out-of-range positions is a patch-level annotation
+    difference and is reported as a warning.  A large fraction means the wrong
+    assembly, so the atlas is discarded and the derived metrics go absent
+    rather than being reported as measured zeros.
+    """
+    if not sites or not reference_lengths:
+        return sites
+    total = 0
+    out_of_range = 0
+    for key, positions in sites.items():
+        contig = str(_site_dict_chrom(key))
+        length = reference_lengths.get(contig)
+        if length is None:
+            continue
+        for pos in positions:
+            total += 1
+            if pos < 0 or pos >= int(length):
+                out_of_range += 1
+    if not total:
+        return sites
+    frac = out_of_range / total
+    if frac < SITE_COORD_OUT_OF_RANGE_WARN:
+        return sites
+    msg = (
+        f"{frac:.1%} of {label} positions ({out_of_range:,} of {total:,}) fall "
+        f"beyond the end of their contig in this BAM. Contig names match, so "
+        f"this is an assembly mismatch rather than a naming one"
+    )
+    if frac >= SITE_COORD_OUT_OF_RANGE_DROP:
+        msg += (
+            "; the atlas was discarded and the metrics derived from it are "
+            "reported as absent rather than zero."
+        )
+        logger.error(msg)
+        if meta is not None and msg not in meta.warnings:
+            meta.warnings.append(msg)
+        return None
+    msg += "; proximity tests against it will under-count."
+    logger.warning(msg)
+    if meta is not None and msg not in meta.warnings:
+        meta.warnings.append(msg)
+    return sites
+
+
 def _check_site_contig_overlap(
     sites: Optional[dict],
     reference_names,
@@ -3155,6 +3303,7 @@ def _write_run_outputs(sm, ct, result, output_dir: Path, sample_name: str,
                 "near_polya_site":      locus.near_polya_site,
                 "strand_fraction":      locus.strand_fraction,
                 "repeat_overlap_fraction": locus.repeat_overlap_fraction,
+                "local_read_share":       locus.local_read_share,
                 "poisson_pvalue":       locus.poisson_pvalue,
                 "poisson_pvalue_adj":   locus.poisson_pvalue_adj,
                 "category":             locus.category.value,

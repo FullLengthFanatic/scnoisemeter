@@ -7,6 +7,56 @@ reported number says so here.
 
 ## Unreleased
 
+### Added — new evidence, off by default where it changes a number
+
+Transferred from `irinakhven/flightcollapse` after a side-by-side screening of
+both tools' 3'-end handling. Every setting that moves a previously reported
+value defaults to 0.8.1 behaviour, so installing this changes nothing until a
+flag is passed. All of them are recorded under a `priming` key in
+`run_info.json` so `cohort` can refuse to pool runs that disagree.
+
+- `--polya-min-support` filters the polyA atlas on its own per-site support
+  column. Measured against PolyASite 3.0: 18,432,135 records put **38.6% of
+  the primary genome** within the 50 bp proximity window, which makes
+  "near an annotated polyA site" close to a constant. It vetoes
+  `intergenic_hotspot` across a third of the genome and satisfies one of the
+  two `intergenic_novel` evidence routes for free. 25 gives 7.6%, 50 gives
+  3.0%. Every run now measures and reports the density of the atlas it loaded.
+- `polya_tail_frac` — an untemplated A-run in the read's own 3' **soft** clip.
+  Per-molecule evidence, where the existing internal-priming flag is a
+  property of the locus: median downstream A-content is 25% both at annotated
+  polyA sites and at random genomic positions. A read carrying both flags is a
+  real cleavage site in A-rich context.
+- `three_prime_at_pas_site_frac` — anchoring restricted to atlas records
+  carrying a polyA signal hexamer, read from column 11 of a PolyASite BED.
+- `rt_switch_repeat_frac` — direct repeat shared by an intron's two ends, the
+  reverse-transcriptase template-switching signature. Independent of splice
+  canonicality: an RT artifact can sit on a GT-AG boundary.
+- `local_read_share` on every intergenic window — its share of intergenic read
+  mass within 10 kb, separating an isolated locus from one window of a
+  diffusely covered neighbourhood.
+- `--priming-criterion {a_run,perc_a,either}`. `perc_a` is the SQANTI3/pigeon
+  `perc_A_downstream_TTS` convention (>=60% A over 20 bp). The two criteria
+  agree on ~97% of windows, so this is for comparability with isoform-QC
+  numbers and is explicitly not a correction.
+- `--anchor-veto-internal-priming` requires the absence of an internal-priming
+  signature for a read to count towards 3'-end anchoring, which lowers
+  `three_prime_anchored_frac`.
+
+### Changed — runs can now stop instead of reporting a configuration error
+
+- A barcode gate that leaves more than half of classified reads unassigned now
+  **stops the run** and prints the observed counts, cell count and header-scan
+  tag fraction. Previously the run completed and the failure arrived as a
+  result: a sample with a handful of cells and an unremarkable composition.
+  `--no-strict` downgrades this to a warning. Barcode-free BAMs are exempt,
+  where 100% unassigned is the design.
+- A site atlas whose coordinates fall beyond the end of their contigs is
+  discarded above 20% out-of-range and warned about above 1%. Contig-name
+  agreement is not assembly agreement: an hg19 atlas against an hg38 BAM
+  shares every contig name, so the existing naming guard passes while every
+  coordinate is shifted and every proximity test silently fails.
+
 ### Corrected
 
 - The v0.8.1 commit `c6f50a4` and its source comment stated that PolyASite 3.0
