@@ -885,26 +885,42 @@ def _profile_intergenic_result(result, index, *, reference: Optional[str], polya
             ref_handle = _pysam.FastaFile(reference)
         except Exception as exc:
             logger.warning("Could not open reference FASTA for intergenic profiling: %s", exc)
+    # The Bonferroni denominator must count the windows that are actually
+    # tested, which is the intergenic complement -- not every window of every
+    # contig.  Tests are only ever performed in intergenic space, so counting
+    # the whole genome corrected for roughly 3x more tests than were run on
+    # GRCh38 and suppressed real promotions.  The intergenic base total is
+    # already computed for the background rate, so the correct count is one
+    # division away.
+    _intergenic_bases_by_contig = compute_intergenic_bases(
+        index,
+        by_contig=True,
+        contig_lengths=result.meta.reference_lengths,
+    )
+    if isinstance(_intergenic_bases_by_contig, dict):
+        _intergenic_bases_total = sum(
+            int(v) for k, v in _intergenic_bases_by_contig.items()
+            if k not in MITO_CONTIG_NAMES
+        )
+    else:
+        _intergenic_bases_total = int(_intergenic_bases_by_contig)
+    _n_test_windows = max(
+        1,
+        (_intergenic_bases_total + INTERGENIC_LOCUS_WINDOW - 1)
+        // INTERGENIC_LOCUS_WINDOW,
+    )
+
     try:
         loci, categories = profile_intergenic_loci(
             records,
-            total_intergenic_bases=compute_intergenic_bases(
-                index,
-                by_contig=True,
-                contig_lengths=result.meta.reference_lengths,
-            ),
+            total_intergenic_bases=_intergenic_bases_by_contig,
             total_barcodes=sum(
                 1 for cb in result.read_counts if cb not in {"", "NO_BARCODE"}
             ),
             reference=ref_handle,
             polya_sites=polya_sites,
             repeat_intervals=repeat_dict,
-            n_test_windows=sum(
-                (int(length) + INTERGENIC_LOCUS_WINDOW - 1)
-                // INTERGENIC_LOCUS_WINDOW
-                for contig, length in result.meta.reference_lengths.items()
-                if contig not in MITO_CONTIG_NAMES
-            ),
+            n_test_windows=_n_test_windows,
         )
     finally:
         if ref_handle is not None:

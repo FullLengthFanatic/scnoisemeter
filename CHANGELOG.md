@@ -43,6 +43,23 @@ flag is passed. All of them are recorded under a `priming` key in
   signature for a read to count towards 3'-end anchoring, which lowers
   `three_prime_anchored_frac`.
 
+### Reported values that change
+
+- **The Bonferroni denominator for the intergenic enrichment screen counted
+  windows that were never tested.** `n_test_windows` was every 500 bp window of
+  every non-mitochondrial contig (~6.18 M on GRCh38), but the screen only ever
+  tests the intergenic complement — roughly 2.2–2.8 M windows depending on the
+  annotation release. That is a 2.2–2.9x overcorrection, and it suppressed real
+  promotions. The denominator is now derived from the same intergenic base
+  total already computed for the background rate.
+
+  This raises `intergenic_hotspot`, `intergenic_novel`, `intergenic_repeat` and
+  `intergenic_enriched` counts, lowers `intergenic_sparse`, and therefore moves
+  `broad_noncanonical_*` and `artifact_candidate_*`. It is a correction rather
+  than a policy change — the previous value corrected for tests that were not
+  performed — so it is not behind a flag. Result sets from earlier versions are
+  not comparable in these categories, which `cohort` already flags by version.
+
 ### Added — runtime invariant checks
 
 - Every run now checks the structural properties of its own result set and
