@@ -864,7 +864,8 @@ def _apply_intergenic_reclassification(result, intergenic_records, record_catego
         })
 
 
-def _profile_intergenic_result(result, index, *, reference: Optional[str], polya_sites: dict):
+def _profile_intergenic_result(result, index, *, reference: Optional[str],
+                               polya_sites: dict, unstranded: bool = False):
     """Run the same intergenic second pass for every CLI workflow."""
     records = extract_intergenic_records(result)
     if not records:
@@ -921,6 +922,9 @@ def _profile_intergenic_result(result, index, *, reference: Optional[str], polya
             polya_sites=polya_sites,
             repeat_intervals=repeat_dict,
             n_test_windows=_n_test_windows,
+            # An unstranded library divides reads near 50/50 by design, so the
+            # strand-asymmetry test would measure the protocol, not the locus.
+            stranded=not unstranded,
         )
     finally:
         if ref_handle is not None:
@@ -1194,7 +1198,8 @@ def run_cmd(
         result._numt_intervals = None
 
     intergenic_loci = _profile_intergenic_result(
-        result, index, reference=reference, polya_sites=result._polya_site_dict
+        result, index, reference=reference, polya_sites=result._polya_site_dict,
+        unstranded=_is_unstranded_library(meta, library_strand),
     )
 
     # Compute metrics (after intergenic reclassification)
@@ -1472,6 +1477,7 @@ def compare_cmd(
         _profile_intergenic_result(
             result, index, reference=reference,
             polya_sites=result._polya_site_dict,
+            unstranded=_is_unstranded_library(meta, library_strand),
         )
         sm, ct = compute_metrics(
             result, label,
@@ -1889,7 +1895,8 @@ def _run_single_bam_for_discover(
     result._numt_intervals = None
 
     intergenic_loci = _profile_intergenic_result(
-        result, index, reference=reference, polya_sites=result._polya_site_dict
+        result, index, reference=reference, polya_sites=result._polya_site_dict,
+        unstranded=_is_unstranded_library(meta, "auto"),
     )
 
     sm, ct = compute_metrics(
@@ -2572,6 +2579,7 @@ def run_plate_cmd(
             index,
             reference=reference,
             polya_sites=plate_result._polya_site_dict,
+            unstranded=_is_unstranded_library(plate_meta, library_strand),
         )
 
         plate_sm, plate_ct = compute_metrics(
@@ -3380,8 +3388,10 @@ def _write_run_outputs(sm, ct, result, output_dir: Path, sample_name: str,
                 "strand_fraction":      locus.strand_fraction,
                 "repeat_overlap_fraction": locus.repeat_overlap_fraction,
                 "local_read_share":       locus.local_read_share,
+                "n_molecules":          locus.n_molecules,
                 "poisson_pvalue":       locus.poisson_pvalue,
                 "poisson_pvalue_adj":   locus.poisson_pvalue_adj,
+                "strand_asymmetry_pvalue": locus.strand_asymmetry_pvalue,
                 "category":             locus.category.value,
             }
             for locus in intergenic_loci

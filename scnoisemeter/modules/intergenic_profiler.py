@@ -63,7 +63,7 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-from scipy.stats import poisson
+from scipy.stats import binom, poisson
 
 from scnoisemeter.constants import (
     ADAPTIVE_MIN_BARCODES_ABSOLUTE,
@@ -132,6 +132,16 @@ class IntergenicLocus:
     # window is the local event or one of many in a broadly covered
     # neighbourhood.  1.0 is an isolated locus, a low value is diffuse cover.
     local_read_share:    float = 0.0
+    # Distinct (cell_barcode, UMI) pairs at this window.  n_reads counts PCR
+    # copies, so a single over-amplified molecule can look like broad support;
+    # this separates the two.  Reported, never gated on -- see the note in
+    # profile_intergenic_loci.  -1 means no UMIs were available to count.
+    n_molecules:         int = -1
+    # Binomial tail for one-sidedness of the window, P(X >= dominant | n, 0.5).
+    # Makes the existing strand-consistency evidence depth-aware: 3/4 and
+    # 75/100 are the same fraction and very different evidence.  NaN for an
+    # unstranded library, where the test would measure the protocol.
+    strand_asymmetry_pvalue: float = float("nan")
     category:            ReadCategory = ReadCategory.INTERGENIC_SPARSE
 
 
@@ -169,6 +179,7 @@ def profile_intergenic_loci(
     repeat_intervals: Optional[dict] = None,  # contig → list of (start, end)
     alpha: float = ADAPTIVE_PVALUE_THRESHOLD,
     n_test_windows: Optional[int] = None,
+    stranded: bool = True,
 ) -> tuple[list[IntergenicLocus], list]:
     """
     Profile intergenic reads and classify their loci.
@@ -289,6 +300,7 @@ def profile_intergenic_loci(
                 record_categories[i] = locus.category
 
     _assign_local_read_share(loci)
+    _assign_strand_asymmetry(loci, stranded=stranded)
 
     n_novel = sum(
         1 for locus in loci if locus.category == ReadCategory.INTERGENIC_NOVEL
@@ -315,6 +327,42 @@ def profile_intergenic_loci(
 # ---------------------------------------------------------------------------
 # Locus scoring
 # ---------------------------------------------------------------------------
+
+def _assign_strand_asymmetry(loci: list, *, stranded: bool) -> None:
+    """Attach a depth-aware p-value for one-sidedness of each window.
+
+    ``strand_fraction`` alone is depth-blind: 3 reads out of 4 and 75 out of
+    100 are both 0.75, and ``STRAND_CONSISTENCY_MIN`` accepts them equally,
+    though the second is overwhelming evidence and the first is what a coin
+    produces one time in three.  This reports the binomial tail
+    ``P(X >= dominant | n, 0.5)``, so the same fraction at greater depth counts
+    for more.
+
+    The null is exact and needs no decoy set.  An earlier design used the
+    minority-strand counts of other windows as an empirical null; it was
+    implemented and rejected on measurement, because within any window the
+    minority count cannot exceed the dominant one, so the decoy distribution
+    sits below the target distribution even under pure noise and the resulting
+    "FDR" is anti-conservative by construction -- 0.51 on simulated windows
+    that were entirely background.  A biased number that looks calibrated is
+    worse than no number.
+
+    Unstranded libraries keep NaN: reads divide near 50/50 by design there, so
+    the test measures the protocol rather than the locus.
+    """
+    if not loci or not stranded:
+        return                      # NaN everywhere: the test is not meaningful
+
+    for locus in loci:
+        total = max(0, int(locus.n_reads))
+        if total <= 0:
+            continue
+        dominant = min(total, max(0, round(locus.strand_fraction * total)))
+        # P(X >= dominant) under Binomial(total, 0.5)
+        locus.strand_asymmetry_pvalue = float(
+            binom.sf(dominant - 1, total, 0.5)
+        )
+
 
 def _assign_local_read_share(loci: list, flank: int = LOCAL_SHARE_FLANK) -> None:
     """Set ``local_read_share`` on every locus, in place.
@@ -376,6 +424,19 @@ def _score_locus(
         r.cell_barcode for r in records
         if r.cell_barcode not in {"", "NO_BARCODE"}
     })
+
+    # Distinct molecules.  Counted exactly, as distinct (barcode, UMI) pairs,
+    # with no mismatch collapsing: whether a 1-mismatch neighbour is a
+    # sequencing error or a different molecule depends on UMI length and the
+    # library's error rate, which are properties of the chemistry rather than
+    # of this code.  Exact counting is therefore an upper bound on molecules,
+    # and error correction could only lower it.  -1 when no UMIs were tracked,
+    # which is not the same as zero molecules.
+    umi_pairs = {
+        (r.cell_barcode, r.umi) for r in records
+        if getattr(r, "umi", "")
+    }
+    n_molecules = len(umi_pairs) if umi_pairs else -1
 
     # Splice evidence
     has_junction   = any(r.has_junction for r in records)
@@ -445,6 +506,7 @@ def _score_locus(
         poisson_pvalue_adj=adj_pvalue,
         strand_fraction=strand_frac,
         repeat_overlap_fraction=repeat_fraction,
+        n_molecules=n_molecules,
         category=category,
     )
 

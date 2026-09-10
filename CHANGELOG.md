@@ -5,7 +5,47 @@ detected can move a reported value by orders of magnitude, so `cohort` refuses
 to pool result sets silently across versions. Any release that alters a
 reported number says so here.
 
-## Unreleased
+## 0.9.0 - 2026-09-10
+
+Two settings
+below change reported values; both default to 0.8.1 behaviour, so installing
+this release changes no number until a flag is passed. One correction is not
+behind a flag and does move numbers -- see "Reported values that change".
+
+### Added -- new intergenic columns, promotion unchanged
+
+- `n_molecules` per intergenic window: distinct `(cell barcode, UMI)` pairs.
+  `n_reads` counts PCR copies, so a single over-amplified molecule can look
+  like broad support. Counted exactly, with no mismatch collapsing -- whether
+  a 1-mismatch neighbour is a sequencing error or a distinct molecule depends
+  on UMI length and the library error rate, which are properties of the
+  chemistry rather than of this code, so the exact count is an upper bound and
+  error correction could only lower it. `-1` when no UMIs were tracked, which
+  is not the same claim as zero molecules.
+- `strand_asymmetry_pvalue` per intergenic window: the binomial tail
+  `P(X >= dominant | n, 0.5)`. `strand_fraction` alone is depth-blind -- 3 of 4
+  reads and 75 of 100 are both 0.75, and the existing consistency threshold
+  accepts them equally, though the first is what a coin produces one time in
+  three. `NaN` for unstranded libraries, where reads divide near 50/50 by
+  design and the test would measure the protocol rather than the locus.
+
+Neither column gates promotion in this release. Both change the same
+quantities as each other and as the open question about the significance
+procedure, so they ship as evidence first: the choice between the global
+Poisson model and the alternatives is better made from these columns measured
+on real samples than from argument.
+
+### Not shipped, and why
+
+- A wrong-strand **decoy null** for intergenic enrichment was implemented and
+  rejected on measurement. Within any window the minority-strand count cannot
+  exceed the dominant one, so a decoy distribution built from minority counts
+  sits below the target distribution even under pure noise; on simulated
+  windows that were entirely background the estimator returned an "FDR" of
+  0.51. A biased number that looks calibrated is worse than no number.
+  `strand_asymmetry_pvalue` answers the part of that question that has an
+  exact null. A regression test records the property that makes the decoy
+  unsound, so it is not reintroduced.
 
 ### Added — new evidence, off by default where it changes a number
 

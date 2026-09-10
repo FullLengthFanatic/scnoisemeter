@@ -2,7 +2,7 @@
 
 **A barcode-aware alignment artifact and read-distribution QC framework for single-cell RNA-seq**
 
-Version 0.8.1. This document explains the scientific position of scNoiseMeter: what the
+Version 0.9.0. This document explains the scientific position of scNoiseMeter: what the
 categories mean, why they are drawn where they are, and what a reader should and should not
 conclude from the numbers. For implementation details see
 [methods_annotated.md](methods_annotated.md); for command and output reference see
@@ -299,6 +299,19 @@ Each window also reports **`local_read_share`**: how much of the intergenic read
 the genome-wide rate because it is a sharp isolated pile-up, or because it sits inside a broad
 smear of coverage that happens to exceed the average everywhere. A share near 1 is the first; a
 low share is the second. They warrant different follow-up, and the p-value is identical.
+
+Two further columns describe each window without changing how it is
+classified. **`n_molecules`** counts distinct barcode/UMI pairs rather than
+reads, because thirty reads of one over-amplified molecule is one observation
+and not thirty; it is reported as an exact count, since deciding whether a
+one-base-different UMI is an error or a second molecule depends on the
+chemistry rather than on anything visible here. **`strand_asymmetry_pvalue`**
+asks whether a window is more one-sided than a coin would produce, which the
+existing strand fraction cannot: three reads out of four and seventy-five out
+of a hundred are the same fraction, and only the second is evidence. Neither
+column promotes anything yet. They exist so that the open question — whether
+promotion should count molecules, and which multiple-testing procedure to use —
+can be settled from measurements on real samples rather than by argument.
 
 **A caution about the polyA atlas, because the default works against you.** Two of the rules
 below turn on proximity to an annotated polyA site, and they turn on it in opposite directions:

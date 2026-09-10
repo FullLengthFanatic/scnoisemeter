@@ -1,6 +1,6 @@
 # scNoiseMeter documentation
 
-Version 0.8.1 operational reference.
+Version 0.9.0 operational reference.
 
 This file documents installation, inputs, commands, options, outputs, and interpretation. The scientific rationale is in [whitepaper.md](whitepaper.md); the code map is in [methods_annotated.md](methods_annotated.md).
 
@@ -371,6 +371,8 @@ Columns:
 | `near_polya_site` | dominant-strand site proximity |
 | `repeat_overlap_fraction` | aligned-span fraction overlapping repeats |
 | `local_read_share` | fraction of intergenic read mass within 10 kb held by this window; near 1 is an isolated locus, low is diffuse coverage that the global test still promotes |
+| `n_molecules` | distinct (barcode, UMI) pairs; `n_reads` counts PCR copies, so one over-amplified molecule can look like broad support. Exact count, no mismatch collapsing, so an upper bound. `-1` when no UMIs were tracked, which is not zero molecules |
+| `strand_asymmetry_pvalue` | binomial tail `P(X >= dominant \| n, 0.5)`. Makes strand evidence depth-aware: 3 of 4 and 75 of 100 are both `strand_fraction` 0.75 and very different evidence. `NaN` for unstranded libraries |
 | `poisson_pvalue` | raw global-rate tail probability |
 | `poisson_pvalue_adj` | Bonferroni result across the intergenic windows actually tested. Before 0.9 the correction counted every window of every contig including genic sequence, a 2.2–2.9× overcorrection on GRCh38; intergenic counts are not comparable across that boundary |
 | `category` | final intergenic interpretation |
