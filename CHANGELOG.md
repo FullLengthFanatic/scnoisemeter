@@ -43,6 +43,19 @@ flag is passed. All of them are recorded under a `priming` key in
   signature for a read to count towards 3'-end anchoring, which lowers
   `three_prime_anchored_frac`.
 
+### Added — runtime invariant checks
+
+- Every run now checks the structural properties of its own result set and
+  writes `<sample>.qc.json`: each composition sums to one, every fraction lies
+  in [0, 1], `artifact_candidate_*` cannot exceed `broad_noncanonical_*`,
+  `both_ends_anchored_frac` cannot exceed either single-end fraction, no
+  artifact-flag count exceeds `n_reads_classified`, UMI diversity ratios stay
+  in [0, 1], and `n_cells` matches the per-cell table. Observed values are
+  recorded, not just verdicts. A violation stops the run; `--no-strict` writes
+  the outputs and records it. Reservoir-estimated reclassification downgrades
+  the conservation checks to warnings, because scaled totals are not expected
+  to conserve exactly.
+
 ### Changed — runs can now stop instead of reporting a configuration error
 
 - A barcode gate that leaves more than half of classified reads unassigned now

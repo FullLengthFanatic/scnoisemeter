@@ -98,6 +98,12 @@ from scnoisemeter.modules.report import (
     write_compare_report,
     write_run_report,
 )
+from scnoisemeter.modules.selfcheck import (
+    failures,
+    run_invariants,
+    summarise,
+    write_qc_report,
+)
 from scnoisemeter.utils.annotation_fetcher import (
     extract_gencode_version_from_filename,
     extract_polyasite_version_from_filename,
@@ -1186,6 +1192,13 @@ def run_cmd(
     # Sanity-check the barcode gate before anything is written: a result set
     # describing almost no cells should not be produced silently.
     _check_barcode_gate(sm, meta, strict=not no_strict)
+
+    # Then the structural invariants over this specific result set.  The test
+    # suite proves the code behaves on constructed inputs; this asks whether
+    # the numbers about to be written satisfy the properties the tool claims.
+    _invariants = _run_result_invariants(
+        sm, ct, result, output_dir, sample_name, strict=not no_strict
+    )
 
     # Attach annotation provenance for the HTML report
     _attach_result_provenance(
@@ -2692,6 +2705,53 @@ def _as_number(value):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return value
+
+
+def _run_result_invariants(sm, ct, result, output_dir, sample_name, *, strict: bool):
+    """Check the result set's structural invariants and write ``qc.json``.
+
+    Returns the checks so a caller can report them.  A violated ERROR-severity
+    invariant means a number that is about to be written is wrong, so the run
+    stops; ``--no-strict`` downgrades that to a warning.  The report is written
+    either way, because the observed values are what makes a violation
+    diagnosable.
+    """
+    try:
+        checks = run_invariants(sm, ct, result)
+    except Exception as exc:                      # noqa: BLE001
+        # This runs on every successful run.  A defect in the checking code
+        # must not be what fails an otherwise valid analysis.
+        logger.warning("Result invariant checks could not be completed: %s", exc)
+        return []
+
+    write_qc_report(checks, output_dir, sample_name)
+    summary = summarise(checks)
+    errors = failures(checks)
+    if not errors:
+        logger.info("%s", summary)
+        for warn in failures(checks, "warning"):
+            logger.warning("Invariant to check: %s -- %s | observed: %s",
+                           warn.name, warn.statement, warn.observed)
+        return checks
+
+    detail = "\n".join(
+        f"  - {c.name}: {c.statement}\n    observed: {c.observed}" for c in errors
+    )
+    msg = (
+        f"{len(errors)} structural invariant(s) of this result set do not hold, "
+        f"so at least one reported number is wrong:\n{detail}\n"
+        f"Details in {sample_name}.qc.json."
+    )
+    if strict:
+        raise click.ClickException(
+            msg + "\n\nPass --no-strict to write the outputs anyway."
+        )
+    logger.error("%s", msg)
+    click.echo(f"\nError: {msg}", err=True)
+    warnings = getattr(getattr(sm, "warnings", None), "append", None)
+    if warnings is not None and msg not in sm.warnings:
+        sm.warnings.append(msg)
+    return checks
 
 
 def _fmt_pct(value) -> str:

@@ -229,11 +229,20 @@ Barcode-free well BAMs are relabeled to `<plate>_<well>` before aggregation, pre
 | `comparison.matching.tsv` | Overall matching counts |
 | `comparison.stats.tsv` | Composition deltas and paired-cell bootstrap intervals |
 | `<sample>.run_info.json` | Tool version, platform, strandedness and annotation sources for this run |
+| `<sample>.qc.json` | Every structural invariant checked over this result set, its verdict and the observed values |
 | `cohort.summary.tsv` | One row per sample: provenance and headline metrics |
 | `cohort.composition.tsv` | Samples x categories, read and base fractions |
 | `cohort.report.html` | Cross-sample report |
 
 `comparison.retention.tsv`, `comparison.transitions.tsv` and `comparison.matching.tsv` are written only for a nested pair.
+
+## Result invariants
+
+The test suite proves the code behaves on constructed inputs. Separately, every run checks whether *this* result set satisfies the properties the tool claims about its own output, and writes them to `<sample>.qc.json` with the observed values rather than a bare verdict.
+
+The claims being checked are structural rather than statistical, which is what makes them checkable: each composition sums to one, every fraction lies in [0, 1], the artifact-candidate composition cannot exceed the broad non-canonical one because its categories are a subset, `both_ends_anchored_frac` cannot exceed either single-end fraction because it is their conjunction on the same reads, no artifact-flag count exceeds the denominator it is reported over, unique UMI strings cannot outnumber the reads carrying them, and `n_cells` matches the per-cell table.
+
+A violation means a number about to be written is wrong, so the run stops; `--no-strict` writes the outputs anyway and records the violation. Two checks are warnings rather than errors because a documented configuration can break them: reservoir-estimated intergenic reclassification scales promoted totals from a uniform sub-sample, so exact conservation is not expected to survive rounding, and `--anchor-veto-internal-priming` vetoes the unrestricted 3'-anchoring fraction but not the PAS-restricted subset.
 
 ## Scope and limitations
 
