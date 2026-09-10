@@ -114,6 +114,12 @@ BED coordinates are zero-based, half-open; midpoint is used for end-site resourc
 | `--exclude-biotypes` | none | repeatable gene biotype exclusion |
 | `--obs-metadata` | none | per-cell cluster metadata for cluster summaries |
 | `--no-umi-tracking` | off | disable UMI-string sets to reduce memory; `--no-umi-dedup` is a legacy alias |
+| `--polya-min-support` | 0 | drop polyA atlas records supported in fewer than this percentage of samples (column 7 of a PolyASite BED). See the note below: the default is deliberately permissive and usually not what you want |
+| `--priming-criterion` | `a_run` | internal-priming test: `a_run` (consecutive genomic A's), `perc_a` (SQANTI3/pigeon `perc_A_downstream_TTS`, ≥60% A over 20 bp), or `either` |
+| `--anchor-veto-internal-priming` | off | require the absence of an internal-priming signature for a read to count towards 3′ anchoring; lowers `three_prime_anchored_frac` |
+| `--no-strict` | off | downgrade the pre-write sanity checks from errors to warnings (see §9a) |
+
+**On `--polya-min-support`.** Two intergenic rules depend on proximity to an annotated polyA site, in opposite directions: `intergenic_hotspot` requires that no site is nearby, `intergenic_novel` accepts a nearby site as evidence. PolyASite 3.0 holds 18,432,135 records, including sites supported in 5.6% of samples, and loaded whole puts 38.6% of the primary genome within the 50 bp proximity window — at which point the test is nearly a constant. Filtering at 25 gives 7.6% of the genome; 50 gives 3.0%. Every run measures the density of the atlas it loaded and warns above 20%. The default of 0 preserves pre-0.9 numbers rather than being a recommendation.
 
 `--chimeric-distance` is accepted only for backward compatibility. Same-strand genomic distance is not used to call a chimera.
 
@@ -155,7 +161,7 @@ Additional options:
 - `--barcode-tag`, `--umi-tag`;
 - `--chemistry`: barcode-length expectation metadata.
 
-The command validates coordinate sort order, BAM index counts, chromosome naming, annotation/reference compatibility, and low read counts before writing the report.
+The command validates coordinate sort order, BAM index counts, chromosome naming, annotation/reference compatibility, and low read counts before writing the report. Since 0.9 it also stops on two conditions that previously produced a complete but misleading result set — see §9a.
 
 `--tagged-bam` preserves every input record and tags only classified mapped-primary alignments. It retains exact read assignments in memory and performs a second input pass. Final intergenic tags are looked up from the fixed-window locus table, including when aggregate reclassification used a reservoir.
 
@@ -274,6 +280,18 @@ Barcode-free well results are relabeled to `<PlateID>_<WellID>` before merging. 
 
 `n_reads_processed` can include records later skipped by classification or called-cell filtering. Use output denominator fields, not log progress counts, for reporting.
 
+## 9a. Checks that stop a run
+
+Three checks run before any output is written. Each can be downgraded to a warning with `--no-strict`, which writes the outputs and records the violation instead.
+
+**Barcode gate.** If more than half of classified reads carry no usable cell barcode on a barcode-aware BAM, the run stops and prints the observed counts, the resulting cell count and the header-scan tag fraction. Previously the run finished and reported a sample with a handful of cells and an unremarkable composition — a configuration error arriving disguised as a finding. Barcode-free BAMs are exempt, where 100% unassigned is the design.
+
+**Site-atlas coordinate range.** Contig names matching does not mean the assembly matches. An hg19 atlas against an hg38 BAM shares every contig name, so the existing naming check passes while every coordinate is displaced and every proximity test silently returns nothing. Positions falling beyond the end of their contig are the detectable part: above 20% out of range the atlas is discarded and its metrics reported as absent; above 1% it warns.
+
+**Result invariants.** Every run checks the finished result set against the structural properties the tool claims for it, and writes `<sample>.qc.json` with each verdict and its observed values. Checked: each composition sums to one; every fraction lies in [0, 1]; `artifact_candidate_*` does not exceed `broad_noncanonical_*`, whose categories contain it; `both_ends_anchored_frac` does not exceed either single-end fraction, being their conjunction on the same reads; no flag count exceeds `n_reads_classified`; UNASSIGNED does not exceed the classified total; UMI diversity ratios stay in [0, 1]; `n_cells` matches the per-cell table; `strand_concordance` matches its definition recomputed from the reported composition.
+
+A violated invariant means a number about to be written is wrong, so the run stops. Two checks are warnings rather than errors because a documented configuration breaks them: reservoir-estimated reclassification scales promoted totals from a sub-sample, so exact conservation need not survive rounding; and `--anchor-veto-internal-priming` lowers the unrestricted 3′ fraction without lowering the PAS-restricted subset. Checks whose inputs are absent are skipped, not failed.
+
 ## 10. `read_metrics.tsv`
 
 The two-column sample table contains:
@@ -306,14 +324,17 @@ directories, so archived runs remain usable, but nothing writes them any more.
 
 - `n_tso_invasion`;
 - `n_tso_concatemer`;
-- `n_polya_priming`;
+- `n_polya_priming` — genomic A-run beyond the read's 3′ end. A property of the locus, not of the molecule;
+- `n_polya_tail` / `polya_tail_frac` — untemplated A-run in the read's own 3′ **soft** clip. A property of the molecule. Read with the previous flag: both set means a real 3′ end in A-rich sequence, which the genomic flag alone calls internal priming. Hard-clipped BAMs report 0 because the bases are absent from the record;
 - `n_noncanon_junction`;
+- `n_rt_switch_repeat` / `rt_switch_repeat_frac` — an intron whose two ends share a ≥6 bp direct repeat, the reverse-transcriptase template-switch signature. Independent of junction canonicality, because such an artifact can occupy a GT-AG boundary. Requires a reference FASTA;
 - `n_discordant_pair`;
 - `n_low_mapq`.
 
 ### Ends and provenance
 
 - optional `three_prime_anchored_frac`;
+- optional `three_prime_at_pas_site_frac` — the same 3′ end restricted to atlas records naming a polyA signal hexamer (column 11 of a PolyASite BED); absent when the atlas has no such column;
 - optional `five_prime_anchored_frac`;
 - optional `both_ends_anchored_frac`;
 - deprecated `full_length_read_frac` equal to both-end anchoring;
@@ -349,8 +370,9 @@ Columns:
 | `polya_run_downstream` | strand-aware genomic A/T-run evidence |
 | `near_polya_site` | dominant-strand site proximity |
 | `repeat_overlap_fraction` | aligned-span fraction overlapping repeats |
+| `local_read_share` | fraction of intergenic read mass within 10 kb held by this window; near 1 is an isolated locus, low is diffuse coverage that the global test still promotes |
 | `poisson_pvalue` | raw global-rate tail probability |
-| `poisson_pvalue_adj` | Bonferroni result across all possible windows |
+| `poisson_pvalue_adj` | Bonferroni result across the intergenic windows actually tested. Before 0.9 the correction counted every window of every contig including genic sequence, a 2.2–2.9× overcorrection on GRCh38; intergenic counts are not comparable across that boundary |
 | `category` | final intergenic interpretation |
 
 This table contains sampled support if more than 500,000 intergenic records were seen.
@@ -383,12 +405,19 @@ written full of NaN.
 
 ## 13a. Provenance and cohort files
 
+### `<sample>.qc.json`
+
+Every structural invariant checked over this result set, with its verdict, its statement and the observed values. Written on every run, including runs where all checks pass — a file listing only failures cannot be distinguished from one whose checks never ran.
+
 ### `<sample>.run_info.json`
 
 Written by `run` and `run-plate` alongside the metrics: scnoisemeter version, sample name, BAM
 path, platform, pipeline stage, aligner, strandedness, read and cell totals, and the GTF, polyA,
-TSS and TSO sources with how each was obtained. `read_metrics.tsv` holds only numbers, so this is
-what lets a later reader, or `cohort`, establish whether two result sets are comparable.
+TSS and TSO sources with how each was obtained. Since 0.9 it also carries a `priming` block with
+`polya_min_support`, the internal-priming `criterion`, and whether the anchoring veto was on --
+three settings that change what a reported number means, so `cohort` can refuse to pool runs that
+disagree on them. `read_metrics.tsv` holds only numbers, so this is what lets a later reader, or
+`cohort`, establish whether two result sets are comparable.
 
 ### `cohort.summary.tsv`
 

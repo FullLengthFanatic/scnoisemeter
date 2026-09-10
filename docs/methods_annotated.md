@@ -152,6 +152,18 @@ The CLI resolves protocol-aware motifs with `_default_tso_sequences()` and `_eff
 
 `_check_polya_priming()` uses reference sequence after the 3′ end of `+` alignments and before the 3′ end of `-` alignments, checking A and T runs respectively. It returns no flag when reference context cannot be fetched.
 
+`priming_criterion` selects the test: `a_run` requires `POLYA_RUN_MIN_LENGTH` consecutive matching bases anywhere in `POLYA_CONTEXT_WINDOW`; `perc_a` requires `POLYA_PERC_A_MIN` percent over the first `POLYA_PERC_A_WINDOW` bases, the SQANTI3/pigeon convention on a 0–100 scale; `either` accepts one or both. The fraction is counted on `T` for a reverse alignment rather than reverse-complementing the slice. `ReadClassifier.__init__` rejects any other value, so the option cannot be accepted and silently ignored. Threaded CLI → `run_pipeline` → task dict → `_contig_worker` → `ReadClassifier`.
+
+### Untemplated 3′ polyA tail
+
+`_polya_tail_stats()` returns `(soft_clip_len, terminal run, A-fraction)` for the transcript-3′ clip: the trailing clip counted on `A` for a forward alignment, the leading clip counted on `T` for a reverse one, reversed so index 0 is always the base adjacent to the cleavage site. Only CIGAR op 4 qualifies; op 5 returns `(0, 0, 0.0)` because hard-clipped bases are absent from `query_sequence` and indexing the aligned sequence would read alignment bases as a tail.
+
+`_has_polya_tail()` requires `run >= POLYA_TAIL_MIN_LENGTH`. `POLYA_TAIL_MIN_FRAC` defaults to 0 and is therefore not part of the decision: a genuine 12 bp tail inside a 60 bp clip carrying adapter or TSO sequence scores about 0.2, so requiring both would implicitly demand a ~45 bp tail.
+
+### RT template-switch direct repeat
+
+`_direct_repeat_len(contig, donor, acceptor)` takes the longest common suffix of the `RT_SWITCH_REPEAT_SCAN` bases preceding each intron boundary, where `donor` is the first intronic base and `acceptor` one past the last — the CIGAR-N interval convention used by `_get_junctions()`. `N` terminates the run. `_has_rt_switch_repeat()` returns True when any junction reaches `RT_SWITCH_REPEAT_MIN`, and False without a reference FASTA. Independent of `_has_noncanonical_junction()` by design.
+
 ### Alignment quality
 
 `ReadResult` carries MAPQ, optional `NM`, soft-clipped bases, query bases, and aligned reference bases. `_contig_worker()` accumulates these per cell. `metrics.compute_metrics()` reports mean MAPQ, mean edit distance among reads carrying `NM`, the softclip/query-base fraction, and low-MAPQ rate.
@@ -170,7 +182,9 @@ The pipeline stores a uniform reservoir of up to 500,000 intergenic records. Eac
 
 `_cluster_reads()` assigns each record to `(contig, three_prime // 500)`. Strand is intentionally excluded from the key so that `strand_fraction` is measured rather than predetermined.
 
-`compute_intergenic_bases(by_contig=True, contig_lengths=...)` computes the exact complement of the union of gene bodies through each non-mitochondrial BAM contig end. The annotation-gap object is only a compatibility fallback when lengths are unavailable. CLI multiple-testing correction uses every fixed non-mitochondrial BAM window, including gene-only and empty windows, as a conservative pre-defined upper bound. `_score_locus()` uses `scipy.stats.poisson.sf(n_reads - 1, expected)` and Bonferroni adjustment.
+`compute_intergenic_bases(by_contig=True, contig_lengths=...)` computes the exact complement of the union of gene bodies through each non-mitochondrial BAM contig end. The annotation-gap object is only a compatibility fallback when lengths are unavailable. CLI multiple-testing correction counts the windows actually tested: the intergenic base total divided by `INTERGENIC_LOCUS_WINDOW`, derived from the same figure that feeds the background rate. Empty intergenic windows are still counted, which keeps the correction conservative. Before 0.9 the denominator was every window of every non-mitochondrial contig, including all genic sequence where no test is performed — 6,176,550 windows on GRCh38 against 2.16M–2.78M tested, a 2.2–2.9× overcorrection whose effect ran one way, suppressing real enrichment. `_score_locus()` uses `scipy.stats.poisson.sf(n_reads - 1, expected)` and Bonferroni adjustment.
+
+`_assign_local_read_share()` sets `IntergenicLocus.local_read_share` after every window is scored, since it needs the whole window set. Per contig it sorts by start and builds a prefix sum, so each window's ±`LOCAL_SHARE_FLANK` neighbourhood total is a subtraction rather than a scan — one sort per contig instead of a neighbourhood walk per window.
 
 The minimum-read and adjusted-p thresholds determine enrichment. Barcode support is required for `intergenic_novel`, not for technical hotspots, allowing barcode-free sample-level BAMs to reveal internal-priming candidates.
 
@@ -188,6 +202,18 @@ The repeat label is an annotation class and does not require Poisson enrichment.
 
 `cli._apply_intergenic_reclassification()` moves read and aligned-base counts, length-bin counts, read assignments, and exact UMI sets when the reservoir is exhaustive. For sampled datasets it estimates category counts from the uniform reservoir and marks affected UMI sequence-diversity values missing.
 
+## 7a. Site-atlas loading and pre-write guards
+
+`_load_polya_sites(paths, chrom_style, min_support, pas_out)` parses column 7 as the percentage of samples supporting a record and drops those below `min_support`; a record without a parseable column 7 is kept, so a plain BED3 is unaffected. `min_support` is part of the pickle cache key, so a cached unfiltered dict is never served to a filtered run. When `pas_out` is supplied it is filled with the records whose column 11 names a hexamer, harmonised and pruned to the same keys as the main dict.
+
+`_polya_atlas_density()` merges ±`POLYA_SITE_PROXIMITY` windows per contig and returns the covered fraction of the non-mitochondrial reference; `_warn_if_atlas_too_dense()` records a warning above `POLYA_ATLAS_DENSITY_WARN`. The density is a property of the file, so it is measured once per run rather than assumed.
+
+`_check_site_coordinate_range()` runs after `_check_site_contig_overlap()` at all four load sites. Positions at or beyond their contig length are counted; above `SITE_COORD_OUT_OF_RANGE_DROP` the atlas is returned as `None` so its metrics take the absent path, above `SITE_COORD_OUT_OF_RANGE_WARN` it warns. Contigs absent from the BAM are skipped rather than counted against the atlas.
+
+`_check_barcode_gate()` compares `n_reads_unassigned / n_reads_classified` against `UNASSIGNED_GATE_WARN`, only when `meta.barcode_aware is True`. Counters that are not numbers are skipped via `_as_number()` rather than raised on: the guard runs before every report and must not be what fails a valid run.
+
+`modules/selfcheck.py` runs the result invariants and writes `<sample>.qc.json`. `run_invariants()` returns passing and failing checks alike; `failures()` filters by severity; the whole block is wrapped at the call site so a defect in the checking code cannot fail an otherwise valid analysis. Severity is `ERROR` except where a documented configuration legitimately breaks the property — reservoir-estimated reclassification for the conservation checks, and the anchoring veto for the PAS-subset check.
+
 ## 8. End anchoring
 
 For exonic-sense reads, `_contig_worker()` stores the strand-correct 5′ and 3′ coordinates together with one read key in `exonic_sense_endpoints`. It uses `reference_end`, not `reference_start + query_alignment_length`, so spliced alignments are not displaced by intron length.
@@ -195,8 +221,11 @@ For exonic-sense reads, `_contig_worker()` stores the strand-correct 5′ and 3�
 `compute_metrics()` calls the strand-aware `_near_polya_site()` for both atlases:
 
 - `three_prime_anchored_frac` when polyA sites exist;
+- `three_prime_at_pas_site_frac` against `result._polya_pas_dict`, the subset of atlas records whose column 11 names a hexamer;
 - `five_prime_anchored_frac` when TSS sites exist;
 - `both_ends_anchored_frac` only when both exist and both match the same read.
+
+`result._anchor_veto_internal_priming` makes the 3′ hit additionally require that the read was not flagged for internal priming. The endpoint reservoir record gained a sixth field in 0.9 for that per-read flag; `compute_metrics()` indexes defensively so five-field records written by 0.8 still load.
 
 Unstranded libraries suppress these orientation-dependent values. `full_length_read_frac` is a deprecated alias of the both-end result. The old platform-specific length fallback is not used.
 
@@ -265,6 +294,15 @@ Explicit platform hints have priority. Minimap2 alone maps to `unknown`; bare ST
   handling, the version / annotation / strandedness comparability warnings, ranking fallback when
   a metric predates some samples, sample-sheet labelling and ordering, and that the deviation
   heatmap leaves a near-zero row neutral instead of painting it as the strongest signal.
+- `tests/test_priming_evidence.py`: the untemplated-tail measurement including hard clips,
+  reverse-strand orientation and the adapter-bearing clip; atlas support filtering, hexamer
+  extraction and BED3 passthrough; atlas density and its warning; and that the option defaults
+  preserve pre-0.9 behaviour.
+- `tests/test_robustness_transfers.py`: both guards in both directions -- firing on the failure
+  they exist for, silent on the legitimate lookalike (healthy sample, barcode-free BAM, in-range
+  atlas, contigs absent from the BAM) -- plus direct-repeat measurement and local read share.
+- `tests/test_selfcheck.py`: one corruption per invariant, each asserted to fire by name, and a
+  healthy result set that trips none of them.
 - `.github/workflows/tests.yml`: Python 3.10-3.13 CI with Ruff (pinned) and pytest.
 
 `tests/benchmark/` builds a synthetic BAM with known per-read truth and scores the classifier
@@ -285,6 +323,13 @@ aggregate sets from `constants.py` so they cannot drift from the classifier agai
 | Enable context/junction checks | Supply `--reference` |
 | Interpret repeats | Supply a matching RepeatMasker BED |
 | Reproduce reservoirs | Seeded by default (42); keep thread count fixed |
+| Make polyA-site proximity discriminating again | Set `--polya-min-support 25` (or 50). Unfiltered, PolyASite 3.0 puts 38.6% of the genome within the proximity window; the run reports the density it measured |
+| Compare internal priming with isoform-QC numbers | Use `--priming-criterion perc_a`, the SQANTI3/pigeon convention. It disagrees with the default on ~3% of windows, so switch for comparability, not correction |
+| Stop proximity outvoting contrary evidence at the 3′ end | Use `--anchor-veto-internal-priming`; it lowers `three_prime_anchored_frac` |
+| Detect RT template-switch artifacts | Supply `--reference`; the direct-repeat flag needs it and is silent without it |
+| Continue past a failed pre-write check | `--no-strict`. Prefer fixing the cause: each of the three checks fires on a condition that otherwise produces a complete but wrong result set |
 | Alter intergenic thresholds | Change named constants, document them, and revalidate |
+
+Every option in the first block above changes what a reported number means, which is why each is recorded in `run_info.json` and defaults to pre-0.9 behaviour. Changing one mid-study splits the cohort.
 
 Do not tune `--chimeric-distance`; it is deprecated and has no scientific decision role in version 0.7.

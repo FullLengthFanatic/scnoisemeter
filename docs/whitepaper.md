@@ -20,12 +20,17 @@ mechanism.
 scNoiseMeter therefore treats technical-noise analysis as an evidence-labeling and composition
 problem. Every mapped primary alignment receives one mutually exclusive location/alignment
 category, its aligned reference bases are partitioned without double-counting, and independent
-context flags record evidence such as internal priming, TSO sequence, non-canonical splice
-boundaries, low mapping confidence, or pair discordance. Results are aggregated by sample, cell,
-cluster, read length, or plate well.
+context flags record evidence such as internal priming, an untemplated polyA tail, TSO sequence,
+non-canonical splice boundaries, reverse-transcriptase template-switch repeats, low mapping
+confidence, or pair discordance. Where a flag describes the genome rather than the molecule, a
+companion flag describing the molecule is reported beside it, because the two disagree in
+precisely the cases that matter. Results are aggregated by sample, cell, cluster, read length,
+or plate well.
 
 The tool reports a broad non-canonical composition and a narrower artifact-candidate composition.
-Neither is presented as an estimate of contamination. The framework is designed to be auditable
+Neither is presented as an estimate of contamination. Every run additionally checks its own
+finished output against the structural properties claimed here and refuses to write a result set
+that violates them. The framework is designed to be auditable
 and comparable across long-read, droplet short-read, and plate protocols while remaining explicit
 about assay-specific assumptions.
 
@@ -192,9 +197,22 @@ evidence:
   molecularly plausible, with one substitution tolerated.
 - **TSO concatemer** — the motif appearing more than once, indicating oligo-oligo product.
 - **Internal polyA priming** — a genomic A-run in the strand-correct reference context
-  immediately beyond the read's 3′ end.
+  immediately beyond the read's 3′ end. Read this carefully: it is a statement about the
+  *place in the genome*, not about the molecule. It says an oligo-dT primer *could* have
+  annealed here. It cannot say whether this particular molecule was primed there or arrived
+  by genuine cleavage and polyadenylation.
+- **Untemplated 3′ polyA tail** — an A-run in the read's own soft-clipped end, outside the
+  aligned block. Those bases are in the read but not in the reference, so the molecule brought
+  them: this is evidence about the molecule rather than the locus. The two flags are most
+  informative together, and the table in §3.3.1 explains why.
 - **Non-canonical junction** — a CIGAR `N` interval whose donor/acceptor pair is neither an
   annotated junction nor GT–AG/GC–AG/AT–AC.
+- **RT template-switch repeat** — the two ends of one intron share a short identical sequence.
+  Reverse transcriptase can jump between two copies of the same short sequence, stitching
+  together fragments that were never adjacent; the join then looks like a splice junction.
+  This is deliberately independent of the canonicality test above, because such an artifact can
+  land on a perfectly canonical GT–AG boundary and be invisible to a motif check. Real junctions
+  in repetitive sequence also carry direct repeats, so this is evidence and never a category.
 - **Low MAPQ** — reported descriptively, never used to filter or reclassify, because MAPQ scales
   differ between aligners.
 - **Discordant pair** — a missing or improper mate, which is a flag and not an automatic chimera.
@@ -202,6 +220,40 @@ evidence:
 Keeping these orthogonal to the taxonomy is what allows a read to be, for example,
 `exonic_sense` *and* internally primed — a combination that a single-label scheme would have to
 discard.
+
+#### 3.3.1 Why two polyA flags rather than one
+
+Internal oligo-dT priming is the artifact most often blamed for spurious 3′ signal, and the usual
+test for it is genomic: look at the reference sequence just past the read's 3′ end and ask whether
+it is A-rich. scNoiseMeter does that, but the test is weaker than its popularity suggests.
+Measured against the PolyASite atlas, the median A-content in the 20 bp downstream window is
+**25% at real annotated polyA sites and 25% at random genomic positions**. The genomic context
+barely distinguishes the two, because A-rich stretches are simply common.
+
+What does distinguish them is whether the A's the read carries are in the genome. At a real
+cleavage site the polyA tail is added enzymatically after transcription, so those bases appear in
+the read but not in the reference, and the aligner pushes them into a soft clip. At an internal
+priming event the A's the read carries are the genome's own, and they align.
+
+Reading the two flags together therefore separates four situations that a single flag collapses
+into two:
+
+| genomic A-run downstream | untemplated tail in the soft clip | what it means |
+|---|---|---|
+| yes | no | internal priming — the classical case, now with corroboration |
+| yes | yes | a real 3′ end that happens to sit in A-rich sequence; the genomic test alone calls this an artifact |
+| no | yes | a real 3′ end |
+| no | no | no evidence either way |
+
+Only soft clips are read. If an aligner hard-clips, the bases are removed from the record
+entirely, and scNoiseMeter reports no tail — which means "not observable here", not "no tail on
+this molecule". The distinction is recorded rather than papered over.
+
+A second choice is worth stating because it is easy to get wrong. The tail is decided by the
+length of the A-run alone, not by how A-rich the clip is overall. A genuine 12 bp tail sitting
+inside a 60 bp clip that also holds adapter or TSO sequence is only about 20% A, so requiring
+both a run and a high fraction would quietly demand a tail of roughly 45 bp and miss most real
+ones.
 
 ### 3.4 Chimeric and splice evidence
 
@@ -233,10 +285,33 @@ Two properties of this screen should be understood before its output is used:
 - It is a **global-rate** enrichment screen, not a peak caller. It has no local-background, GC,
   or mappability correction, so it is least reliable exactly where the local rate departs most
   from the genome mean — near highly transcribed regions and in poorly mappable sequence.
-- The correction spans every possible window rather than only windows containing a read, and the
-  test is performed on the intergenic reservoir sample rather than the full read set. Both make
-  it conservative, and the second makes promotion depth-dependent: a library far above the
-  reservoir cap is tested at lower effective depth than one below it.
+- The correction spans every window in the intergenic complement rather than only windows
+  containing a read, and the test is performed on the intergenic reservoir sample rather than
+  the full read set. Both make it conservative, and the second makes promotion depth-dependent:
+  a library far above the reservoir cap is tested at lower effective depth than one below it.
+  (Before 0.9 the correction counted every window of every contig, including all the genic
+  sequence where no test is ever performed — roughly a 2.2–2.9× overcorrection on GRCh38 that
+  suppressed real enrichment. Intergenic category counts are not comparable across that
+  boundary.)
+
+Each window also reports **`local_read_share`**: how much of the intergenic read mass within
+10 kb the window itself holds. This answers a question significance cannot. A window can clear
+the genome-wide rate because it is a sharp isolated pile-up, or because it sits inside a broad
+smear of coverage that happens to exceed the average everywhere. A share near 1 is the first; a
+low share is the second. They warrant different follow-up, and the p-value is identical.
+
+**A caution about the polyA atlas, because the default works against you.** Two of the rules
+below turn on proximity to an annotated polyA site, and they turn on it in opposite directions:
+`intergenic_hotspot` requires that a site is *not* nearby, while `intergenic_novel` accepts a
+nearby site as positive evidence. That makes the density of the atlas a silent parameter.
+PolyASite 3.0 contains 18.4 million records, many supported in only a few percent of samples,
+and loaded whole it puts **38.6% of the primary genome within the 50 bp proximity window**. At
+that density the test is closer to a constant than a discriminator: hotspots are vetoed across
+a third of the genome, and the novel-gene evidence route is nearly free. Filtering the atlas on
+its own per-site support column restores it — 25% support gives 7.6% of the genome, 50% gives
+3.0% — and every run now measures and reports the density of whatever atlas it actually loaded.
+The default remains unfiltered so that upgrading moves no previously published number, which
+makes this a setting to choose deliberately rather than one to inherit.
 
 Enriched windows are then interpreted by the independent evidence in §3.2. The ordering matters:
 repeat overlap is tested before enrichment, so a window that is both repeat-derived and A-rich is
@@ -286,6 +361,15 @@ This is consistent with work emphasising the difficulty of assigning trustworthy
 transcript ends, and with cap- and 3′-enriched approaches such as
 [CapTrap-seq](https://www.nature.com/articles/s41467-024-49523-3).
 
+Proximity to an atlas record is a weak anchor when the atlas is dense (§3.5), so two stricter
+readings are available alongside it. `three_prime_at_pas_site_frac` counts only proximity to
+records the atlas itself annotates with a polyadenylation signal hexamer — a real cleavage site
+usually has one 10–40 nt upstream, though a strict hexamer also occurs at 9.4% of random genomic
+positions, so it is corroboration rather than proof. And `--anchor-veto-internal-priming`
+additionally requires that a read carry no internal-priming signature before it counts as
+anchored, on the reasoning that proximity alone should not outvote contrary evidence on the same
+read. Both are reported, and the veto is off by default because it lowers the headline fraction.
+
 ## 5. Reading the output
 
 The numbers below are from the example PacBio Kinnex run whose report is shown in the README
@@ -322,6 +406,15 @@ Patterns that should attract attention, rather than any single threshold:
   alignments; if it appears to, check whether read names were rewritten and the pairing is real.
 - **A category that is absent rather than zero.** This means the evidence was never available.
   Absent and zero are different claims and the output distinguishes them deliberately.
+- **`polya_priming_frac` high while `polya_tail_frac` is comparably high in the same reads.**
+  Read together (§3.3.1), that is a population of real 3′ ends sitting in A-rich sequence, not
+  an internal-priming problem. The genomic flag alone would have said the opposite.
+- **`rt_switch_repeat_frac` elevated while non-canonical junctions are not.** Template-switch
+  artifacts can occupy canonical GT–AG boundaries, so the junction-motif check will not see them.
+  This is the pairing that makes the direct-repeat flag worth having.
+- **A warning that the loaded polyA atlas covers a large share of the genome.** Reported by every
+  run. Above roughly a fifth, treat `intergenic_hotspot` and `intergenic_novel` as compromised in
+  opposite directions rather than as measurements (§3.5).
 
 ## 6. Protocol handling
 
@@ -389,13 +482,17 @@ scNoiseMeter complements rather than replaces:
 - ambient-RNA models such as SoupX, DecontX and CellBender;
 - cell-calling and doublet detection;
 - isoform-model QC such as SQANTI3 and pigeon, which share several of the same underlying signals
-  (RT-switching evidence, intra-priming, junction canonicality) at transcript-model level;
+  (RT-switching evidence, intra-priming, junction canonicality) at transcript-model level.
+  Where a signal is shared, the definition here is deliberately aligned with theirs so the
+  numbers can be read side by side: `--priming-criterion perc_a` is their
+  `perc_A_downstream_TTS` convention, and the direct-repeat test is the same RT-switch signature
+  they apply to transcript models, applied instead to individual alignments;
 - read-structure artifact classifiers, which work from the read rather than the alignment and can
   therefore see products — such as TSO-TSO concatemers — that align poorly or not at all;
 - pre-alignment chimera removal, which sees adapter-bridged reads that never surface as `SA`
   evidence;
-- dedicated internal-priming filters, which implement stricter published criteria than the
-  descriptive flag used here;
+- dedicated internal-priming filters such as polyAfilter, which act on the count matrix rather
+  than describing the alignment;
 - fusion callers, which apply gene-level evidence and filtering well beyond an `SA` tag.
 
 The fixed-window intergenic screen, same-read two-end anchoring, exact pre/post read retention,
@@ -412,12 +509,44 @@ The synthetic benchmark constructs alignments directly rather than through an al
 ground truth is generated by the same assumptions being tested. Per-category accuracy against it
 measures self-consistency, and should be read that way.
 
+A test suite, however, only proves the code behaves on inputs someone thought to construct. Every
+run therefore also checks the finished result set against the properties this document claims for
+it, and writes the verdicts and the observed numbers to `<sample>.qc.json`. Those properties are
+structural rather than statistical, which is what makes them checkable at all: each composition
+sums to one; every fraction lies between zero and one; the artifact-candidate composition cannot
+exceed the broad non-canonical one, because its categories are a subset of them; both-end
+anchoring cannot exceed either single end, because it is their conjunction on the same reads; no
+flag count exceeds the denominator it is reported over; unique UMI strings cannot outnumber the
+reads carrying them. A violation means a number about to be written is wrong, so the run stops
+rather than emitting it. The point is the failure mode being guarded against: a broken invariant
+would not announce itself as a crash — it would look like a slightly wrong figure in a table
+somebody later cites.
+
+Two checks are warnings rather than errors, because a documented configuration legitimately
+breaks them. Reservoir-estimated intergenic reclassification scales promoted totals from a
+uniform sub-sample, so exact conservation is not expected to survive rounding; and the anchoring
+veto lowers the unrestricted 3′ fraction without lowering the hexamer-restricted subset.
+
+Two configuration errors that previously produced a complete, plausible-looking result set now
+stop the run instead. A barcode whitelist from the wrong chemistry leaves nearly every read
+unassigned, and the run used to finish and report a sample with a handful of cells and an
+unremarkable composition — a failure that arrives disguised as a finding. And a site atlas built
+on a different genome assembly shares every contig name with the BAM while every coordinate is
+displaced, so the existing name check passes and every proximity test silently returns nothing;
+positions falling beyond the end of their contig are the detectable part of that, and are now
+tested for. Both can be downgraded to warnings with `--no-strict`.
+
 Important remaining limitations:
 
 - no experimentally sorted positive/negative ground truth across protocols;
 - no local-background or mappability model for intergenic enrichment;
 - multimapping undetectable where the aligner omits `NH`;
-- no gene-aware molecule deduplication;
+- no gene-aware molecule deduplication, and intergenic promotion counts reads rather than
+  UMI-collapsed molecules, so one heavily amplified molecule can carry a window over threshold;
+- the untemplated-tail flag is unavailable on hard-clipped BAMs, where the bases are absent from
+  the record;
+- the RT direct-repeat flag cannot separate a template-switch artifact from a genuine junction in
+  repetitive sequence;
 - no read-level NUMT inference from competing alignments;
 - no distinction between real fusions and technical chimeras;
 - duplicate- and QC-fail-flagged records are counted but still classified;
@@ -438,6 +567,9 @@ A defensible methods section should state:
 - platform and library strandedness supplied to the CLI;
 - barcode/UMI tags, whitelist, and called-cell filter;
 - custom TSO sequence and whether poly-G checking was enabled;
+- the polyA-atlas support threshold (`--polya-min-support`), because it changes what
+  "near an annotated polyA site" means and therefore both intergenic rules that depend on it;
+- the internal-priming criterion (`--priming-criterion`), and whether the anchoring veto was on;
 - seed, thread count, and whether intergenic reclassification was reservoir-estimated;
 - which denominator and aggregate metric was reported.
 
@@ -445,6 +577,6 @@ Do not relabel `broad_noncanonical_read_frac` as percent contamination. Report i
 categories and the narrower artifact-candidate composition alongside it.
 
 Every run writes `<sample>.run_info.json` next to the metrics, carrying the version, platform,
-strandedness and annotation sources. The metrics table itself holds only numbers, so this file is
+strandedness, annotation sources, and the priming settings above. The metrics table itself holds only numbers, so this file is
 the record that makes an archived result set interpretable later, and it is what the cross-sample
 comparison uses to decide whether two samples may be placed side by side at all.
