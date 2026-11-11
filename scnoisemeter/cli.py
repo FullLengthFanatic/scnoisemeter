@@ -181,7 +181,7 @@ def _shared_options(func):
                      help="Discard polyA atlas records supported in fewer than this "
                           "percentage of samples (column 7 of a PolyASite BED). "
                           f"{POLYA_MIN_SUPPORT_RECOMMENDED:g} is recommended: loaded "
-                          "unfiltered, PolyASite 3.0 puts 38.6% of the genome within "
+                          "unfiltered, PolyASite 3.0 puts 37.4% of the genome within "
                           "50 bp of a site, which makes polyA-site proximity a constant "
                           "rather than a test. Default 0 keeps pre-0.9 behaviour so "
                           "upgrading does not move a reported number."),
@@ -191,7 +191,7 @@ def _shared_options(func):
                      help="Internal-priming test. 'a_run' is a run of consecutive genomic "
                           "A's (pre-0.9 behaviour); 'perc_a' is the SQANTI3/pigeon "
                           "perc_A_downstream_TTS convention (>=60% A over 20 bp); 'either' "
-                          "flags a read satisfying one or both. The two agree on ~97% of "
+                          "flags a read satisfying one or both. The two agree on 95-97% of "
                           "windows, so this is for comparability, not correction."),
         click.option("--no-strict", is_flag=True,
                      help="Downgrade the pre-report sanity checks from errors to warnings. "
@@ -224,7 +224,7 @@ def _shared_options(func):
                      show_default=True,
                      type=click.Choice(["polyasite3", "polyadb4", "both"], case_sensitive=False),
                      help="polyA database to auto-download when --polya-sites is not supplied. "
-                          "polyasite3: PolyASite 3.0 (scRNA-seq atlas, GENCODE v42, ~569 k sites); "
+                          "polyasite3: PolyASite 3.0 (scRNA-seq atlas, GENCODE v42, 18.4 M sites); "
                           "polyadb4: PolyA_DB v4 main collection (bulk + long-read validated, "
                           "hg38, ~281 k sites); "
                           "both: merge both databases for maximum site coverage."),
@@ -1139,9 +1139,9 @@ def run_cmd(
     )
 
     # Check that --cell-barcodes didn't filter out every read
+    n_classified = sum(sum(c.values()) for c in result.read_counts.values())
     if cell_barcode_set is not None and result.n_reads_skipped_not_called_cell > 0:
-        reads_remaining = result.n_reads_processed
-        if reads_remaining == 0:
+        if n_classified == 0:
             raise click.ClickException(
                 f"0 reads remain after cell barcode filtering — "
                 f"check that the barcode file matches this BAM.\n"
@@ -1153,9 +1153,9 @@ def run_cmd(
 
     # Warn if total read count is very low (statistically unreliable)
     MIN_RELIABLE_READS = 100
-    if result.n_reads_processed < MIN_RELIABLE_READS:
+    if n_classified < MIN_RELIABLE_READS:
         _low_count_msg = (
-            f"Only {result.n_reads_processed} reads were classified "
+            f"Only {n_classified} reads were classified "
             f"(minimum recommended: {MIN_RELIABLE_READS}). "
             f"Results are statistically unreliable and should not be interpreted."
         )
@@ -1592,8 +1592,6 @@ def cohort_cmd(results_dirs, sample_sheet, output_dir, offline, verbose):
               help="Directory to scan for .bam files.")
 @click.option("--reference",   required=True,  type=click.Path(exists=True),
               help="Reference FASTA (.fa/.fa.gz + .fai) for polyA and junction checks.")
-@click.option("--tss-sites",   multiple=True,  type=click.Path(exists=True),
-              help="CAGE peak / TSS BED file(s) for the 5\u2032-anchored metric.")
 @click.option("--threads",     default=DEFAULT_THREADS, show_default=True, type=int,
               help="Parallel worker processes.")
 @click.option("--output-dir",  required=True,  type=click.Path(),
@@ -1978,7 +1976,8 @@ _worker_state: dict = {}
 
 def _plate_worker_init(gtf, repeats_path, exclude_biotypes,
                        polya_paths, tss_paths, chrom_style,
-                       reference_names=None):
+                       reference_names=None,
+                       polya_min_support=POLYA_MIN_SUPPORT_DEFAULT):
     """Initialiser for each worker process: loads shared read-only data once."""
     import logging as _log
     _log.disable(_log.WARNING)  # suppress per-well INFO/WARNING spam in workers
@@ -1991,7 +1990,8 @@ def _plate_worker_init(gtf, repeats_path, exclude_biotypes,
         cache=True,
     )
     _worker_state["polya"] = _check_site_contig_overlap(
-        _load_polya_sites(polya_paths, chrom_style=chrom_style) if polya_paths else {},
+        _load_polya_sites(polya_paths, chrom_style=chrom_style,
+                          min_support=polya_min_support) if polya_paths else {},
         reference_names, label="polyA site atlas",
     )
     _worker_state["tss"] = _check_site_contig_overlap(
@@ -2028,6 +2028,7 @@ def _plate_well_task(task: dict) -> dict:
             tso_sequences=task.get("tso_sequences"),
             tso_min_match=task.get("tso_min_match", TSO_MIN_MATCH_LENGTH),
             tso_check_polyg=task.get("tso_check_polyg", True),
+            priming_criterion=task.get("priming_criterion", PRIMING_CRITERION_DEFAULT),
             threads=task["threads"],
             store_umis=task["store_umis"],
             reference_path=task["reference"],
@@ -2037,6 +2038,9 @@ def _plate_well_task(task: dict) -> dict:
         well_result._polya_site_dict = _worker_state["polya"]
         well_result._tss_site_dict   = _worker_state["tss"]
         well_result._numt_intervals  = None
+        well_result._anchor_veto_internal_priming = task.get(
+            "anchor_veto_internal_priming", False
+        )
 
         well_sm, _ = compute_metrics(
             well_result, f"{plate_id}_{well_id}",
@@ -2435,6 +2439,8 @@ def run_plate_cmd(
                     "tso_sequences":    tso_seqs,
                     "tso_min_match":    tso_min_match,
                     "tso_check_polyg":  tso_check_polyg,
+                    "priming_criterion": priming_criterion,
+                    "anchor_veto_internal_priming": bool(anchor_veto_internal_priming),
                     "threads":          _threads_per_well,
                     "store_umis":       not no_umi_dedup,
                     "reference":        reference,
@@ -2450,6 +2456,7 @@ def run_plate_cmd(
                     gtf, repeats, list(exclude_biotypes),
                     polya_paths, tss_paths, _shared_bam_cs,
                     list(_first_meta.reference_names),
+                    polya_min_support,
                 ),
             ) as executor:
                 futures = {executor.submit(_plate_well_task, t): t["well_id"] for t in _tasks}
@@ -2534,6 +2541,9 @@ def run_plate_cmd(
                     well_result._polya_site_dict = _shared_polya
                     well_result._tss_site_dict   = _shared_tss
                     well_result._numt_intervals  = None
+                    well_result._anchor_veto_internal_priming = bool(
+                        anchor_veto_internal_priming
+                    )
 
                     relabel_barcode(
                         well_result, "NO_BARCODE", f"{plate_id}_{well_id}"
@@ -2573,6 +2583,10 @@ def run_plate_cmd(
         # ------------------------------------------------------------------ #
         plate_meta = plate_result.meta  # use last well's meta (platform is the same)
         plate_meta.warnings = []        # clear per-well warnings; plate report stays clean
+        plate_result._polya_pas_dict = (
+            _shared_pas if plate_result._polya_site_dict else None
+        )
+        plate_result._anchor_veto_internal_priming = bool(anchor_veto_internal_priming)
 
         intergenic_loci = _profile_intergenic_result(
             plate_result,
@@ -2997,7 +3011,7 @@ def _load_polya_sites(
     # min_support is part of the cache identity: a cached unfiltered dict must
     # not be served to a run that asked for a filtered one.
     _cache = _site_cache_path(
-        paths, chrom_style, f"polya_v3_stranded_sup{min_support:g}"
+        paths, chrom_style, f"polya_v4_stranded_sup{min_support:g}"
     )
     if _cache and _cache.exists():
         try:
@@ -3016,6 +3030,11 @@ def _load_polya_sites(
 
     if isinstance(paths, str):
         paths = [paths]
+    # Always collected, so the cache written below is complete whichever
+    # caller loads first: a load without pas_out used to cache an empty PAS
+    # set, and every later run lost three_prime_at_pas_site_frac silently.
+    if pas_out is None:
+        pas_out = {}
     sites: dict = {}
     total = 0
     n_dropped = 0
@@ -3268,7 +3287,7 @@ def _load_numt_bed(path: str) -> dict:
     return intervals
 
 
-def _write_run_info(sm, output_dir: Path, sample_name: str) -> None:
+def _write_run_info(sm, output_dir: Path, sample_name: str, result=None) -> None:
     """
     Machine-readable provenance next to the metrics.
 
@@ -3302,6 +3321,10 @@ def _write_run_info(sm, output_dir: Path, sample_name: str) -> None:
         "tss_source":   tss.get("source"),
         "tso_sequences": tso.get("sequences"),
         "tso_source":    tso.get("source"),
+        "priming":       getattr(sm, "_priming_info", None),
+        "intergenic_reclassification_sampled": bool(
+            getattr(result, "_intergenic_reclassification_sampled", False)
+        ),
     }
     path = output_dir / f"{sample_name}.run_info.json"
     path.write_text(json.dumps(info, indent=2) + "\n")
@@ -3310,7 +3333,7 @@ def _write_run_info(sm, output_dir: Path, sample_name: str) -> None:
 
 def _write_run_outputs(sm, ct, result, output_dir: Path, sample_name: str,
                        cluster_df=None, intergenic_loci=None, platform=None) -> None:
-    _write_run_info(sm, output_dir, sample_name)
+    _write_run_info(sm, output_dir, sample_name, result)
 
     # Sample-wide metrics TSV
     metrics_path = output_dir / f"{sample_name}.read_metrics.tsv"
@@ -3327,7 +3350,8 @@ def _write_run_outputs(sm, ct, result, output_dir: Path, sample_name: str,
                  "mean_mapq", "mean_edit_distance", "softclip_base_frac",
                  "per_cell_noise_median",
                  "per_cell_noise_iqr", "n_tso_invasion", "n_polya_priming",
-                 "n_noncanon_junction", "n_tso_concatemer", "n_discordant_pair",
+                 "n_polya_tail", "n_noncanon_junction", "n_rt_switch_repeat",
+                 "n_tso_concatemer", "n_discordant_pair",
                  "n_low_mapq", "n_numt_intervals_loaded"]:
         value = getattr(sm, attr, "")
         rows.append((attr, "" if value is None else value))
@@ -3337,8 +3361,8 @@ def _write_run_outputs(sm, ct, result, output_dir: Path, sample_name: str,
         rows.append((f"base_frac_{cat_name}", f"{frac:.6f}"))
     if sm.full_length_read_frac is not None:
         rows.append(("full_length_read_frac", f"{sm.full_length_read_frac:.6f}"))
-    for attr in ["three_prime_anchored_frac", "five_prime_anchored_frac",
-                 "both_ends_anchored_frac"]:
+    for attr in ["three_prime_anchored_frac", "three_prime_at_pas_site_frac",
+                 "five_prime_anchored_frac", "both_ends_anchored_frac"]:
         value = getattr(sm, attr, None)
         if value is not None:
             rows.append((attr, f"{value:.6f}"))

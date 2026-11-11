@@ -226,6 +226,14 @@ class TestUndefinedMetricsAreAbsent:
                       "per_cell_noise_median", "per_cell_noise_iqr"):
             assert field not in data
 
+    def test_multiqc_json_keeps_rare_flag_rates(self):
+        """1,593 flagged reads in 35.8 M is 4.5e-05, not the 0.0 it was rounded to."""
+        sm = self._blank()
+        sm.n_reads_classified = 35_766_886
+        sm.n_tso_invasion = 1_593
+        data = to_multiqc_json(sm)["data"]["s"]
+        assert data["tso_invasion_frac"] == pytest.approx(1_593 / 35_766_886, rel=1e-3)
+
     def test_multiqc_json_includes_measured_fields(self):
         sm = self._blank()
         sm.unmapped_read_frac = 0.125
@@ -361,7 +369,7 @@ class TestVersionConsistency:
 
     # file -> pattern capturing the version in that file's banner
     DOC_BANNERS = {
-        "README.md": r"Version \*\*(\d+\.\d+\.\d+)\*\* deliberately avoids",
+        "README.md": r"Current version: \*\*(\d+\.\d+\.\d+)\*\*",
         "docs/documentation.md": r"Version (\d+\.\d+\.\d+) operational reference\.",
         "docs/methods_annotated.md": r"companion for version (\d+\.\d+\.\d+)\*\*",
         "docs/whitepaper.md": r"Version (\d+\.\d+\.\d+)\. This document explains",

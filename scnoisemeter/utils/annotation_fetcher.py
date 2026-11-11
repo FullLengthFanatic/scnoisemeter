@@ -125,7 +125,7 @@ _TENX_WHITELIST_URL_KEYS: dict[str, str] = {
     "10x_v4": "tenx_whitelist_v4",
 }
 
-_USER_AGENT = f"scnoisemeter/{__version__} (https://github.com/scnoisemeter)"
+_USER_AGENT = f"scnoisemeter/{__version__} (https://github.com/FullLengthFanatic/scnoisemeter)"
 
 
 def _url(key: str) -> str:

@@ -498,14 +498,10 @@ class ReadClassifier:
                 primary_q = _query_interval_from_cigar(primary_cigar)
                 sa_q = _query_interval_from_cigar(sa_cigar)
                 if primary_q and sa_q and primary_q[0] != sa_q[0]:
-                    primary_first = primary_q[0] < sa_q[0]
-                    genome_forward = primary_pos <= sa_start
-                    expected_forward = primary_strand == "+"
-                    order_ok = (
-                        genome_forward == expected_forward
-                        if primary_first
-                        else genome_forward != expected_forward
-                    )
+                    # Both CIGARs are written in reference orientation, so a
+                    # colinear split has the segment with the smaller leading
+                    # clip at the smaller coordinate on either strand.
+                    order_ok = (primary_q[0] < sa_q[0]) == (primary_pos <= sa_start)
                     if not order_ok:
                         return True, "same-contig SA with incompatible query/genomic order"
             return False, None
@@ -607,11 +603,15 @@ class ReadClassifier:
             if seq and clip_len > 0:
                 clip_seqs.append(seq[-clip_len:])
 
+        # A reverse alignment stores the read reverse-complemented, so the
+        # read's poly-G shows as poly-C in that clip.
+        polyg_run = ("C" if read.is_reverse else "G") * TSO_POLYG_MIN_LENGTH
+
         for clip in clip_seqs:
             clip_upper = clip.upper()
 
             # Poly-G check (TSO poly-G tail)
-            if self.tso_check_polyg and "G" * TSO_POLYG_MIN_LENGTH in clip_upper:
+            if self.tso_check_polyg and polyg_run in clip_upper:
                 return True
 
             # TSO sequence check (forward + reverse-complement prefixes)

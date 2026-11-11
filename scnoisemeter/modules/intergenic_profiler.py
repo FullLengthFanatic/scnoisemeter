@@ -137,7 +137,8 @@ class IntergenicLocus:
     # this separates the two.  Reported, never gated on -- see the note in
     # profile_intergenic_loci.  -1 means no UMIs were available to count.
     n_molecules:         int = -1
-    # Binomial tail for one-sidedness of the window, P(X >= dominant | n, 0.5).
+    # Two-sided binomial tail for one-sidedness of the window,
+    # P(max(n+, n-) >= dominant | n, 0.5).
     # Makes the existing strand-consistency evidence depth-aware: 3/4 and
     # 75/100 are the same fraction and very different evidence.  NaN for an
     # unstranded library, where the test would measure the protocol.
@@ -334,9 +335,10 @@ def _assign_strand_asymmetry(loci: list, *, stranded: bool) -> None:
     ``strand_fraction`` alone is depth-blind: 3 reads out of 4 and 75 out of
     100 are both 0.75, and ``STRAND_CONSISTENCY_MIN`` accepts them equally,
     though the second is overwhelming evidence and the first is what a coin
-    produces one time in three.  This reports the binomial tail
-    ``P(X >= dominant | n, 0.5)``, so the same fraction at greater depth counts
-    for more.
+    produces more often than not.  This reports the two-sided binomial tail
+    ``P(max(n+, n-) >= dominant | n, 0.5)``, so the same fraction at greater
+    depth counts for more.  Two-sided because the dominant strand is chosen
+    after looking at the counts.
 
     The null is exact and needs no decoy set.  An earlier design used the
     minority-strand counts of other windows as an empirical null; it was
@@ -358,9 +360,10 @@ def _assign_strand_asymmetry(loci: list, *, stranded: bool) -> None:
         if total <= 0:
             continue
         dominant = min(total, max(0, round(locus.strand_fraction * total)))
-        # P(X >= dominant) under Binomial(total, 0.5)
-        locus.strand_asymmetry_pvalue = float(
-            binom.sf(dominant - 1, total, 0.5)
+        # The dominant strand is whichever turned out larger, so the test is
+        # two-sided: P(max(n+, n-) >= dominant) under Binomial(total, 0.5).
+        locus.strand_asymmetry_pvalue = min(
+            1.0, 2.0 * float(binom.sf(dominant - 1, total, 0.5))
         )
 
 

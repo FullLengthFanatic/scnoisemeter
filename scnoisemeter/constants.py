@@ -316,13 +316,13 @@ POLYA_CONTEXT_WINDOW = 20   # bp of reference to inspect downstream of read end
 POLYA_SITE_PROXIMITY = 50   # bp
 
 # PolyASite 3.0 ships 18.4M records, including sites supported in as little as
-# 5.6% of samples.  Loaded unfiltered, 38.6% of the primary genome falls within
+# 5.6% of samples.  Loaded unfiltered, 37.4% of the genome falls within
 # POLYA_SITE_PROXIMITY of one, which makes "near an annotated polyA site" a
 # constant rather than a test: it vetoes INTERGENIC_HOTSPOT across a third of
 # the genome and satisfies one of the two _is_novel_gene evidence routes for
 # free.  Column 7 of the atlas BED is the percentage of samples supporting the
-# site; filtering on it restores discrimination (>=25% -> 7.6% of the genome,
-# >=50% -> 3.0%).  The default is 0.0 so that upgrading does not silently move
+# site; filtering on it restores discrimination (>=25% -> 6.3% of the genome,
+# >=50% -> 2.4%).  The default is 0.0 so that upgrading does not silently move
 # a reported number; POLYA_MIN_SUPPORT_RECOMMENDED is what to pass.
 POLYA_MIN_SUPPORT_DEFAULT = 0.0
 POLYA_MIN_SUPPORT_RECOMMENDED = 25.0
@@ -368,8 +368,8 @@ POLYA_HEXAMER_MAX_DIST = 40
 
 # Percent-A criterion for internal priming, the SQANTI3/pigeon
 # perc_A_downstream_TTS convention.  The cutoff is on a 0-100 scale: 60, not
-# 0.6.  Measured against PolyASite, this agrees with the A-run criterion on
-# ~97% of windows, so it is offered for comparability with isoform-QC numbers
+# 0.6.  This agrees with the A-run criterion on 97% of random genomic windows
+# and 95% of PolyASite sites, so it is offered for comparability with isoform-QC numbers
 # rather than as a correction.
 POLYA_PERC_A_WINDOW = 20
 POLYA_PERC_A_MIN = 60.0

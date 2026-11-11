@@ -297,6 +297,18 @@ def _check_comparability(cohort: Cohort) -> None:
             "the intergenic ones, are not directly comparable across them."
         )
 
+    priming = {
+        json.dumps(p, sort_keys=True)
+        for p in ((s.run_info or {}).get("priming") for s in cohort.samples) if p
+    }
+    if len(priming) > 1:
+        cohort.warnings.append(
+            "Samples were run with different polyA settings (--polya-min-support, "
+            "--priming-criterion or --anchor-veto-internal-priming). The intergenic "
+            "hotspot and novel categories, the internal-priming flag and 3' anchoring "
+            "are not comparable across them."
+        )
+
     if cohort.has_mixed_strandedness:
         unstranded = [s.label for s in cohort.samples if s.is_unstranded]
         cohort.warnings.append(

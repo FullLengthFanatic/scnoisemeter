@@ -142,6 +142,14 @@ class TestAtlasSupportFilter:
         assert sum(len(v) for v in pas.values()) == 2
         assert 1000 not in pas.get(("chr1", "+"), [])
 
+    def test_pas_subset_survives_an_earlier_load_without_it(self, tmp_path):
+        """discover and run-plate workers load without pas_out and write the cache."""
+        atlas = str(_write_atlas(tmp_path))
+        _load_polya_sites(atlas, chrom_style="ucsc")
+        pas: dict = {}
+        _load_polya_sites(atlas, chrom_style="ucsc", pas_out=pas)
+        assert sum(len(v) for v in pas.values()) == 2
+
     def test_default_is_off_so_upgrading_moves_no_number(self):
         assert POLYA_MIN_SUPPORT_DEFAULT == 0.0
         assert PRIMING_CRITERION_DEFAULT == "a_run"

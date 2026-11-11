@@ -47,6 +47,14 @@ from pathlib import Path
 import pysam
 import pytest
 
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path_factory, monkeypatch):
+    """Site-atlas caches go to ~/.cache/scnoisemeter; keep tests out of the real one."""
+    home = tmp_path_factory.getbasetemp() / "home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+
+
 BARCODE_CELL1 = "AAACCTGAGAAACCAT"
 BARCODE_CELL2 = "AAACCTGAGAAACCGG"
 

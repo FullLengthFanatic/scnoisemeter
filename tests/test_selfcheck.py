@@ -77,6 +77,14 @@ class TestHealthyResultSet:
         assert failures(checks, ERROR) == []
         assert failures(checks, WARNING) == []
 
+    def test_unmeasured_values_are_absent_not_violations(self, healthy):
+        """An empty category has NaN UMI diversity; every real sample has some."""
+        sm, ct = healthy
+        sm.umi_sequence_diversity["multimapper"] = float("nan")
+        sm.strand_concordance = float("nan")
+        checks = run_invariants(sm, ct, _Result())
+        assert failures(checks, ERROR) == []
+
     def test_passing_checks_are_reported_not_omitted(self, healthy):
         """A report listing only failures cannot be told from one that never ran."""
         sm, ct = healthy
