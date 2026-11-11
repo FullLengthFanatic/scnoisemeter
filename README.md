@@ -2,17 +2,27 @@
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19554841.svg)](https://doi.org/10.5281/zenodo.19554841)
 
-Barcode-aware alignment artifact and read-distribution QC for single-cell RNA-seq BAM files.
+Current version: **0.9.1**
 
-scNoiseMeter assigns each mapped primary alignment to one of 17 mutually exclusive output categories, partitions its aligned reference bases without double-counting, and reports independent artifact-evidence flags. It supports barcode-aware droplet data, barcode-free BAMs, pre/post-filter comparisons, and Smart-seq/FLASH-seq plate aggregation.
+Quality control for single-cell RNA-seq alignments. It answers two questions about a library: where do the reads land, and which of them look like technical artifacts?
 
-Version **0.9.0** deliberately avoids presenting a single category sum as a causal estimate of “technical noise.” It reports:
+You give it an aligned BAM file. scNoiseMeter puts every read into one of 17 categories (exonic, intronic, intergenic, mitochondrial, chimeric and so on), adds independent flags for known artifact signatures such as template-switch-oligo (TSO) sequence or internal polyA priming, and writes an interactive HTML report plus plain-text tables, per sample and per cell. It only describes the library. No read is removed and no count matrix is corrected.
 
-- `broad_noncanonical_*`: a descriptive composition of antisense, selected intronic and intergenic categories, hotspots, and chimeric alignments;
-- `artifact_candidate_*`: the narrower subset with positive alignment/context evidence (`intergenic_hotspot` and `chimeric`);
-- deprecated `noise_*` aliases for compatibility with existing workflows.
+It works on long reads (ONT, PacBio/Kinnex) and short reads (10x, BD Rhapsody, Smart-seq/FLASH-seq plates), with or without cell barcodes. Typical uses are checking a new library preparation, comparing protocols, and seeing what a filtering step removed.
 
-The [white paper](docs/whitepaper.md) explains the scientific model and literature context. [Annotated methods](docs/methods_annotated.md) maps the rules to code. [Full documentation](docs/documentation.md) is the operational reference. These files are intentionally separate.
+Two summary numbers lead every report:
+
+- `broad_noncanonical_*`: antisense, unspliced intronic, most intergenic, and chimeric reads taken together. Much of this can be real biology, for example pre-mRNA in nuclei.
+- `artifact_candidate_*`: the smaller part with positive evidence of an artifact (`intergenic_hotspot` and `chimeric`).
+
+Neither is a contamination estimate. Report the individual categories next to them.
+
+Where to read more:
+
+- [Full documentation](docs/documentation.md): every command, option and output column.
+- [White paper](docs/whitepaper.md): what the categories mean and what can be concluded from them.
+- [Annotated methods](docs/methods_annotated.md): which function implements which rule.
+- [Changelog](CHANGELOG.md): every release that changed a reported number.
 
 ## Installation
 
@@ -46,9 +56,15 @@ scnoisemeter run \
   --output-dir results/
 ```
 
+`--platform` is one of `ont`, `pacbio`, `illumina`, `illumina_10x`, `illumina_bd` or `smartseq`. The first run downloads a GENCODE annotation, the PolyASite 3.0 polyA-site atlas and the FANTOM5 CAGE peaks (about 330 MB in total) into `~/.cache/scnoisemeter/`; later runs reuse them. These automatic resources are human GRCh38 only. For any other genome, pass your own files (see below).
+
+Add `--reference genome.fa` (with its `.fai` index) whenever you can. Without it, the checks that need the genome sequence are skipped and report 0: internal polyA priming, non-canonical junctions, RT template-switch repeats, and the `intergenic_hotspot` category.
+
+When the run finishes, open `results/sample.report.html`. The tables behind it are listed under [Outputs](#outputs).
+
 Add `--tagged-bam results/sample.classified.bam` to make a coordinate-sorted, indexed copy with the final category in local SAM tag `sn`. The option retains read assignments in memory and performs a second BAM pass, so it is off by default.
 
-GENCODE, polyA, and TSS resources can be downloaded and cached automatically. For reproducible scientific work, provide explicit versions and strandedness:
+For reproducible work, pass every resource explicitly:
 
 ```bash
 scnoisemeter run \
@@ -72,11 +88,18 @@ Do not rely on an aligner name alone to identify the sequencer or library. `mini
 
 The interactive HTML report also covers [sample metadata](docs/report_preview1.png), [read and base fractions](docs/report_preview3.png), [length-stratified and per-cell composition](docs/report_preview4.png), [read-length distributions and artifact flags](docs/report_preview5.png), and [the top intergenic loci](docs/report_preview6.png).
 
-These screenshots come from chr17, chr19-chr22 and chrM of a 10x Kinnex sample, kept small so the previews stay current. Restricting to six contigs raises the mitochondrial share well above what the whole sample shows, so read the panels as a tour of the layout rather than as typical values.
+These screenshots come from a 10x Kinnex sample (37.4 M reads, 2,047 cells) run with version 0.8.0. A few intergenic and chimeric values differ slightly under the current version, so read the panels as a tour of the layout.
 
 ## Classification
 
-Unmapped, secondary, and supplementary records are counted separately and excluded from the genomic-category denominator. Remaining primary alignments are processed in this priority order. The historical `read_*` names mean alignment records; paired mates count separately. Version 0.7 also emits precise `n_records_*` and `n_alignments_classified` aliases.
+Unmapped, secondary, and supplementary records are counted separately and excluded from the category denominator. Every remaining primary alignment gets exactly one category, in two steps:
+
+1. Four gates are checked in order: `unassigned`, `multimapper`, `mitochondrial`, `chimeric`. The first that applies is the category.
+2. Otherwise the aligned bases are compared with the annotation, and the read takes the category that holds most of its aligned bases. Ties go to the category listed first in the table.
+
+A 1 kb unspliced read with 800 bases in an exon and 200 in the next intron is therefore `exonic_sense` as a read, while the base-level fractions record 800 exonic and 200 `intronic_boundary` bases. Read fractions and base fractions are both reported for this reason.
+
+Counts named `n_reads_*` are alignment records, so the two mates of a pair count separately. `n_records_*` and `n_alignments_classified` are the same numbers under more precise names.
 
 | Category | Interpretation |
 |---|---|
@@ -98,31 +121,31 @@ Unmapped, secondary, and supplementary records are counted separately and exclud
 | `intergenic_sparse` | Intergenic window below the enrichment/support thresholds |
 | `ambiguous` | Defensive fallback for an otherwise unresolved alignment |
 
-Aligned blocks are split at every annotation boundary. Each atomic segment receives exactly one base category, so base counts sum exactly to aligned reference bases even in complex overlaps. Same-strand gene sharing is ambiguous; overlapping genes on opposite strands remain strand-resolvable.
+For the base-level fractions, aligned blocks are split at every annotation boundary and each piece receives exactly one category, so base counts sum exactly to the aligned reference bases even where genes overlap. Same-strand gene sharing is ambiguous; overlapping genes on opposite strands remain strand-resolvable.
 
 Genomic distance by itself is not used to call an RNA split chimeric: a long gap may simply be an intron. Orphan/improper pairs are reported as `discordant_pair` flags and are not automatically called chimeric.
 
 ## Intergenic enrichment
 
-Intergenic reads are assigned by their strand-correct 3′ coordinate to predefined 500 bp windows. Using BAM contig lengths, the denominator is the exact complement of the union of gene bodies through each non-mitochondrial contig end. The profiler tests all possible windows (including empty windows) and applies a Bonferroni correction. This is a heuristic enrichment screen, not a peak caller: it does not model local background, GC content, or mappability.
+Intergenic reads are assigned by their strand-correct 3′ coordinate to predefined 500 bp windows. Using BAM contig lengths, the denominator is the exact complement of the union of gene bodies through each non-mitochondrial contig end. Each window is tested against a Poisson model with one genome-wide rate, and the Bonferroni correction counts every window of that intergenic space, including the empty ones. This is a heuristic enrichment screen, not a peak caller: it does not model local background, GC content, or mappability.
 
 Strand consistency is measured after window assignment. A window can therefore fail strand evidence rather than being split into artificial strand-specific loci. Significant unresolved windows become `intergenic_enriched`, not `intergenic_hotspot`.
 
 Each window also reports `local_read_share`: the fraction of intergenic read mass within 10 kb that the window itself holds. A globally significant count says a window exceeds the genome-wide rate; it does not say whether the window is the local event or one of many in a broadly covered neighbourhood. A share near 1 is an isolated locus; a low share is diffuse coverage that the global test still promotes.
 
-**PolyA-site density matters here, and by default it works against you.** Two rules depend on proximity to an annotated polyA site in opposite directions: `intergenic_hotspot` requires the *absence* of a nearby site, and `intergenic_novel` accepts a nearby site as one of its two positive-evidence routes. PolyASite 3.0 ships 18,432,135 records, including sites supported in 5.6% of samples at a normalised score of 6e-05. Loaded unfiltered, 38.6% of the primary genome falls within the 50 bp proximity window, so the test is closer to a constant than a discriminator: hotspots are suppressed across a third of the genome and the novel-gene route is close to free. `--polya-min-support` filters on the atlas's own per-site support column — 25 gives 7.6% of the genome, 50 gives 3.0% — and every run reports the measured density of whatever atlas it actually loaded. The default is 0 so that upgrading moves no previously reported number.
+**PolyA-site density matters here, and by default it works against you.** Two rules depend on proximity to an annotated polyA site in opposite directions: `intergenic_hotspot` requires the *absence* of a nearby site, and `intergenic_novel` accepts a nearby site as one of its two positive-evidence routes. PolyASite 3.0 ships 18,432,135 records, including sites supported in 5.6% of samples at a normalised score of 6e-05. Loaded unfiltered, 37.4% of the genome falls within the 50 bp proximity window, so the test is closer to a constant than a discriminator: hotspots are suppressed across a third of the genome and the novel-gene route is close to free. `--polya-min-support` filters on the atlas's own per-site support column: 25 leaves 6.3% of the genome within the window and 50 leaves 2.4%. Every run reports the measured density of the atlas it loaded. The default is 0 (no filtering); 25 is the recommended value.
 
 For datasets larger than the 500,000-record intergenic reservoir, promoted read/base totals are estimated from a uniform reservoir. UMI-diversity fields for affected categories are emitted as missing because exact category-specific UMI sets cannot be reconstructed from a sample.
 
-The Poisson test itself also runs on that reservoir, not only the totals derived from it: both the background rate and the per-window counts come from the sampled records. A sample well above the cap is therefore tested at reduced depth and a sample below it at full depth, so promotion to `intergenic_hotspot` or `intergenic_novel` is depth-dependent. `<sample>.run_info.json` records whether reclassification was reservoir-estimated; treat these two categories as not directly rankable across samples of very different intergenic depth. The Bonferroni denominator counts the windows actually tested — the intergenic complement, derived from the same base total as the background rate. Before 0.9 it counted every 500 bp window of every non-mitochondrial contig, a 2.2–2.9x overcorrection on GRCh38 that suppressed real promotions, so intergenic category counts are not comparable across that boundary.
+The Poisson test itself also runs on that reservoir, not only the totals derived from it: both the background rate and the per-window counts come from the sampled records. A sample well above the cap is therefore tested at reduced depth and a sample below it at full depth, so promotion to `intergenic_hotspot` or `intergenic_novel` is depth-dependent. `<sample>.run_info.json` records whether reclassification was reservoir-estimated; treat these two categories as not directly rankable across samples of very different intergenic depth. Intergenic category counts from versions before 0.9 used a larger correction and are not comparable (see the [changelog](CHANGELOG.md)).
 
 ## Independent evidence flags
 
 Flags do not change the mutually exclusive read category:
 
-- TSO invasion: approximate prefix match at the molecularly appropriate soft-clipped end; one substitution is tolerated.
+- TSO invasion: the start of the template-switch oligo found in the soft-clipped 5′ end of the read; one substitution is tolerated.
 - TSO concatemer: multiple approximate full-motif occurrences.
-- Internal polyA priming: downstream A-run on `+` or upstream T-run on `-`; requires a reference FASTA. This describes the *locus* in the reference, not the molecule: measured against PolyASite, median downstream A-content is 25% both at annotated polyA sites and at random genomic positions, so the genomic test alone barely separates them. `--priming-criterion perc_a` switches to the SQANTI3/pigeon `perc_A_downstream_TTS` convention (≥60% A over 20 bp); the two agree on roughly 97% of windows, so the choice is about comparability with isoform-QC numbers rather than correctness.
+- Internal polyA priming: downstream A-run on `+` or upstream T-run on `-`; requires a reference FASTA. This describes the *locus* in the reference, not the molecule: measured against PolyASite, median downstream A-content is 30% both at annotated polyA sites and at random genomic positions, so the genomic test alone barely separates them. `--priming-criterion perc_a` switches to the SQANTI3/pigeon `perc_A_downstream_TTS` convention (≥60% A over 20 bp); the two agree on roughly 95 to 97% of windows, so the choice is about comparability with isoform-QC numbers rather than correctness.
 - Untemplated 3′ polyA tail: an A-run in the read's own 3′ **soft** clip, outside the aligned block, so it is not templated by the reference — per-molecule evidence that this read carried a tail. A read flagged for both internal priming and a tail is a real cleavage site in an A-rich context. Reported as `polya_tail_frac`. Hard-clipped BAMs report no tail, because the bases are absent from the record rather than absent from the molecule.
 - Non-canonical junction: exact donor and acceptor checked in transcript orientation; exact annotated junctions are accepted.
 - RT template-switch direct repeat: the two ends of one intron share a direct repeat of at least 6 bp, which reverse transcriptase can duplicate by switching template between the copies. Independent of canonicality — an RT artifact can sit on a GT-AG boundary and is invisible to the motif check. Genuine junctions in repetitive sequence also carry direct repeats, so this is evidence, never a category. Reported as `rt_switch_repeat_frac`; requires a reference FASTA.
@@ -221,14 +244,16 @@ Barcode-free well BAMs are relabeled to `<plate>_<well>` before aggregation, pre
 | `<sample>_length_stratified.tsv` | Exact category counts by length bin |
 | `<sample>.length_distributions/` | Reservoir-sampled read lengths by category |
 | `<sample>.cluster_metrics.tsv` | Optional summaries from `--obs-metadata` |
-| `<sample>.multiqc.json` | MultiQC-compatible scalar content |
+| `<sample>.multiqc.json` | MultiQC-compatible scalar content, including each artifact flag as a rate (`*_frac`) |
 | `<sample>.report.html` | Interactive report |
 | user path from `--tagged-bam` | Optional full BAM copy; classified primaries carry `sn:Z:<category>` |
 | `comparison.retention.tsv` | Category-specific exact read retention |
 | `comparison.transitions.tsv` | Category A→B transitions for matched read keys |
 | `comparison.matching.tsv` | Overall matching counts |
 | `comparison.stats.tsv` | Composition deltas and paired-cell bootstrap intervals |
-| `<sample>.run_info.json` | Tool version, platform, strandedness and annotation sources for this run |
+| `comparison.metrics.tsv` | Scalar metrics of both BAMs side by side |
+| `comparison.report.html` | Interactive comparison report |
+| `<sample>.run_info.json` | Tool version, platform, strandedness, annotation sources and the settings that change what a number means |
 | `<sample>.qc.json` | Every structural invariant checked over this result set, its verdict and the observed values |
 | `cohort.summary.tsv` | One row per sample: provenance and headline metrics |
 | `cohort.composition.tsv` | Samples x categories, read and base fractions |
@@ -238,11 +263,11 @@ Barcode-free well BAMs are relabeled to `<plate>_<well>` before aggregation, pre
 
 ## Result invariants
 
-The test suite proves the code behaves on constructed inputs. Separately, every run checks whether *this* result set satisfies the properties the tool claims about its own output, and writes them to `<sample>.qc.json` with the observed values rather than a bare verdict.
+The test suite proves the code behaves on constructed inputs. Separately, every `scnoisemeter run` checks whether *this* result set satisfies the properties the tool claims about its own output, and writes them to `<sample>.qc.json` with the observed values rather than a bare verdict.
 
 The claims being checked are structural rather than statistical, which is what makes them checkable: each composition sums to one, every fraction lies in [0, 1], the artifact-candidate composition cannot exceed the broad non-canonical one because its categories are a subset, `both_ends_anchored_frac` cannot exceed either single-end fraction because it is their conjunction on the same reads, no artifact-flag count exceeds the denominator it is reported over, unique UMI strings cannot outnumber the reads carrying them, and `n_cells` matches the per-cell table.
 
-A violation means a number about to be written is wrong, so the run stops; `--no-strict` writes the outputs anyway and records the violation. Two checks are warnings rather than errors because a documented configuration can break them: reservoir-estimated intergenic reclassification scales promoted totals from a uniform sub-sample, so exact conservation is not expected to survive rounding, and `--anchor-veto-internal-priming` vetoes the unrestricted 3'-anchoring fraction but not the PAS-restricted subset.
+A violation means a number about to be written is wrong, so the run stops; `--no-strict` writes the outputs anyway and records the violation. Two checks are warnings rather than errors because a documented configuration can break them: reservoir-estimated intergenic reclassification scales promoted totals from a uniform sub-sample, so exact conservation is not expected to survive rounding, and `--anchor-veto-internal-priming` vetoes the unrestricted 3'-anchoring fraction but not the PAS-restricted subset. `compare`, `discover` and `run-plate` do not run these checks.
 
 ## Scope and limitations
 
