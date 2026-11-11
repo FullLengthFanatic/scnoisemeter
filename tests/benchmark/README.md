@@ -7,7 +7,7 @@ dose-response table suitable as a methods-paper supplementary figure.
 
 ## Coverage
 
-**Exp 1 — per-read classifier accuracy (16 of 19 ReadCategory values).**
+**Exp 1 — per-read classifier accuracy (16 of the 17 output categories).**
 
 Simple categories (one CB, 200 reads each):
 
@@ -28,7 +28,7 @@ significance, so each category ships three collaborating CBs:
 
 **Exp 2 — per-cell noise-fraction fidelity.** Five synthetic cells with
 known signal (EXONIC_SENSE) + noise mixtures. True noise fraction sweeps
-0 → 55 %. Compared against the reported `noise_read_frac`.
+0 → 55 %. Compared against the reported `broad_noncanonical_read_frac`.
 
 **Exp 4 — artifact-flag counters.** Two dedicated cells emit reads designed
 to trip the TSO-invasion and polyA-priming flags respectively (200 reads
@@ -37,9 +37,11 @@ each). Validated against per-cell `n_tso` / `n_polya` counters in
 
 **Exp 5 — Illumina paired-end chimeric detection.** A small separate BAM
 (`synthetic_illumina.bam`, 400 reads, 4 CBs) exercises the paired-end
-chimeric branch (`_check_chimeric_paired`) via three mechanisms: mate on
-a different contig, FR/RR discordance, and oversized TLEN
-(> ILLUMINA_CHIMERIC_INSERT_SIZE). Scored with `--platform illumina_10x`.
+chimeric branch (`_check_chimeric_paired`) via two mechanisms: mate on
+a different contig and oversized TLEN (> ILLUMINA_CHIMERIC_INSERT_SIZE).
+A third cell holds orphan reads (mate unmapped), which must stay
+`exonic_sense`: an orphan is a discordant-pair flag, not a chimera.
+Scored with `--platform illumina_10x`.
 
 ## What it does NOT validate
 
@@ -107,18 +109,24 @@ category).
   for clustered intergenic categories (HOTSPOT/NOVEL/REPEAT depend on Poisson
   significance thresholds that can reclassify borderline loci as SPARSE).
   Lower values indicate a classifier regression or an ambiguous synthetic
-  construction.
-- Ties in base counts resolve by Python dict insertion order — the synthesizer
-  uses a 30/70 exon/intron split for INTRONIC_BOUNDARY reads so argmax is
-  unambiguous.
+  construction. Three categories sit a little lower by construction: some
+  synthetic exonic reads land in exons shared by two same-strand genes and are
+  correctly reported as `ambiguous_cod_*`, which costs EXONIC_SENSE,
+  EXONIC_ANTISENSE and INTRONIC_BOUNDARY a few percent each (0.92 to 0.93 with
+  GENCODE v45).
+- The runner passes `--polya-min-support 25`. With the unfiltered default
+  atlas, 6 of the 10 synthetic hotspot loci on chr22 lie within 50 bp of a
+  PolyASite record and are reported as INTERGENIC_NOVEL.
+- The synthesizer uses a 30/70 exon/intron split for INTRONIC_BOUNDARY reads so
+  the base majority is unambiguous.
 - **`delta_vs_true`** in the dose-response should be within ± 0.02 at every
   mixture level. Larger deltas at higher noise fractions usually trace back
   to a single category misclassification compounding across the mixture.
 - **Artifact-flag counts** (Exp 4) should match the expected count exactly
   for the target flag and stay near zero on the other flag.
-- **Illumina chimeric** (Exp 5) should be >= 0.95 on each of the three
-  chimeric variants (inter-chromosomal, discordant orientation, oversized
-  TLEN) and on CONCORDANT → EXONIC_SENSE.
+- **Illumina chimeric** (Exp 5) should be >= 0.95 on both chimeric variants
+  (inter-chromosomal, oversized TLEN), and the concordant and orphan cells
+  should stay EXONIC_SENSE.
 
 ## Not yet covered
 

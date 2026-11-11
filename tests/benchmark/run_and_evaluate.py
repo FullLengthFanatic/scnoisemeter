@@ -95,7 +95,10 @@ def parse_args():
 
 
 def _common_run_flags(args):
-    flags = []
+    # Unfiltered, the auto-downloaded PolyASite atlas sits within 50 bp of most
+    # A-rich synthetic loci and relabels them from hotspot to novel, so the run
+    # would score the atlas density rather than the classifier.
+    flags = ["--polya-min-support", "25"]
     if args.barcode_whitelist:
         flags.extend(["--barcode-whitelist", args.barcode_whitelist])
     else:
@@ -105,7 +108,7 @@ def _common_run_flags(args):
 
 def run_scnoisemeter(args):
     cmd = [
-        "python3", "-m", "scnoisemeter.cli", "run",
+        sys.executable, "-m", "scnoisemeter.cli", "run",
         "--bam", args.bam,
         "--gtf", args.gtf,
         "--reference", args.fasta,
@@ -122,7 +125,7 @@ def run_scnoisemeter(args):
 
 def run_scnoisemeter_illumina(args, sample_name: str = "synthetic_illumina"):
     cmd = [
-        "python3", "-m", "scnoisemeter.cli", "run",
+        sys.executable, "-m", "scnoisemeter.cli", "run",
         "--bam", args.illumina_bam,
         "--gtf", args.gtf,
         "--reference", args.fasta,

@@ -671,7 +671,12 @@ def synthesize_illumina_bam(outdir, header, ref_id, picks, refs):
                 raise ValueError(f"unknown Illumina category: {cat}")
 
             reads.append(r)
-            true_cat = "EXONIC_SENSE" if cat == "ILLUMINA_CONCORDANT" else "CHIMERIC"
+            # An orphan mate is a discordant-pair flag, not a chimera.
+            true_cat = (
+                "EXONIC_SENSE"
+                if cat in ("ILLUMINA_CONCORDANT", "ILLUMINA_DISCORDANT")
+                else "CHIMERIC"
+            )
             ground_truth.append((name, cb, true_cat, f"exp5;variant={cat.lower()}"))
 
     reads.sort(key=lambda r: (r.reference_id, r.reference_start))
