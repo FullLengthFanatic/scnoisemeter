@@ -66,7 +66,7 @@ Sources: `classifier.py`, `pipeline.py`, and `metrics.py`.
 - `n_qcfail`;
 - `n_duplicate`.
 
-`run_pipeline()` reads `.bai` statistics for mapped/unmapped totals and processes every reference with mapped records. No 1 Mb contig-size exclusion is used, so mitochondrial, viral, spike-in, decoy, and small-scaffold alignments are not silently dropped.
+`run_pipeline()` reads `.bai` statistics for mapped/unmapped totals and processes every reference with mapped records. No 1 Mb contig-size exclusion is used, so mitochondrial, viral, spike-in, decoy, and small-scaffold alignments are not silently dropped. `SampleResult.reference_checks_ran` is false when no reference FASTA was given or it could not be opened. `compute_metrics()` then sets `n_polya_priming`, `n_noncanon_junction` and `n_rt_switch_repeat` to `None`, drops `intergenic_hotspot` from the sample fractions and empties the matching per-cell columns, so every writer leaves them blank instead of 0.
 
 `SampleMetrics.n_records_total` is mapped plus unmapped from the index. Category fractions use classified mapped-primary alignments. `unmapped_read_frac` uses unmapped/total. Historical `n_reads_*` and `read_frac_*` labels remain compatibility aliases; paired mates are separate alignment records.
 
@@ -212,7 +212,7 @@ The repeat label is an annotation class and does not require Poisson enrichment.
 
 `_check_barcode_gate()` compares `n_reads_unassigned / n_reads_classified` against `UNASSIGNED_GATE_WARN`, only when `meta.barcode_aware is True`. Counters that are not numbers are skipped via `_as_number()` rather than raised on: the guard runs before every report and must not be what fails a valid run.
 
-`modules/selfcheck.py` runs the result invariants and writes `<sample>.qc.json` (called from `run`). A NaN value is an unmeasured metric and is skipped like a missing one. `run_invariants()` returns passing and failing checks alike; `failures()` filters by severity; the whole block is wrapped at the call site so a defect in the checking code cannot fail an otherwise valid analysis. Severity is `ERROR` except where a documented configuration legitimately breaks the property — reservoir-estimated reclassification for the conservation checks, and the anchoring veto for the PAS-subset check.
+`modules/selfcheck.py` runs the result invariants and writes `<sample>.qc.json` (called from `run`, `compare`, `discover` and `run-plate`). A NaN value is an unmeasured metric and is skipped like a missing one. `run_invariants()` returns passing and failing checks alike; `failures()` filters by severity; the whole block is wrapped at the call site so a defect in the checking code cannot fail an otherwise valid analysis. Severity is `ERROR` except where a documented configuration legitimately breaks the property — reservoir-estimated reclassification for the conservation checks, and the anchoring veto for the PAS-subset check.
 
 ## 8. End anchoring
 
@@ -303,6 +303,8 @@ Explicit platform hints have priority. Minimap2 alone maps to `unknown`; bare ST
 - `tests/test_selfcheck.py`: one corruption per invariant, each asserted to fire by name, and a
   healthy result set that trips none of them.
 - `tests/test_cli_run.py`: `scnoisemeter run` through the real command line on the tiny fixtures: it completes, writes the documented files, records the priming settings, and stops when `--cell-barcodes` matches nothing.
+- `tests/test_cli_other_commands.py`: `compare`, `discover` and `run-plate` through the real command line: each completes, writes the documented files and its `qc.json`; `compare` stops when the whitelist matches no barcode; parallel and serial plate runs report the same metrics.
+- `tests/test_reference_dependent_blanks.py`: without `--reference`, or with a FASTA that cannot be opened, the genome-dependent counts are blank and the hotspot fractions absent in every output; with a reference they are numbers.
 - `.github/workflows/tests.yml`: Python 3.10-3.13 CI with Ruff (pinned) and pytest.
 
 `tests/benchmark/` builds a synthetic BAM with known per-read truth and scores the classifier

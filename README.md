@@ -58,7 +58,7 @@ scnoisemeter run \
 
 `--platform` is one of `ont`, `pacbio`, `illumina`, `illumina_10x`, `illumina_bd` or `smartseq`. The first run downloads a GENCODE annotation, the PolyASite 3.0 polyA-site atlas and the FANTOM5 CAGE peaks (about 330 MB in total) into `~/.cache/scnoisemeter/`; later runs reuse them. These automatic resources are human GRCh38 only. For any other genome, pass your own files (see below).
 
-Add `--reference genome.fa` (with its `.fai` index) whenever you can. Without it, the checks that need the genome sequence are skipped and report 0: internal polyA priming, non-canonical junctions, RT template-switch repeats, and the `intergenic_hotspot` category.
+Add `--reference genome.fa` (with its `.fai` index) whenever you can. Without it, the checks that need the genome sequence do not run and their values are left blank instead of 0: internal polyA priming, non-canonical junctions, RT template-switch repeats, and the `intergenic_hotspot` category.
 
 When the run finishes, open `results/sample.report.html`. The tables behind it are listed under [Outputs](#outputs).
 
@@ -263,11 +263,11 @@ Barcode-free well BAMs are relabeled to `<plate>_<well>` before aggregation, pre
 
 ## Result invariants
 
-The test suite proves the code behaves on constructed inputs. Separately, every `scnoisemeter run` checks whether *this* result set satisfies the properties the tool claims about its own output, and writes them to `<sample>.qc.json` with the observed values rather than a bare verdict.
+The test suite proves the code behaves on constructed inputs. Separately, `run`, `compare`, `discover` and `run-plate` each check whether *this* result set satisfies the properties the tool claims about its own output, and writes them to `<sample>.qc.json` with the observed values rather than a bare verdict.
 
 The claims being checked are structural rather than statistical, which is what makes them checkable: each composition sums to one, every fraction lies in [0, 1], the artifact-candidate composition cannot exceed the broad non-canonical one because its categories are a subset, `both_ends_anchored_frac` cannot exceed either single-end fraction because it is their conjunction on the same reads, no artifact-flag count exceeds the denominator it is reported over, unique UMI strings cannot outnumber the reads carrying them, and `n_cells` matches the per-cell table.
 
-A violation means a number about to be written is wrong, so the run stops; `--no-strict` writes the outputs anyway and records the violation. Two checks are warnings rather than errors because a documented configuration can break them: reservoir-estimated intergenic reclassification scales promoted totals from a uniform sub-sample, so exact conservation is not expected to survive rounding, and `--anchor-veto-internal-priming` vetoes the unrestricted 3'-anchoring fraction but not the PAS-restricted subset. `compare`, `discover` and `run-plate` do not run these checks.
+A violation means a number about to be written is wrong, so the run stops; `--no-strict` writes the outputs anyway and records the violation. Two checks are warnings rather than errors because a documented configuration can break them: reservoir-estimated intergenic reclassification scales promoted totals from a uniform sub-sample, so exact conservation is not expected to survive rounding, and `--anchor-veto-internal-priming` vetoes the unrestricted 3'-anchoring fraction but not the PAS-restricted subset.
 
 ## Scope and limitations
 

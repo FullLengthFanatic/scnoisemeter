@@ -5,6 +5,39 @@ detected can move a reported value by orders of magnitude, so `cohort` refuses
 to pool result sets silently across versions. Any release that alters a
 reported number says so here.
 
+## Unreleased
+
+### Reported values that change
+
+- **Without `--reference`, the genome-dependent checks are blank, not 0.**
+  Internal priming, non-canonical junctions, RT-switch repeats and the
+  intergenic hotspot call all read the genome sequence. Without a reference
+  they never ran, and 0 read as "measured, none found". `n_polya_priming`,
+  `n_noncanon_junction` and `n_rt_switch_repeat` are now blank in
+  `read_metrics.tsv` and `per_well_metrics.tsv`. `polya_priming_frac`,
+  `rt_switch_repeat_frac` and the `intergenic_hotspot` fractions are left out
+  of `read_metrics.tsv` and `multiqc.json`. The per-cell columns `n_polya`,
+  `n_noncanon` and `*_frac_intergenic_hotspot` are empty, `compare` writes no
+  hotspot share, and the report labels the two flag bars as not measured. A
+  FASTA that cannot be opened is treated the same way. Runs with a reference
+  are unchanged, and `cohort` already read a blank as absent.
+
+### Changed
+
+- **`compare`, `discover` and `run-plate` run the pre-write checks.** Only
+  `run` checked the barcode gate and the result invariants. `compare` with a
+  whitelist that matched no barcode finished with empty tables. All three now
+  run both checks and write `qc.json`: `compare` per label, `run-plate` per
+  plate. `discover` reports a failing BAM as failed, carries on with the
+  rest, and gains `--no-strict`.
+
+### Tests
+
+- `tests/test_cli_other_commands.py` runs `compare`, `discover` and
+  `run-plate` through the real command line. Before, only `run` was.
+- `tests/test_reference_dependent_blanks.py` covers the blank values in every
+  output, with and without a reference.
+
 ## 0.9.1 - 2026-11-12
 
 ### Fixed

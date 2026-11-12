@@ -89,7 +89,7 @@ Without a whitelist or CB tag, reads pool under `NO_BARCODE`; sample-level metri
 - donor-plus-acceptor splice-motif checks;
 - intergenic hotspot context.
 
-The FASTA must match the BAM assembly and have an `.fai` index. Without `--reference` these checks are skipped and report 0 (`n_polya_priming`, `n_noncanon_junction`, `n_rt_switch_repeat`, `intergenic_hotspot`), which means the check did not run.
+The FASTA must match the BAM assembly and have an `.fai` index. Without `--reference` these checks do not run, and their outputs are left empty instead of 0. `n_polya_priming`, `n_noncanon_junction` and `n_rt_switch_repeat` are blank in `read_metrics.tsv` and `per_well_metrics.tsv`. `polya_priming_frac`, `rt_switch_repeat_frac` and the `intergenic_hotspot` fractions are left out of `read_metrics.tsv` and `multiqc.json`. The per-cell columns `n_polya`, `n_noncanon` and `*_frac_intergenic_hotspot` are empty. Reads that a hotspot call would have claimed stay in the other intergenic categories, so the composition still sums to one. A FASTA that cannot be opened is treated the same way.
 
 ### Repeat, polyA, TSS, and NUMT resources
 
@@ -245,7 +245,7 @@ scnoisemeter discover \
   --run-all
 ```
 
-Without `--run-all`, discovery displays inferred metadata and prompts for a subset. The annotation and site resources are reused across BAMs. Inference warnings should be resolved with explicit settings when protocol details are known.
+Without `--run-all`, discovery displays inferred metadata and prompts for a subset. The annotation and site resources are reused across BAMs. Inference warnings should be resolved with explicit settings when protocol details are known. A BAM whose result set fails the pre-write checks (§9a) is listed as failed and its outputs are not written; `--no-strict` writes them anyway.
 
 ## 8. `run-plate`
 
@@ -282,7 +282,7 @@ Barcode-free well results are relabeled to `<PlateID>_<WellID>` before merging. 
 
 ## 9a. Checks that stop a run
 
-Three checks run in `run` before any output is written. Each can be downgraded to a warning with `--no-strict`, which writes the outputs and records the violation instead. `compare` applies the site-atlas check only; `discover` and `run-plate` apply none of the three.
+Three checks run before any output is written. Each can be downgraded to a warning with `--no-strict`, which writes the outputs and records the violation instead. `run` applies all three, and so does `compare`, to each of its two BAMs. `discover` and `run-plate` apply the barcode gate and the result invariants, not the site-atlas coordinate check. In `discover` a BAM that fails is reported as failed and the remaining BAMs still run.
 
 **Barcode gate.** If more than half of classified reads carry no usable cell barcode on a barcode-aware BAM, the run stops and prints the observed counts, the resulting cell count and the header-scan tag fraction. Previously the run finished and reported a sample with a handful of cells and an unremarkable composition — a configuration error arriving disguised as a finding. Barcode-free BAMs are exempt, where 100% unassigned is the design.
 
@@ -411,7 +411,7 @@ written full of NaN.
 
 ### `<sample>.qc.json`
 
-Every structural invariant checked over this result set, with its verdict, its statement and the observed values. Written by every `run`, including runs where all checks pass — a file listing only failures cannot be distinguished from one whose checks never ran.
+Every structural invariant checked over this result set, with its verdict, its statement and the observed values. Written by `run` and `discover` per sample, by `compare` per label (`<label>.qc.json`) and by `run-plate` per plate, including when all checks pass: a file listing only failures cannot be distinguished from one whose checks never ran.
 
 ### `<sample>.run_info.json`
 
