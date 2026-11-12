@@ -1105,8 +1105,10 @@ _BASE_CATEGORY_PRIORITY = [
     ("shared_cod_cod", ReadCategory.AMBIGUOUS_COD_COD),
     ("shared_cod_ncod", ReadCategory.AMBIGUOUS_COD_NCOD),
     ("exon_sense", ReadCategory.EXONIC_SENSE),
-    ("exon_anti", ReadCategory.EXONIC_ANTISENSE),
+    # A gene on the read's own strand explains the base before one on the
+    # other strand does: unspliced RNA of the host gene needs no artifact.
     ("intron_sense", ReadCategory.INTRONIC_PURE),
+    ("exon_anti", ReadCategory.EXONIC_ANTISENSE),
     ("intron_anti", ReadCategory.INTRONIC_PURE),
 ]
 

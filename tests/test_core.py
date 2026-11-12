@@ -198,7 +198,7 @@ class TestAtomicBasePartition:
             "shared_cod_ncod": self._intervals((35, 55)),
             "exon_sense": self._intervals((0, 70)),
             "exon_anti": self._intervals((50, 90)),
-            "intron_sense": self._intervals((65, 100)),
+            "intron_sense": self._intervals((80, 100)),
             "intron_anti": empty,
         }
         counts = _partition_block(intervals, 0, 100)
@@ -206,8 +206,8 @@ class TestAtomicBasePartition:
         assert counts[ReadCategory.AMBIGUOUS_COD_COD] == 20
         assert counts[ReadCategory.AMBIGUOUS_COD_NCOD] == 15
         assert counts[ReadCategory.EXONIC_SENSE] == 35
-        assert counts[ReadCategory.EXONIC_ANTISENSE] == 20
-        assert counts[ReadCategory.INTRONIC_PURE] == 10
+        assert counts[ReadCategory.EXONIC_ANTISENSE] == 10
+        assert counts[ReadCategory.INTRONIC_PURE] == 20
 
 
 class TestPipelineAggregationCorrections:
