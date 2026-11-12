@@ -5,6 +5,94 @@ detected can move a reported value by orders of magnitude, so `cohort` refuses
 to pool result sets silently across versions. Any release that alters a
 reported number says so here.
 
+## 0.9.1 - 2026-11-12
+
+### Fixed
+
+- **`run` stopped on almost every barcode-aware BAM.** The 0.9.0 invariant
+  check read NaN as a value outside [0, 1]. A category that no cell has reads
+  in has no UMI diversity, which is NaN: `multimapper` on any `minimap2` or
+  `pbmm2` BAM, `unassigned` without a whitelist. The run ended with
+  "structural invariant(s) of this result set do not hold" and wrote only
+  `qc.json`. NaN is now treated as an unmeasured value, like a missing one.
+  The same applied to `strand_concordance` in a sample with no exonic reads.
+  A new test runs `scnoisemeter run` through the real command line, which
+  nothing did before.
+- **`--cell-barcodes` matching nothing finished with all-zero outputs.** The
+  guard compared a counter that includes filtered reads, so it never fired.
+  The run now stops with the intended message.
+- **`three_prime_at_pas_site_frac` could go missing without a message.**
+  `discover` and parallel `run-plate` workers loaded the polyA atlas without
+  its hexamer subset and cached the result, and every later `run` was served
+  that cache. The subset is now always collected and old caches are ignored.
+- **`run-plate` accepted settings it did not apply.** With
+  `--parallel-wells`, `--priming-criterion` fell back to `a_run` and the
+  workers loaded the atlas unfiltered; `--anchor-veto-internal-priming` and the
+  PAS-restricted anchoring were ignored on both paths. `run_info.json` recorded
+  all of them as applied.
+- `n_polya_tail`, `n_rt_switch_repeat` and `three_prime_at_pas_site_frac` were
+  computed but never written to `read_metrics.tsv`.
+- `run_info.json` did not contain the `priming` block that 0.9.0 documented,
+  and `cohort` did not compare it. Both now happen, and `run_info.json` also
+  records `intergenic_reclassification_sampled`.
+- `discover` declared `--tss-sites` twice, which printed a warning on every
+  call.
+- The report footer and the download User-Agent named a repository URL that is
+  not this project's.
+- The repository had no `LICENSE` file although it is declared MIT. Added.
+- Tests wrote site-atlas caches into the real `~/.cache/scnoisemeter`;
+  `tests/test_integration.py` failed to import once a dependency shipped a
+  top-level `tests` package; the benchmark runner used whichever `python3` was
+  first on `PATH`, and one of its ground-truth labels predated 0.7.
+
+### Reported values that change
+
+- **`--polya-min-support` defaults to 25.** Through 0.9.0 the polyA atlas was
+  loaded whole, which puts 37.4% of the genome within 50 bp of a site. In the
+  synthetic benchmark that setting reported 6 of 10 internal-priming loci as
+  `intergenic_novel`; with 25 all 10 are `intergenic_hotspot`. Expect
+  `intergenic_hotspot` to rise, `intergenic_novel` and
+  `three_prime_anchored_frac` to fall. Pass `--polya-min-support 0` to
+  reproduce earlier results. An atlas without a support column is unaffected.
+- **Chimeric calls on the minus strand.** For a split alignment on the same
+  contig and strand, the query-order test assumed read orientation while both
+  CIGARs are written in reference orientation. On the minus strand a colinear
+  split (a long intron the aligner broke in two) was called `chimeric` and an
+  order-inverted one was not. Verified against `minimap2` output. On chr21 of
+  the Kinnex example, 591 minus-strand reads lose the call and 1,076 gain it
+  (of 7,744 with an `SA` tag); the plus strand is unchanged, and the chimeric
+  share of that contig moves from 3.49% to 3.58%. `chimeric_read_frac` and
+  `artifact_candidate_*` move accordingly.
+- **TSO poly-G shortcut on reverse alignments.** A reverse alignment stores
+  the read reverse-complemented, so its poly-G is a poly-C in the clip. The
+  shortcut looked for G on both strands. `n_tso_invasion` changes for
+  reverse-strand reads wherever the shortcut is on (the built-in 10x motif).
+- **`strand_asymmetry_pvalue` is two-sided.** The dominant strand is chosen
+  after counting, so the one-sided tail reported in 0.9.0 was half the correct
+  value: 3 of 4 reads is p = 0.625, not 0.31. The column still gates nothing.
+- **Artifact-flag rates in `multiqc.json`** keep eight decimals. Four decimals
+  wrote a measured 4.5e-05 (1,593 reads) as 0.0.
+
+### Corrected
+
+Numbers quoted in the 0.9.0 documentation, help text and the entry below,
+re-derived from the PolyASite 3.0 GENCODE 42 atlas and GRCh38:
+
+- Share of the genome within 50 bp of an atlas site: 37.4% unfiltered, 6.3% at
+  `--polya-min-support 25`, 2.4% at 50 (was 38.6%, 7.6%, 3.0%). These are the
+  values the tool itself measures and logs.
+- Median A-content of the 20 bp downstream of a site: 30% at annotated polyA
+  sites and 30% at random genomic positions (was 25% and 25%).
+- `a_run` and `perc_a` agree on 97% of random genomic windows and 95% of
+  atlas sites (was "~97%").
+- PolyASite 3.0 holds 18.4 M records; the `--polya-db` help said ~569 k.
+- The README described the report screenshots as a six-contig subset. They
+  show the whole sample (37.4 M reads), run with 0.8.0.
+- White paper: the worked read is 940 bp long and spans 1,240 bp; removing its
+  `N` leaves it `exonic_sense` because a read takes the category holding most
+  of its aligned bases, which the category table now says instead of
+  "≥1 aligned base"; `exonic_sense` in the example run is 64.76%.
+
 ## 0.9.0 - 2026-09-10
 
 Two settings
@@ -150,7 +238,7 @@ flag is passed. All of them are recorded under a `priming` key in
   What was genuinely broken, and what the 0.8.1 change actually fixes, is
   narrower:
 
-  - a **user-supplied Ensembl-named BED** (`--polya-bed` / `--tss-bed`) against
+  - a **user-supplied Ensembl-named BED** (`--polya-sites` / `--tss-sites`) against
     a UCSC-named BAM. The old helper only ever stripped a `chr` prefix, so
     nothing rewrote in that direction and every lookup missed while the dict
     stayed non-empty — the silent-zero failure, but confined to users supplying

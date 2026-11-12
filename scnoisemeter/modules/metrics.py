@@ -737,12 +737,13 @@ def to_multiqc_json(sm: SampleMetrics) -> dict:
         "n_reads_classified":       sm.n_reads_classified,
         "n_records_total":          sm.n_records_total,
         "n_alignments_classified":  sm.n_alignments_classified,
-        "tso_invasion_frac":        round(sm.n_tso_invasion    / (sm.n_reads_classified or 1), 4),
-        "polya_priming_frac":       round(sm.n_polya_priming   / (sm.n_reads_classified or 1), 4),
-        "polya_tail_frac":          round(sm.n_polya_tail      / (sm.n_reads_classified or 1), 4),
-        "rt_switch_repeat_frac":    round(sm.n_rt_switch_repeat / (sm.n_reads_classified or 1), 4),
-        "tso_concatemer_frac":      round(sm.n_tso_concatemer  / (sm.n_reads_classified or 1), 4),
-        "discordant_pair_frac":     round(sm.n_discordant_pair / (sm.n_reads_classified or 1), 4),
+        # Flag rates span 1e-6 to 1e-2; four decimals rounded real counts to 0.0.
+        "tso_invasion_frac":        round(sm.n_tso_invasion    / (sm.n_reads_classified or 1), 8),
+        "polya_priming_frac":       round(sm.n_polya_priming   / (sm.n_reads_classified or 1), 8),
+        "polya_tail_frac":          round(sm.n_polya_tail      / (sm.n_reads_classified or 1), 8),
+        "rt_switch_repeat_frac":    round(sm.n_rt_switch_repeat / (sm.n_reads_classified or 1), 8),
+        "tso_concatemer_frac":      round(sm.n_tso_concatemer  / (sm.n_reads_classified or 1), 8),
+        "discordant_pair_frac":     round(sm.n_discordant_pair / (sm.n_reads_classified or 1), 8),
     }
     # Add per-category read fractions
     for cat_name, frac in sm.read_fracs.items():

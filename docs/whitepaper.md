@@ -2,7 +2,7 @@
 
 **A barcode-aware alignment artifact and read-distribution QC framework for single-cell RNA-seq**
 
-Version 0.9.0. This document explains the scientific position of scNoiseMeter: what the
+Version 0.9.1. This document explains the scientific position of scNoiseMeter: what the
 categories mean, why they are drawn where they are, and what a reader should and should not
 conclude from the numbers. For implementation details see
 [methods_annotated.md](methods_annotated.md); for command and output reference see
@@ -114,8 +114,9 @@ one hierarchy, and the first rule that fires wins.
 
 ### 3.1 One read, end to end
 
-The hierarchy is easiest to read by following a single alignment through it. Consider a 1,240 bp
-PacBio read aligned to `chr1:1,000,100-1,001,340` with CIGAR `620M300N320M` and tags `NH:i:1`,
+The hierarchy is easiest to read by following a single alignment through it. Consider a 940 bp
+PacBio read aligned across 1,240 bp of the genome, `chr1:1,000,100-1,001,340`, with CIGAR
+`620M300N320M` and tags `NH:i:1`,
 `CB:Z:AAACCTGAGAAACCAT`, `UB:Z:TTTGGCCAAT`, no `SA`.
 
 1. **Barcode gate.** `CB` is present and on the whitelist, so the read is attributed to that
@@ -130,7 +131,9 @@ PacBio read aligned to `chr1:1,000,100-1,001,340` with CIGAR `620M300N320M` and 
 4. **Chimera evidence.** No `SA` tag and no discordant mate, so the read continues.
 5. **Atomic annotation overlap.** 620 aligned bases fall in one exon of a `+`-strand gene, 320
    in the next exon of the same gene, and the 300 `N` bases are skipped rather than aligned. Read
-   orientation matches gene orientation, so the category is `exonic_sense`.
+   orientation matches gene orientation, so all 940 aligned bases are sense-exonic and the
+   category is `exonic_sense`. When an alignment mixes several kinds of bases, the kind holding
+   most of them names the read.
 6. **Base partition.** 940 aligned reference bases are attributed to `exonic_sense`. The 300 `N`
    bases are not aligned reference bases and enter no category — this is why base fractions and
    read fractions differ, and why they differ more for long reads than short ones.
@@ -141,22 +144,26 @@ PacBio read aligned to `chr1:1,000,100-1,001,340` with CIGAR `620M300N320M` and 
    end is screened for a genomic A-run.
 
 Small changes to the same read change the outcome in instructive ways. Remove the `N` and the
-alignment now covers intronic sequence between two exons: it becomes `intronic_boundary` if it
-crosses a boundary without a splice operation, or `intronic_pure` if it lies wholly inside the
-intron. Flip the read orientation and it becomes `exonic_antisense`. Add an `SA` tag pointing to
+300 intronic bases are now aligned. They are counted as `intronic_boundary` bases, but the read
+stays `exonic_sense`, because 940 of its 1,240 aligned bases are exonic. Shift that unspliced
+read until most of it lies in the intron and it becomes `intronic_boundary`; place it wholly
+inside the intron and it is `intronic_pure`. Flip the read orientation and it becomes `exonic_antisense`. Add an `SA` tag pointing to
 another contig and it becomes `chimeric` before annotation is ever consulted — a chimeric
 alignment has no single meaningful location.
 
 ### 3.2 The categories and what they usually mean
 
 Seventeen categories are reported. The rule is what the code tests; the interpretation is what a
-reader should have in mind, and it is never certain from a BAM alone.
+reader should have in mind, and it is never certain from a BAM alone. The rules for the exonic,
+intronic and intergenic categories describe kinds of aligned bases: a read takes the category
+that holds most of its aligned bases (§3.1), and the base-level fractions count each kind
+exactly.
 
 **Exonic**
 
 | Category | Rule | What it usually means |
 |---|---|---|
-| `exonic_sense` | ≥1 aligned base in an annotated exon, read on the gene's strand | The expected signal. In a healthy stranded library this dominates. |
+| `exonic_sense` | Aligned bases in an annotated exon, read on the gene's strand | The expected signal. In a healthy stranded library this dominates. |
 | `exonic_antisense` | Same, opposite strand | In a **stranded** library: candidate strand-switching during reverse transcription or template switching, or genuine regulated antisense transcription. In an **unstranded** library it is expected cDNA signal and is excluded from the broad composition. |
 
 **Intronic** — these three separate the spliced/unspliced question that RNA velocity depends on.
@@ -186,7 +193,7 @@ is enriched. See §3.5.
 | `mitochondrial` | Maps to `chrM`/`MT` | Both biology and sample quality. High values are conventionally read as stress or lysis, but tissue identity matters more than a single threshold. |
 | `multimapper` | Explicit `NH > 1` | Ambiguous placement, held out of the location categories. **`minimap2` and `pbmm2` do not emit `NH`**, so this category is empty by construction on most long-read BAMs and those alignments are counted under their genomic category instead. This shifts the denominator relative to a STAR-derived BAM and is the single largest obstacle to comparing platforms. |
 | `ambiguous_cod_cod`, `ambiguous_cod_ncod` | Aligned bases fall where two or more **same-strand** genes overlap | Genuinely unattributable to one gene. Split by biotype pairing because a coding/coding overlap and a coding/lncRNA overlap warrant different scepticism. Measured at exon level, which keeps it small — on GENCODE v47 the two shared sets are 0.9% and 1.5% of exonic sequence. |
-| `unassigned` | No usable cell barcode | A real read that cannot be attributed to a cell. Counted in the denominator; excluded from per-cell statistics. |
+| `unassigned` | No usable cell barcode | A real read that cannot be attributed to a cell. Counted in the denominator. Reads with no barcode at all are left out of the per-cell table. |
 
 ### 3.3 Evidence flags are independent of category
 
@@ -226,8 +233,9 @@ discard.
 Internal oligo-dT priming is the artifact most often blamed for spurious 3′ signal, and the usual
 test for it is genomic: look at the reference sequence just past the read's 3′ end and ask whether
 it is A-rich. scNoiseMeter does that, but the test is weaker than its popularity suggests.
-Measured against the PolyASite atlas, the median A-content in the 20 bp downstream window is
-**25% at real annotated polyA sites and 25% at random genomic positions**. The genomic context
+Measured against the PolyASite atlas (each site taken at its representative cleavage position),
+the median A-content in the 20 bp downstream window is
+**30% at annotated polyA sites and 30% at random genomic positions**. The genomic context
 barely distinguishes the two, because A-rich stretches are simply common.
 
 What does distinguish them is whether the A's the read carries are in the genome. At a real
@@ -313,18 +321,18 @@ column promotes anything yet. They exist so that the open question — whether
 promotion should count molecules, and which multiple-testing procedure to use —
 can be settled from measurements on real samples rather than by argument.
 
-**A caution about the polyA atlas, because the default works against you.** Two of the rules
+**A caution about the polyA atlas.** Two of the rules
 below turn on proximity to an annotated polyA site, and they turn on it in opposite directions:
 `intergenic_hotspot` requires that a site is *not* nearby, while `intergenic_novel` accepts a
 nearby site as positive evidence. That makes the density of the atlas a silent parameter.
 PolyASite 3.0 contains 18.4 million records, many supported in only a few percent of samples,
-and loaded whole it puts **38.6% of the primary genome within the 50 bp proximity window**. At
+and loaded whole it puts **37.4% of the genome within the 50 bp proximity window**. At
 that density the test is closer to a constant than a discriminator: hotspots are vetoed across
 a third of the genome, and the novel-gene evidence route is nearly free. Filtering the atlas on
-its own per-site support column restores it — 25% support gives 7.6% of the genome, 50% gives
-3.0% — and every run now measures and reports the density of whatever atlas it actually loaded.
-The default remains unfiltered so that upgrading moves no previously published number, which
-makes this a setting to choose deliberately rather than one to inherit.
+its own per-site support column restores it: 25% support leaves 6.3% of the genome within the
+window and 50% leaves 2.4%. Every run measures and reports the density of the atlas it loaded.
+Since 0.9.1 the default is 25% support. Earlier versions loaded the atlas whole, and in the
+synthetic benchmark that setting reported 6 of 10 internal-priming loci as `intergenic_novel`.
 
 Enriched windows are then interpreted by the independent evidence in §3.2. The ordering matters:
 repeat overlap is tested before enrichment, so a window that is both repeat-derived and A-rich is
@@ -386,23 +394,23 @@ read. Both are reported, and the veto is off by default because it lowers the he
 ## 5. Reading the output
 
 The numbers below are from the example PacBio Kinnex run whose report is shown in the README
-screenshots: 37.4 M reads, 2,047 cells, aligned with `pbmm2` against GENCODE v45, with
-PolyASite 3.0 and FANTOM5 CAGE auto-downloaded. They are one sample on one protocol, not
+screenshots: 37.4 M reads, 2,047 cells, aligned with `pbmm2`, annotated with GENCODE v45, with
+PolyASite 3.0 and FANTOM5 CAGE auto-downloaded, run with version 0.8.0. They are one sample on one protocol, not
 reference values — but they show what the fields look like together, which no field description
 does on its own.
 
 | Field | Value | How to read it |
 |---|---|---|
-| `exonic_sense` (reads / bases) | 64.78% / 63.06% | The bulk of the library, as expected for a stranded long-read cDNA protocol. |
+| `exonic_sense` (reads / bases) | 64.76% / 63.06% | The bulk of the library, as expected for a stranded long-read cDNA protocol. |
 | `broad_noncanonical_read_frac` | 23.22% | Not a contamination estimate. Dominated here by `intronic_pure` at 14.00%. |
-| `artifact_candidate_read_frac` | 3.70% | Equal to the chimeric rate, i.e. `intergenic_hotspot` is **0** for this sample. |
+| `artifact_candidate_read_frac` | 3.70% | Almost entirely the chimeric rate: `intergenic_hotspot` adds only 0.002% in this sample. |
 | `strand_concordance` | 98.86% | Near 1 confirms a stranded library. Near 0.5 would mean unstranded, and would invalidate antisense comparisons. |
 | `intronic_pure` | 14.00% | Substantial, and expected for whole-cell long-read data; would be higher still for single nuclei. |
 | `three_prime_anchored_frac` | 99.62% | Almost every read's 3′ end sits at an annotated polyA site — the signature of an oligo(dT)-primed protocol working as designed. |
 | `five_prime_anchored_frac` | 84.02% | Lower than the 3′ figure, which is the normal asymmetry: 5′ completeness depends on reverse transcription reaching the cap. |
 | `both_ends_anchored_frac` | 83.84% | Candidate complete molecules. Not a transcript-compatibility claim. |
-| `polya_priming_frac` | 2.31% | The internal-priming flag. Sits alongside `intergenic_hotspot` = 0, i.e. flagged reads are not forming enriched intergenic loci here. |
-| `tso_invasion_frac` | 0.0045% | Low. This metric is highly sensitive to detection settings — see §7. |
+| `polya_priming_frac` (`multiqc.json`) | 2.31% | The internal-priming flag. Sits alongside an `intergenic_hotspot` of 0.002%, i.e. flagged reads are not forming enriched intergenic loci here. |
+| `tso_invasion_frac` (`multiqc.json`) | 0.0045% | Low. This metric is highly sensitive to detection settings — see §7. |
 | `mitochondrial` | 3.77% | Interpret against the tissue, not a universal threshold. |
 
 Patterns that should attract attention, rather than any single threshold:

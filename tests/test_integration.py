@@ -28,7 +28,7 @@ from scnoisemeter.modules.metrics import compute_metrics
 from scnoisemeter.modules.pipeline import run_pipeline
 from scnoisemeter.utils.bam_inspector import inspect_bam
 
-from tests.conftest import BARCODE_CELL1, BARCODE_CELL2
+from conftest import BARCODE_CELL1, BARCODE_CELL2
 
 
 # ---------------------------------------------------------------------------

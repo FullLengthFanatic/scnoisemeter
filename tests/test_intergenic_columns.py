@@ -92,6 +92,18 @@ class TestStrandAsymmetry:
         assert deep.strand_asymmetry_pvalue < 1e-5
         assert deep.strand_asymmetry_pvalue < shallow.strand_asymmetry_pvalue
 
+    @pytest.mark.parametrize("n,frac,expected", [
+        (4, 0.75, 10 / 16),   # 3-1 or 1-3, or more lopsided
+        (2, 1.0, 0.5),        # 2-0 or 0-2
+        (1, 1.0, 1.0),        # one read is always one-sided
+        (4, 0.5, 1.0),        # a tie
+    ])
+    def test_pvalue_is_two_sided(self, n, frac, expected):
+        """The dominant strand is picked after counting, so both tails count."""
+        locus = _locus(n, frac)
+        _assign_strand_asymmetry([locus], stranded=True)
+        assert locus.strand_asymmetry_pvalue == pytest.approx(expected)
+
     def test_balanced_window_is_not_significant_however_deep(self):
         big_balanced = _locus(200, 0.52)
         _assign_strand_asymmetry([big_balanced], stranded=True)

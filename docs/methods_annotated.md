@@ -1,6 +1,6 @@
 # scNoiseMeter annotated methods
 
-**Code-linked implementation companion for version 0.9.0**
+**Code-linked implementation companion for version 0.9.1**
 
 This document maps the scientific rules to modules and functions. It avoids fixed line numbers because they become stale during refactoring. See [whitepaper.md](whitepaper.md) for rationale and literature context, and [documentation.md](documentation.md) for the CLI/output reference.
 
@@ -102,7 +102,7 @@ Independent artifact/context checks run for every classified primary alignment, 
 
 - different contig → candidate chimera;
 - different strand → candidate foldback/chimera;
-- same contig/strand → `_query_interval_from_cigar()` checks whether query and genomic segment order are compatible.
+- same contig/strand → `_query_interval_from_cigar()` checks whether query and genomic segment order are compatible. Both CIGARs are in reference orientation, so on either strand a colinear split has the segment with the smaller leading clip at the smaller coordinate.
 
 Distance alone is ignored. `_check_chimeric_paired()` adds inter-contig mates and extreme `TLEN` when paired detection is enabled. `_is_discordant_pair()` separately records missing/improper mates.
 
@@ -140,7 +140,7 @@ If this invariant is ever exceeded, classification raises rather than hiding dou
 
 ### TSO invasion
 
-`_check_tso_invasion()` examines only the molecularly appropriate terminal soft clip: left for a forward alignment and right for a reverse alignment. `_approx_prefix_match()` tolerates one substitution in the configured prefix. This avoids testing both read ends against a motif that should be directional.
+`_check_tso_invasion()` examines only the molecularly appropriate terminal soft clip: left for a forward alignment and right for a reverse alignment. `_contains_approx()` tolerates one substitution in the configured prefix. This avoids testing both read ends against a motif that should be directional. The poly-G shortcut looks for a G-run in a forward alignment's clip and a C-run in a reverse alignment's, because a reverse alignment stores the read reverse-complemented.
 
 The CLI resolves protocol-aware motifs with `_default_tso_sequences()` and `_effective_tso_sequences()`. Supplying `--tso` replaces the default. The classifier API treats `None` as its historical two-motif default and an explicit empty list as disabled.
 
@@ -208,11 +208,11 @@ The repeat label is an annotation class and does not require Poisson enrichment.
 
 `_polya_atlas_density()` merges ±`POLYA_SITE_PROXIMITY` windows per contig and returns the covered fraction of the non-mitochondrial reference; `_warn_if_atlas_too_dense()` records a warning above `POLYA_ATLAS_DENSITY_WARN`. The density is a property of the file, so it is measured once per run rather than assumed.
 
-`_check_site_coordinate_range()` runs after `_check_site_contig_overlap()` at all four load sites. Positions at or beyond their contig length are counted; above `SITE_COORD_OUT_OF_RANGE_DROP` the atlas is returned as `None` so its metrics take the absent path, above `SITE_COORD_OUT_OF_RANGE_WARN` it warns. Contigs absent from the BAM are skipped rather than counted against the atlas.
+`_check_site_coordinate_range()` runs after `_check_site_contig_overlap()` for both atlases in `run` and `compare`; `discover` and `run-plate` apply the contig-name check only. Positions at or beyond their contig length are counted; above `SITE_COORD_OUT_OF_RANGE_DROP` the atlas is returned as `None` so its metrics take the absent path, above `SITE_COORD_OUT_OF_RANGE_WARN` it warns. Contigs absent from the BAM are skipped rather than counted against the atlas.
 
 `_check_barcode_gate()` compares `n_reads_unassigned / n_reads_classified` against `UNASSIGNED_GATE_WARN`, only when `meta.barcode_aware is True`. Counters that are not numbers are skipped via `_as_number()` rather than raised on: the guard runs before every report and must not be what fails a valid run.
 
-`modules/selfcheck.py` runs the result invariants and writes `<sample>.qc.json`. `run_invariants()` returns passing and failing checks alike; `failures()` filters by severity; the whole block is wrapped at the call site so a defect in the checking code cannot fail an otherwise valid analysis. Severity is `ERROR` except where a documented configuration legitimately breaks the property — reservoir-estimated reclassification for the conservation checks, and the anchoring veto for the PAS-subset check.
+`modules/selfcheck.py` runs the result invariants and writes `<sample>.qc.json` (called from `run`). A NaN value is an unmeasured metric and is skipped like a missing one. `run_invariants()` returns passing and failing checks alike; `failures()` filters by severity; the whole block is wrapped at the call site so a defect in the checking code cannot fail an otherwise valid analysis. Severity is `ERROR` except where a documented configuration legitimately breaks the property — reservoir-estimated reclassification for the conservation checks, and the anchoring veto for the PAS-subset check.
 
 ## 8. End anchoring
 
@@ -296,13 +296,13 @@ Explicit platform hints have priority. Minimap2 alone maps to `unknown`; bare ST
   heatmap leaves a near-zero row neutral instead of painting it as the strongest signal.
 - `tests/test_priming_evidence.py`: the untemplated-tail measurement including hard clips,
   reverse-strand orientation and the adapter-bearing clip; atlas support filtering, hexamer
-  extraction and BED3 passthrough; atlas density and its warning; and that the option defaults
-  preserve pre-0.9 behaviour.
+  extraction and BED3 passthrough; atlas density and its warning; and the option defaults.
 - `tests/test_robustness_transfers.py`: both guards in both directions -- firing on the failure
   they exist for, silent on the legitimate lookalike (healthy sample, barcode-free BAM, in-range
   atlas, contigs absent from the BAM) -- plus direct-repeat measurement and local read share.
 - `tests/test_selfcheck.py`: one corruption per invariant, each asserted to fire by name, and a
   healthy result set that trips none of them.
+- `tests/test_cli_run.py`: `scnoisemeter run` through the real command line on the tiny fixtures: it completes, writes the documented files, records the priming settings, and stops when `--cell-barcodes` matches nothing.
 - `.github/workflows/tests.yml`: Python 3.10-3.13 CI with Ruff (pinned) and pytest.
 
 `tests/benchmark/` builds a synthetic BAM with known per-read truth and scores the classifier
@@ -323,13 +323,13 @@ aggregate sets from `constants.py` so they cannot drift from the classifier agai
 | Enable context/junction checks | Supply `--reference` |
 | Interpret repeats | Supply a matching RepeatMasker BED |
 | Reproduce reservoirs | Seeded by default (42); keep thread count fixed |
-| Make polyA-site proximity discriminating again | Set `--polya-min-support 25` (or 50). Unfiltered, PolyASite 3.0 puts 38.6% of the genome within the proximity window; the run reports the density it measured |
-| Compare internal priming with isoform-QC numbers | Use `--priming-criterion perc_a`, the SQANTI3/pigeon convention. It disagrees with the default on ~3% of windows, so switch for comparability, not correction |
+| Keep polyA-site proximity discriminating | `--polya-min-support` defaults to 25; raise it to 50 for a stricter atlas. With 0, PolyASite 3.0 puts 37.4% of the genome within the proximity window; the run reports the density it measured |
+| Compare internal priming with isoform-QC numbers | Use `--priming-criterion perc_a`, the SQANTI3/pigeon convention. It disagrees with the default on 3 to 5% of windows, so switch for comparability, not correction |
 | Stop proximity outvoting contrary evidence at the 3′ end | Use `--anchor-veto-internal-priming`; it lowers `three_prime_anchored_frac` |
 | Detect RT template-switch artifacts | Supply `--reference`; the direct-repeat flag needs it and is silent without it |
 | Continue past a failed pre-write check | `--no-strict`. Prefer fixing the cause: each of the three checks fires on a condition that otherwise produces a complete but wrong result set |
 | Alter intergenic thresholds | Change named constants, document them, and revalidate |
 
-Every option in the first block above changes what a reported number means, which is why each is recorded in `run_info.json` and defaults to pre-0.9 behaviour. Changing one mid-study splits the cohort.
+Every option in the first block above changes what a reported number means, which is why each is recorded in `run_info.json`. `--polya-min-support` defaults to 25 since 0.9.1; the other two default to pre-0.9 behaviour. Changing one mid-study splits the cohort.
 
-Do not tune `--chimeric-distance`; it is deprecated and has no scientific decision role in version 0.7.
+Do not tune `--chimeric-distance`; it is deprecated and has no role in any decision.

@@ -74,8 +74,15 @@ class Invariant:
 
 
 def _num(value):
-    """*value* as a number, or None when it is not one."""
+    """*value* as a number, or None when it is not one.
+
+    NaN is how an unmeasured metric is carried (a category with no reads has
+    no UMI diversity, a sample with no exonic reads has no strand concordance),
+    so it is absent, not out of range.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value != value:
         return None
     return value
 

@@ -324,6 +324,16 @@ class TestTSODetection:
         read = self._make_read(seq, [(4, 10), (0, 100)])
         assert clf._check_tso_invasion(read) is True
 
+    def test_polyg_on_reverse_alignment_reads_as_polyc(self):
+        """The stored sequence is reverse-complemented, so the read's G-run is a C-run."""
+        clf = self._make_classifier()
+        read = self._make_read("A" * 100 + "C" * 10, [(0, 100), (4, 10)])
+        read.is_reverse = True
+        assert clf._check_tso_invasion(read) is True
+        read = self._make_read("A" * 100 + "G" * 10, [(0, 100), (4, 10)])
+        read.is_reverse = True
+        assert clf._check_tso_invasion(read) is False
+
     def test_polyg_ignored_when_disabled(self):
         clf = ReadClassifier(self._make_classifier().index, reference=None,
                              tso_check_polyg=False)
@@ -573,6 +583,28 @@ class TestChimericDetection:
         is_chimeric, reason = clf._check_chimeric(read)
         assert is_chimeric
         assert "incompatible" in reason
+
+    def test_colinear_split_is_not_chimeric_on_either_strand(self):
+        """A long intron split by the aligner; CIGARs as minimap2 writes them."""
+        clf = self._make_classifier()
+        for is_reverse, strand in ((False, "+"), (True, "-")):
+            read = self._make_read(
+                f"chr1,100001,{strand},800M800S,60,0;", "chr1", 449_999, is_reverse
+            )
+            read.cigarstring = "799S801M"
+            is_chimeric, _ = clf._check_chimeric(read)
+            assert not is_chimeric, strand
+
+    def test_inverted_split_is_chimeric_on_either_strand(self):
+        clf = self._make_classifier()
+        for is_reverse, strand in ((False, "+"), (True, "-")):
+            read = self._make_read(
+                f"chr1,450001,{strand},800M800S,60,0;", "chr1", 100_000, is_reverse
+            )
+            read.cigarstring = "800S800M"
+            is_chimeric, reason = clf._check_chimeric(read)
+            assert is_chimeric, strand
+            assert "incompatible" in reason
 
     def test_close_same_strand_not_chimeric(self):
         clf = self._make_classifier(chimeric_distance=10_000)

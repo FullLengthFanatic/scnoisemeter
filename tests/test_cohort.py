@@ -121,6 +121,26 @@ class TestComparabilityWarnings:
         cohort = load_cohort([tmp_path / "a", tmp_path / "b"])
         assert any("different GENCODE releases" in w for w in cohort.warnings)
 
+    def test_differing_polya_settings_warn(self, tmp_path):
+        base = {"polya_min_support": 0.0, "criterion": "a_run",
+                "anchor_veto_internal_priming": False}
+        _write_results_dir(tmp_path, "a", V072,
+                           run_info={"scnoisemeter_version": "0.9.1", "priming": base})
+        _write_results_dir(tmp_path, "b", V072,
+                           run_info={"scnoisemeter_version": "0.9.1",
+                                     "priming": {**base, "polya_min_support": 25.0}})
+        cohort = load_cohort([tmp_path / "a", tmp_path / "b"])
+        assert any("polyA settings" in w for w in cohort.warnings)
+
+    def test_same_polya_settings_do_not_warn(self, tmp_path):
+        info = {"scnoisemeter_version": "0.9.1",
+                "priming": {"polya_min_support": 25.0, "criterion": "a_run",
+                            "anchor_veto_internal_priming": False}}
+        _write_results_dir(tmp_path, "a", V072, run_info=info)
+        _write_results_dir(tmp_path, "b", V072, run_info=info)
+        cohort = load_cohort([tmp_path / "a", tmp_path / "b"])
+        assert not any("polyA settings" in w for w in cohort.warnings)
+
     def test_mixed_strandedness_warns_and_is_flagged(self, tmp_path):
         _write_results_dir(tmp_path, "tenx", V072,
                            run_info={"scnoisemeter_version": "0.8.0", "unstranded": False})
