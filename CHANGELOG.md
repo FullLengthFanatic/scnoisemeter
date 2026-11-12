@@ -31,6 +31,12 @@ reported number says so here.
   plate. `discover` reports a failing BAM as failed, carries on with the
   rest, and gains `--no-strict`.
 
+### Corrected
+
+- The category legend in the HTML report said `exonic_sense` and
+  `exonic_antisense` need "≥1 aligned base" in an exon. A read takes the
+  category holding most of its aligned bases, and the legend now says so.
+
 ### Tests
 
 - `tests/test_cli_other_commands.py` runs `compare`, `discover` and
