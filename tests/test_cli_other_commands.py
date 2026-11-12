@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 
 import pysam
-import pytest
 from click.testing import CliRunner
 
 from scnoisemeter.cli import cli
@@ -93,14 +92,6 @@ def test_compare_stops_when_the_whitelist_matches_no_barcode(tiny_bam, tiny_gtf,
 # ---------------------------------------------------------------------------
 # discover
 # ---------------------------------------------------------------------------
-
-@pytest.fixture
-def tiny_fasta(tmp_path):
-    path = tmp_path / "tiny.fa"
-    path.write_text(">chr1\n" + "ACGT" * 15_000 + "\n>chrM\n" + "ACGT" * 4_142 + "\n")
-    pysam.faidx(str(path))
-    return path
-
 
 def _discover(tiny_bam, tiny_gtf, tiny_fasta, tmp_path):
     bam_dir = tmp_path / "bams"

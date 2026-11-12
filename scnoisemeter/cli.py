@@ -3584,8 +3584,10 @@ def _write_compare_outputs(results: dict, output_dir: Path, label_a: str, label_
     rng = np.random.default_rng(0)
     stats_rows = []
     for cat in CATEGORY_ORDER:
-        frac_a = sm_a.read_fracs.get(cat.value, 0.0)
-        frac_b = sm_b.read_fracs.get(cat.value, 0.0)
+        # A category missing from read_fracs was not measured (the hotspot
+        # call without --reference), which is not a share of zero.
+        frac_a = sm_a.read_fracs.get(cat.value, float("nan"))
+        frac_b = sm_b.read_fracs.get(cat.value, float("nan"))
         paired_median = ci_low = ci_high = float("nan")
         col = f"read_frac_{cat.value}"
         if common_cells and col in ct_a.df and col in ct_b.df:

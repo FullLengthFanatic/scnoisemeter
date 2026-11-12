@@ -71,6 +71,15 @@ _TINY_GTF = textwrap.dedent("""\
 """)
 
 
+@pytest.fixture
+def tiny_fasta(tmp_path) -> Path:
+    """Indexed FASTA covering every read position of the tiny BAM (chr1 60 kb, chrM)."""
+    path = tmp_path / "tiny.fa"
+    path.write_text(">chr1\n" + "ACGT" * 15_000 + "\n>chrM\n" + "ACGT" * 4_142 + "\n")
+    pysam.faidx(str(path))
+    return path
+
+
 @pytest.fixture(scope="session")
 def tiny_gtf(tmp_path_factory) -> Path:
     """Plain-text GTF with two genes on chr1."""

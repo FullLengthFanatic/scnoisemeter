@@ -155,9 +155,10 @@ class SampleMetrics:
     five_prime_anchored_frac: Optional[float] = None
     both_ends_anchored_frac: Optional[float] = None
 
-    # Artifact flags (sample-wide counts)
+    # Artifact flags (sample-wide counts).  n_polya_priming, n_rt_switch_repeat
+    # and n_noncanon_junction read the genome sequence: None without --reference.
     n_tso_invasion:        int = 0
-    n_polya_priming:       int = 0
+    n_polya_priming:       Optional[int] = 0
     # Reads whose own 3' soft clip carried an untemplated polyA tail.  Counted
     # independently of n_polya_priming: a read in both is a real cleavage site
     # in A-rich context, which the genomic test alone calls internal priming.
@@ -165,8 +166,8 @@ class SampleMetrics:
     # Junctions whose two ends share a direct repeat: the RT template-switching
     # signature.  Independent of n_noncanon_junction, because an RT artifact can
     # sit on a canonical GT-AG boundary.
-    n_rt_switch_repeat:    int = 0
-    n_noncanon_junction:   int = 0
+    n_rt_switch_repeat:    Optional[int] = 0
+    n_noncanon_junction:   Optional[int] = 0
     n_tso_concatemer:      int = 0
     n_discordant_pair:     int = 0
     n_low_mapq:            int = 0
@@ -317,6 +318,14 @@ def compute_metrics(
 
     cell_df = pd.DataFrame(rows).set_index("cell_barcode") if rows else pd.DataFrame()
 
+    # Without a reference FASTA the checks that read the genome never ran.
+    # Their outputs are left unmeasured: a zero would say "looked, found none".
+    reference_checks_ran = getattr(result, "reference_checks_ran", True)
+    hotspot = ReadCategory.INTERGENIC_HOTSPOT.value
+    if not reference_checks_ran and not cell_df.empty:
+        cell_df[["n_polya", "n_noncanon",
+                 f"read_frac_{hotspot}", f"base_frac_{hotspot}"]] = float("nan")
+
     # ------------------------------------------------------------------
     # 2. Sample-wide aggregation
     # ------------------------------------------------------------------
@@ -403,6 +412,12 @@ def compute_metrics(
         sm.n_tso_concatemer    += flags.get("tso_concat", 0)
         sm.n_discordant_pair   += flags.get("discordant_pair", 0)
         sm.n_low_mapq          += flags.get("low_mapq", 0)
+    if not reference_checks_ran:
+        sm.n_polya_priming = sm.n_noncanon_junction = sm.n_rt_switch_repeat = None
+        # Reads a hotspot call would have claimed stay in the other intergenic
+        # categories, so the composition still sums to one without this key.
+        sm.read_fracs.pop(hotspot, None)
+        sm.base_fracs.pop(hotspot, None)
 
     alignment_totals = {
         key: sum(
@@ -739,12 +754,15 @@ def to_multiqc_json(sm: SampleMetrics) -> dict:
         "n_alignments_classified":  sm.n_alignments_classified,
         # Flag rates span 1e-6 to 1e-2; four decimals rounded real counts to 0.0.
         "tso_invasion_frac":        round(sm.n_tso_invasion    / (sm.n_reads_classified or 1), 8),
-        "polya_priming_frac":       round(sm.n_polya_priming   / (sm.n_reads_classified or 1), 8),
         "polya_tail_frac":          round(sm.n_polya_tail      / (sm.n_reads_classified or 1), 8),
-        "rt_switch_repeat_frac":    round(sm.n_rt_switch_repeat / (sm.n_reads_classified or 1), 8),
         "tso_concatemer_frac":      round(sm.n_tso_concatemer  / (sm.n_reads_classified or 1), 8),
         "discordant_pair_frac":     round(sm.n_discordant_pair / (sm.n_reads_classified or 1), 8),
     }
+    # These two read the genome sequence and are None without --reference.
+    for _name, _count in (("polya_priming_frac", sm.n_polya_priming),
+                          ("rt_switch_repeat_frac", sm.n_rt_switch_repeat)):
+        if _count is not None:
+            data[_name] = round(_count / (sm.n_reads_classified or 1), 8)
     # Add per-category read fractions
     for cat_name, frac in sm.read_fracs.items():
         data[f"read_frac_{cat_name}"] = round(frac, 4)

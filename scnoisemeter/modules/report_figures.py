@@ -567,8 +567,10 @@ def _artifact_flags(sm: SampleMetrics) -> go.Figure:
         "Reads containing more than one TSO sequence or its reverse complement",
     ]
 
+    # A count is None when its check needs the genome and no --reference was given.
+    measured = [v is not None for v in values]
     denom = max(sm.n_reads_classified, 1)
-    fracs = [v / denom for v in values]
+    fracs = [(v or 0) / denom for v in values]
     max_frac = max(fracs) if fracs else 0.01
 
     def _pct(f: float) -> str:
@@ -584,9 +586,11 @@ def _artifact_flags(sm: SampleMetrics) -> go.Figure:
 
     # Axis ticks follow the largest bar; the labels above carry their own scale.
     _dec = 2 if max_frac >= 0.01 else 3 if max_frac >= 0.001 else 4
+    texts = [_pct(f) if ok else "not measured (no --reference)"
+             for f, ok in zip(fracs, measured)]
     hover = [
-        f"<b>{lbl}</b><br>{_pct(f)} of classified reads<br><i>{desc}</i>"
-        for lbl, f, desc in zip(labels, fracs, descriptions)
+        f"<b>{lbl}</b><br>{txt}{' of classified reads' if ok else ''}<br><i>{desc}</i>"
+        for lbl, txt, ok, desc in zip(labels, texts, measured, descriptions)
     ]
 
     fig = go.Figure(go.Bar(
@@ -594,7 +598,7 @@ def _artifact_flags(sm: SampleMetrics) -> go.Figure:
         y=labels,
         orientation="h",
         marker_color=colors,
-        text=[_pct(f) for f in fracs],
+        text=texts,
         textposition=["inside" if f > max_frac * 0.5 else "outside" for f in fracs],
         hovertext=hover,
         hoverinfo="text",
