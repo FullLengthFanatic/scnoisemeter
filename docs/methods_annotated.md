@@ -296,8 +296,7 @@ Explicit platform hints have priority. Minimap2 alone maps to `unknown`; bare ST
   heatmap leaves a near-zero row neutral instead of painting it as the strongest signal.
 - `tests/test_priming_evidence.py`: the untemplated-tail measurement including hard clips,
   reverse-strand orientation and the adapter-bearing clip; atlas support filtering, hexamer
-  extraction and BED3 passthrough; atlas density and its warning; and that the option defaults
-  preserve pre-0.9 behaviour.
+  extraction and BED3 passthrough; atlas density and its warning; and the option defaults.
 - `tests/test_robustness_transfers.py`: both guards in both directions -- firing on the failure
   they exist for, silent on the legitimate lookalike (healthy sample, barcode-free BAM, in-range
   atlas, contigs absent from the BAM) -- plus direct-repeat measurement and local read share.
@@ -324,13 +323,13 @@ aggregate sets from `constants.py` so they cannot drift from the classifier agai
 | Enable context/junction checks | Supply `--reference` |
 | Interpret repeats | Supply a matching RepeatMasker BED |
 | Reproduce reservoirs | Seeded by default (42); keep thread count fixed |
-| Make polyA-site proximity discriminating again | Set `--polya-min-support 25` (or 50). Unfiltered, PolyASite 3.0 puts 37.4% of the genome within the proximity window; the run reports the density it measured |
+| Keep polyA-site proximity discriminating | `--polya-min-support` defaults to 25; raise it to 50 for a stricter atlas. With 0, PolyASite 3.0 puts 37.4% of the genome within the proximity window; the run reports the density it measured |
 | Compare internal priming with isoform-QC numbers | Use `--priming-criterion perc_a`, the SQANTI3/pigeon convention. It disagrees with the default on 3 to 5% of windows, so switch for comparability, not correction |
 | Stop proximity outvoting contrary evidence at the 3′ end | Use `--anchor-veto-internal-priming`; it lowers `three_prime_anchored_frac` |
 | Detect RT template-switch artifacts | Supply `--reference`; the direct-repeat flag needs it and is silent without it |
 | Continue past a failed pre-write check | `--no-strict`. Prefer fixing the cause: each of the three checks fires on a condition that otherwise produces a complete but wrong result set |
 | Alter intergenic thresholds | Change named constants, document them, and revalidate |
 
-Every option in the first block above changes what a reported number means, which is why each is recorded in `run_info.json` and defaults to pre-0.9 behaviour. Changing one mid-study splits the cohort.
+Every option in the first block above changes what a reported number means, which is why each is recorded in `run_info.json`. `--polya-min-support` defaults to 25 since 0.9.1; the other two default to pre-0.9 behaviour. Changing one mid-study splits the cohort.
 
 Do not tune `--chimeric-distance`; it is deprecated and has no role in any decision.

@@ -5,7 +5,7 @@ detected can move a reported value by orders of magnitude, so `cohort` refuses
 to pool result sets silently across versions. Any release that alters a
 reported number says so here.
 
-## 0.9.1 - unreleased
+## 0.9.1 - 2026-11-12
 
 ### Fixed
 
@@ -39,6 +39,7 @@ reported number says so here.
   call.
 - The report footer and the download User-Agent named a repository URL that is
   not this project's.
+- The repository had no `LICENSE` file although it is declared MIT. Added.
 - Tests wrote site-atlas caches into the real `~/.cache/scnoisemeter`;
   `tests/test_integration.py` failed to import once a dependency shipped a
   top-level `tests` package; the benchmark runner used whichever `python3` was
@@ -46,6 +47,13 @@ reported number says so here.
 
 ### Reported values that change
 
+- **`--polya-min-support` defaults to 25.** Through 0.9.0 the polyA atlas was
+  loaded whole, which puts 37.4% of the genome within 50 bp of a site. In the
+  synthetic benchmark that setting reported 6 of 10 internal-priming loci as
+  `intergenic_novel`; with 25 all 10 are `intergenic_hotspot`. Expect
+  `intergenic_hotspot` to rise, `intergenic_novel` and
+  `three_prime_anchored_frac` to fall. Pass `--polya-min-support 0` to
+  reproduce earlier results. An atlas without a support column is unaffected.
 - **Chimeric calls on the minus strand.** For a split alignment on the same
   contig and strand, the query-order test assumed read orientation while both
   CIGARs are written in reference orientation. On the minus strand a colinear

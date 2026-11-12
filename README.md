@@ -133,7 +133,7 @@ Strand consistency is measured after window assignment. A window can therefore f
 
 Each window also reports `local_read_share`: the fraction of intergenic read mass within 10 kb that the window itself holds. A globally significant count says a window exceeds the genome-wide rate; it does not say whether the window is the local event or one of many in a broadly covered neighbourhood. A share near 1 is an isolated locus; a low share is diffuse coverage that the global test still promotes.
 
-**PolyA-site density matters here, and by default it works against you.** Two rules depend on proximity to an annotated polyA site in opposite directions: `intergenic_hotspot` requires the *absence* of a nearby site, and `intergenic_novel` accepts a nearby site as one of its two positive-evidence routes. PolyASite 3.0 ships 18,432,135 records, including sites supported in 5.6% of samples at a normalised score of 6e-05. Loaded unfiltered, 37.4% of the genome falls within the 50 bp proximity window, so the test is closer to a constant than a discriminator: hotspots are suppressed across a third of the genome and the novel-gene route is close to free. `--polya-min-support` filters on the atlas's own per-site support column: 25 leaves 6.3% of the genome within the window and 50 leaves 2.4%. Every run reports the measured density of the atlas it loaded. The default is 0 (no filtering); 25 is the recommended value.
+**PolyA-site density matters here.** Two rules depend on proximity to an annotated polyA site in opposite directions: `intergenic_hotspot` requires the *absence* of a nearby site, and `intergenic_novel` accepts a nearby site as one of its two positive-evidence routes. PolyASite 3.0 ships 18,432,135 records, including sites supported in 5.6% of samples at a normalised score of 6e-05. Loaded unfiltered, 37.4% of the genome falls within the 50 bp proximity window, so the test is closer to a constant than a discriminator: hotspots are suppressed across a third of the genome and the novel-gene route is close to free. `--polya-min-support` filters on the atlas's own per-site support column: 25 leaves 6.3% of the genome within the window and 50 leaves 2.4%. Every run reports the measured density of the atlas it loaded. The default is 25. Pass 0 to load the atlas whole, which is what versions up to 0.9.0 did.
 
 For datasets larger than the 500,000-record intergenic reservoir, promoted read/base totals are estimated from a uniform reservoir. UMI-diversity fields for affected categories are emitted as missing because exact category-specific UMI sets cannot be reconstructed from a sample.
 
@@ -287,4 +287,4 @@ Please cite the archived concept DOI:
 
 > Picelli, S. scNoiseMeter: barcode-aware alignment artifact and read-distribution QC for single-cell RNA-seq. Zenodo. https://doi.org/10.5281/zenodo.19554841
 
-MIT licensed.
+MIT licensed; see [LICENSE](LICENSE).

@@ -95,9 +95,10 @@ def parse_args():
 
 
 def _common_run_flags(args):
-    # Unfiltered, the auto-downloaded PolyASite atlas sits within 50 bp of most
-    # A-rich synthetic loci and relabels them from hotspot to novel, so the run
-    # would score the atlas density rather than the classifier.
+    # Pinned rather than left to the default: unfiltered, the auto-downloaded
+    # PolyASite atlas sits within 50 bp of most A-rich synthetic loci and
+    # relabels them from hotspot to novel, so the run would score the atlas
+    # density rather than the classifier.
     flags = ["--polya-min-support", "25"]
     if args.barcode_whitelist:
         flags.extend(["--barcode-whitelist", args.barcode_whitelist])

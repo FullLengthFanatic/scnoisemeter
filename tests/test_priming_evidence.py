@@ -115,9 +115,16 @@ def _write_atlas(tmp_path: Path) -> Path:
 
 
 class TestAtlasSupportFilter:
-    def test_default_keeps_every_record(self, tmp_path):
-        sites = _load_polya_sites(str(_write_atlas(tmp_path)), chrom_style="ucsc")
+    def test_unfiltered_keeps_every_record(self, tmp_path):
+        sites = _load_polya_sites(
+            str(_write_atlas(tmp_path)), chrom_style="ucsc", min_support=0.0
+        )
         assert sum(len(v) for v in sites.values()) == 3
+
+    def test_default_drops_rarely_supported_records(self, tmp_path):
+        sites = _load_polya_sites(str(_write_atlas(tmp_path)), chrom_style="ucsc")
+        assert sum(len(v) for v in sites.values()) == 2
+        assert 1000 not in sites.get(("chr1", "+"), [])
 
     def test_threshold_drops_low_support_records(self, tmp_path):
         sites = _load_polya_sites(
@@ -135,7 +142,7 @@ class TestAtlasSupportFilter:
     def test_pas_hexamer_column_is_read(self, tmp_path):
         pas: dict = {}
         sites = _load_polya_sites(
-            str(_write_atlas(tmp_path)), chrom_style="ucsc", pas_out=pas
+            str(_write_atlas(tmp_path)), chrom_style="ucsc", min_support=0.0, pas_out=pas
         )
         assert sum(len(v) for v in sites.values()) == 3
         # only the two records naming a hexamer
@@ -150,8 +157,8 @@ class TestAtlasSupportFilter:
         _load_polya_sites(atlas, chrom_style="ucsc", pas_out=pas)
         assert sum(len(v) for v in pas.values()) == 2
 
-    def test_default_is_off_so_upgrading_moves_no_number(self):
-        assert POLYA_MIN_SUPPORT_DEFAULT == 0.0
+    def test_option_defaults(self):
+        assert POLYA_MIN_SUPPORT_DEFAULT == 25.0
         assert PRIMING_CRITERION_DEFAULT == "a_run"
 
 

@@ -114,12 +114,12 @@ BED coordinates are zero-based, half-open; midpoint is used for end-site resourc
 | `--exclude-biotypes` | none | repeatable gene biotype exclusion |
 | `--obs-metadata` | none | per-cell cluster metadata for cluster summaries |
 | `--no-umi-tracking` | off | disable UMI-string sets to reduce memory; `--no-umi-dedup` is a legacy alias |
-| `--polya-min-support` | 0 | drop polyA atlas records supported in fewer than this percentage of samples (column 7 of a PolyASite BED). See the note below: the default is deliberately permissive and usually not what you want |
+| `--polya-min-support` | 25 | drop polyA atlas records supported in fewer than this percentage of samples (column 7 of a PolyASite BED). 0 loads the atlas whole; see the note below |
 | `--priming-criterion` | `a_run` | internal-priming test: `a_run` (consecutive genomic A's), `perc_a` (SQANTI3/pigeon `perc_A_downstream_TTS`, ≥60% A over 20 bp), or `either` |
 | `--anchor-veto-internal-priming` | off | require the absence of an internal-priming signature for a read to count towards 3′ anchoring; lowers `three_prime_anchored_frac` |
 | `--no-strict` | off | downgrade the pre-write sanity checks from errors to warnings (see §9a) |
 
-**On `--polya-min-support`.** Two intergenic rules depend on proximity to an annotated polyA site, in opposite directions: `intergenic_hotspot` requires that no site is nearby, `intergenic_novel` accepts a nearby site as evidence. PolyASite 3.0 holds 18,432,135 records, including sites supported in 5.6% of samples, and loaded whole puts 37.4% of the genome within the 50 bp proximity window, at which point the test is nearly a constant. Filtering at 25 leaves 6.3% of the genome; 50 leaves 2.4%. Every run measures the density of the atlas it loaded and warns above 20%. The default of 0 preserves pre-0.9 numbers rather than being a recommendation.
+**On `--polya-min-support`.** Two intergenic rules depend on proximity to an annotated polyA site, in opposite directions: `intergenic_hotspot` requires that no site is nearby, `intergenic_novel` accepts a nearby site as evidence. PolyASite 3.0 holds 18,432,135 records, including sites supported in 5.6% of samples, and loaded whole puts 37.4% of the genome within the 50 bp proximity window, at which point the test is nearly a constant. Filtering at 25 leaves 6.3% of the genome; 50 leaves 2.4%. Every run measures the density of the atlas it loaded and warns above 20%. The default is 25 since 0.9.1. Versions up to 0.9.0 loaded the atlas whole; pass 0 to reproduce their results.
 
 `--chimeric-distance` is accepted only for backward compatibility. Same-strand genomic distance is not used to call a chimera.
 

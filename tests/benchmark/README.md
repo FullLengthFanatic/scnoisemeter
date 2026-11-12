@@ -114,9 +114,9 @@ category).
   correctly reported as `ambiguous_cod_*`, which costs EXONIC_SENSE,
   EXONIC_ANTISENSE and INTRONIC_BOUNDARY a few percent each (0.92 to 0.93 with
   GENCODE v45).
-- The runner passes `--polya-min-support 25`. With the unfiltered default
-  atlas, 6 of the 10 synthetic hotspot loci on chr22 lie within 50 bp of a
-  PolyASite record and are reported as INTERGENIC_NOVEL.
+- The runner passes `--polya-min-support 25`, the default since 0.9.1. With
+  the atlas loaded whole, 6 of the 10 synthetic hotspot loci on chr22 lie
+  within 50 bp of a PolyASite record and are reported as INTERGENIC_NOVEL.
 - The synthesizer uses a 30/70 exon/intron split for INTRONIC_BOUNDARY reads so
   the base majority is unambiguous.
 - **`delta_vs_true`** in the dose-response should be within ± 0.02 at every

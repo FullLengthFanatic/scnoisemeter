@@ -322,9 +322,9 @@ POLYA_SITE_PROXIMITY = 50   # bp
 # the genome and satisfies one of the two _is_novel_gene evidence routes for
 # free.  Column 7 of the atlas BED is the percentage of samples supporting the
 # site; filtering on it restores discrimination (>=25% -> 6.3% of the genome,
-# >=50% -> 2.4%).  The default is 0.0 so that upgrading does not silently move
-# a reported number; POLYA_MIN_SUPPORT_RECOMMENDED is what to pass.
-POLYA_MIN_SUPPORT_DEFAULT = 0.0
+# >=50% -> 2.4%).  The default was 0.0 through 0.9.0; unfiltered, the project's
+# own benchmark reports 6 of 10 internal-priming loci as INTERGENIC_NOVEL.
+POLYA_MIN_SUPPORT_DEFAULT = 25.0
 POLYA_MIN_SUPPORT_RECOMMENDED = 25.0
 
 # Half-width (bp) of the neighbourhood used for a window's local read share.

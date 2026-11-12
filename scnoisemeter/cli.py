@@ -180,11 +180,11 @@ def _shared_options(func):
                      show_default=True, type=float,
                      help="Discard polyA atlas records supported in fewer than this "
                           "percentage of samples (column 7 of a PolyASite BED). "
-                          f"{POLYA_MIN_SUPPORT_RECOMMENDED:g} is recommended: loaded "
-                          "unfiltered, PolyASite 3.0 puts 37.4% of the genome within "
-                          "50 bp of a site, which makes polyA-site proximity a constant "
-                          "rather than a test. Default 0 keeps pre-0.9 behaviour so "
-                          "upgrading does not move a reported number."),
+                          "Loaded unfiltered (0), PolyASite 3.0 puts 37.4% of the genome "
+                          "within 50 bp of a site, which makes polyA-site proximity a "
+                          "constant rather than a test. The default was 0 through 0.9.0; "
+                          "pass 0 to reproduce those results. A BED without that column "
+                          "is unaffected."),
         click.option("--priming-criterion",
                      type=click.Choice(["a_run", "perc_a", "either"], case_sensitive=False),
                      default=PRIMING_CRITERION_DEFAULT, show_default=True,
@@ -2985,8 +2985,8 @@ def _load_polya_sites(
     *min_support*, when > 0, keeps only records whose column 7 (the percentage
     of samples supporting the site in a PolyASite atlas) is at least that
     value.  Records without a parseable column 7 are kept, so a plain BED3 is
-    unaffected.  See POLYA_MIN_SUPPORT_DEFAULT for why this is not on by
-    default and what the density costs.
+    unaffected.  See POLYA_MIN_SUPPORT_DEFAULT for what the density costs
+    without it.
 
     *pas_out*, when a dict is supplied, is filled with the same
     ``(contig, strand) -> sorted positions`` shape but restricted to records

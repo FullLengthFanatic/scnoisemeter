@@ -321,7 +321,7 @@ column promotes anything yet. They exist so that the open question — whether
 promotion should count molecules, and which multiple-testing procedure to use —
 can be settled from measurements on real samples rather than by argument.
 
-**A caution about the polyA atlas, because the default works against you.** Two of the rules
+**A caution about the polyA atlas.** Two of the rules
 below turn on proximity to an annotated polyA site, and they turn on it in opposite directions:
 `intergenic_hotspot` requires that a site is *not* nearby, while `intergenic_novel` accepts a
 nearby site as positive evidence. That makes the density of the atlas a silent parameter.
@@ -331,8 +331,8 @@ that density the test is closer to a constant than a discriminator: hotspots are
 a third of the genome, and the novel-gene evidence route is nearly free. Filtering the atlas on
 its own per-site support column restores it: 25% support leaves 6.3% of the genome within the
 window and 50% leaves 2.4%. Every run measures and reports the density of the atlas it loaded.
-The default remains unfiltered so that upgrading moves no previously published number, which
-makes this a setting to choose deliberately rather than one to inherit.
+Since 0.9.1 the default is 25% support. Earlier versions loaded the atlas whole, and in the
+synthetic benchmark that setting reported 6 of 10 internal-priming loci as `intergenic_novel`.
 
 Enriched windows are then interpreted by the independent evidence in §3.2. The ordering matters:
 repeat overlap is tested before enrichment, so a window that is both repeat-derived and A-rich is
