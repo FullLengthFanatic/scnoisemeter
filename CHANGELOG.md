@@ -39,6 +39,12 @@ reported number says so here.
     `GX`). That is an observation on one BAM, not a statement from the Cell
     Ranger documentation. Expect `exonic_antisense` below Cell Ranger's
     antisense share, most of all in nuclei.
+  - The end-anchoring fractions shift without a change in definition. They
+    are estimated from 5,000 sampled `exonic_sense` reads, and the rule changes
+    which reads are drawn. Kinnex example: `three_prime_anchored_frac` 95.94%
+    to 95.68%, `three_prime_at_pas_site_frac` 71.72% to 69.48%,
+    `five_prime_anchored_frac` 84.22% to 84.30%, `both_ends_anchored_frac`
+    81.36% in both.
   - Synthetic benchmark: antisense reads are now placed only in exons with no
     gene on the read's strand. Before that change 23 of the 200 lay inside an
     intron of a gene on their own strand, where they are now intronic. Mean
