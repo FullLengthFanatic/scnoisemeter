@@ -5,6 +5,24 @@ detected can move a reported value by orders of magnitude, so `cohort` refuses
 to pool result sets silently across versions. Any release that alters a
 reported number says so here.
 
+## Unreleased
+
+No reported value changes.
+
+### Removed
+
+- Four constants nothing used: `POLYA_HEXAMERS`, `POLYA_HEXAMERS_STRICT`,
+  `POLYA_HEXAMER_MIN_DIST` and `POLYA_HEXAMER_MAX_DIST`. The hexamer evidence
+  comes from column 11 of the PolyASite atlas, not from a motif scan.
+
+### Corrected
+
+- The module docstrings of `classifier.py`, `constants.py` and
+  `annotation.py` described the pre-0.7 classifier: a one-base overlap rule,
+  a single shared-gene set, and a three-minute annotation build with a 75 MB
+  cache. They now describe the gates, the base order, the two shared sets,
+  and the measured build (about six minutes for GENCODE v45, 18 MB cache).
+
 ## 0.10.0 - 2026-11-13
 
 ### Reported values that change

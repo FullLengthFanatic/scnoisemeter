@@ -3,14 +3,19 @@ annotation.py
 =============
 Builds the strand-aware genomic interval index used by the read classifier.
 
-From a GENCODE (or compatible) GTF this module produces five pyranges
-objects that together tile the genome exhaustively:
+From a GENCODE (or compatible) GTF this module produces the interval sets of
+:class:`AnnotationIndex`:
 
-  exons          – union of all annotated exonic bases, per strand
-  introns        – gene-body bases not covered by any exon, per strand
-  intergenic     – complement of all gene bodies (strand-independent)
-  gene_unique    – exonic/intronic bases attributable to exactly one gene
-  gene_shared    – bases where two or more genes overlap (→ ambiguous)
+  exons_plus / exons_minus    - union of annotated exonic bases, per strand
+  introns_plus / introns_minus - gene-body bases outside every exon, per strand
+  gene_bodies_*, gene_unique_* - gene spans, and the part owned by one gene
+  gene_shared_cod_cod          - same-strand region shared by coding genes
+  gene_shared_cod_ncod         - same-strand region shared by a coding and a
+                                 non-coding gene
+  intergenic                   - complement of all gene bodies (no strand)
+
+plus the known splice sites and exact splice junctions used for the junction
+checks.
 
 Additionally a RepeatMasker interval set is loaded if provided, used to
 sub-classify intergenic reads.
@@ -26,14 +31,14 @@ Design decisions
     that is exonic in one transcript but intronic in another is treated as
     exonic (consistent with decision 1).
 
-3.  Overlapping genes: we compute per-gene unique regions by subtracting
-    all other gene bodies.  A read that falls entirely within a unique region
-    is unambiguously attributable to one gene.  A read overlapping a shared
-    region is flagged as ambiguous.
+3.  Overlapping genes: only genes on the same strand make a base ambiguous.
+    Their shared regions are split into coding-coding and coding-noncoding
+    sets.  Genes overlapping on opposite strands stay resolvable by the
+    read's strand and enter no shared set.
 
 4.  Strand is handled explicitly throughout.  All interval sets carry a
-    Strand column ('+' or '-').  Reads are matched against the strand-
-    matching set first, then the anti-strand set.
+    Strand column ('+' or '-').  The classifier resolves each base in the
+    order sense exon, sense intron, antisense exon, antisense intron.
 
 5.  Pseudogenes and lncRNAs are included by default (they are in GENCODE
     and a read overlapping them is not "intergenic").  Users can filter
@@ -45,9 +50,10 @@ Design decisions
 
 Performance
 -----------
-A full build on GENCODE v47 takes roughly three minutes, most of it in
-``pr.read_gtf``.  The result is cached to a compressed pickle (~75 MB without
-a repeats BED) next to the GTF so that subsequent runs skip the build step.
+A full build takes several minutes: about six for GENCODE v45 when last
+measured, split between ``pr.read_gtf`` and the splice-site extraction.  The
+result is cached to a compressed pickle (about 18 MB without a repeats BED)
+next to the GTF so that subsequent runs skip the build step.
 Two spots in this module are row-wise and dominate the remainder if changed
 carelessly: see the ``observed=True`` note in _extract_splice_junctions and
 the grouped set-construction in _extract_splice_sites.
@@ -96,8 +102,9 @@ class AnnotationIndex:
         Full gene-body intervals (TSS → TES), per strand.
     gene_unique_plus / gene_unique_minus
         Gene-body bases attributable to exactly one gene, per strand.
-    gene_shared
-        Gene-body bases where ≥2 genes overlap (strand-aware).
+    gene_shared_cod_cod / gene_shared_cod_ncod
+        Same-strand regions shared by two protein-coding genes, or by a
+        coding and a non-coding gene.
     intergenic
         Complement of all gene bodies on either strand (strand-agnostic).
     repeats
@@ -105,6 +112,8 @@ class AnnotationIndex:
     splice_sites
         Known donor/acceptor positions used for junction-spanning intronic
         sub-classification.  Dict: contig → set of (pos, strand) tuples.
+    splice_junctions
+        Exact annotated junctions.  Dict: contig → set of (start, end, strand).
     gtf_path : Path
     repeats_path : Optional[Path]
     """
