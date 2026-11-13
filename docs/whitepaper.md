@@ -83,7 +83,11 @@ exons, introns, or genes counted the same base multiple times.
 
 Opposite-strand genes are not automatically ambiguous. Ambiguity is formed from same-strand
 shared gene regions, while exonic sense and antisense are classified relative to read
-orientation. Users can state `stranded` or `unstranded`; automatic inference is intentionally
+orientation. Where a base lies in an intron of a gene on the read's strand and in an exon of a
+gene on the other strand, the read's own strand decides and the base is intronic: unspliced RNA
+of the host gene explains it without an artifact. Cell Ranger counts such reads as antisense.
+On a Cell Ranger 9.0.1 single-nucleus BAM, 88% of them carried its antisense tag. Expect
+`exonic_antisense` here to be lower than Cell Ranger's antisense share, most of all in nuclei. Users can state `stranded` or `unstranded`; automatic inference is intentionally
 conservative because aligner names do not identify library strandedness.
 
 ### 2.4 Avoid pseudo-replication
@@ -147,7 +151,7 @@ Small changes to the same read change the outcome in instructive ways. Remove th
 300 intronic bases are now aligned. They are counted as `intronic_boundary` bases, but the read
 stays `exonic_sense`, because 940 of its 1,240 aligned bases are exonic. Shift that unspliced
 read until most of it lies in the intron and it becomes `intronic_boundary`; place it wholly
-inside the intron and it is `intronic_pure`. Flip the read orientation and it becomes `exonic_antisense`. Add an `SA` tag pointing to
+inside the intron and it is `intronic_pure`. Flip the read orientation and it becomes `exonic_antisense`, unless a gene on that other strand has an intron there, which makes those bases intronic. Add an `SA` tag pointing to
 another contig and it becomes `chimeric` before annotation is ever consulted — a chimeric
 alignment has no single meaningful location.
 
@@ -164,7 +168,7 @@ exactly.
 | Category | Rule | What it usually means |
 |---|---|---|
 | `exonic_sense` | Aligned bases in an annotated exon, read on the gene's strand | The expected signal. In a healthy stranded library this dominates. |
-| `exonic_antisense` | Same, opposite strand | In a **stranded** library: candidate strand-switching during reverse transcription or template switching, or genuine regulated antisense transcription. In an **unstranded** library it is expected cDNA signal and is excluded from the broad composition. |
+| `exonic_antisense` | Aligned bases in an annotated exon on the opposite strand, with no gene on the read's strand there | In a **stranded** library: candidate strand-switching during reverse transcription or template switching, or genuine regulated antisense transcription. In an **unstranded** library it is expected cDNA signal and is excluded from the broad composition. |
 
 **Intronic** — these three separate the spliced/unspliced question that RNA velocity depends on.
 

@@ -113,10 +113,12 @@ Distance alone is ignored. `_check_chimeric_paired()` adds inter-contig mates an
 1. shared coding–coding;
 2. shared coding–non-coding;
 3. sense exon;
-4. antisense exon;
-5. sense intron;
+4. sense intron;
+5. antisense exon;
 6. antisense intron;
 7. intergenic fallback.
+
+Sense intron ranks above antisense exon since 0.10.0. A gene on the read's own strand explains the base before a gene on the other strand does: unspliced RNA of the host gene needs no artifact. `exonic_antisense` therefore holds exons with no gene on the read's strand.
 
 The invariant is:
 
