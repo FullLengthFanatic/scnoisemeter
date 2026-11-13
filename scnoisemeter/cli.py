@@ -1484,6 +1484,9 @@ def compare_cmd(
             platform=meta.platform.value,
             unstranded=_is_unstranded_library(meta, library_strand),
         )
+        # The same pre-write checks as `run`, on each side of the comparison.
+        _check_barcode_gate(sm, meta, strict=not no_strict)
+        _run_result_invariants(sm, ct, result, output_dir, label, strict=not no_strict)
         _attach_result_provenance(
             sm,
             gtf_path=gtf, gtf_version=gtf_version, gtf_source=gtf_source,
@@ -1621,6 +1624,10 @@ def cohort_cmd(results_dirs, sample_sheet, output_dir, offline, verbose):
               help="Minimum prefix length (bp) of a TSO sequence required to match a soft-clip.")
 @click.option("--no-polyg-tso", is_flag=True,
               help="Disable the poly-G heuristic for TSO invasion (count only TSO-sequence matches).")
+@click.option("--no-strict",   is_flag=True,
+              help="Downgrade the pre-report sanity checks from errors to warnings. "
+                   "By default a BAM whose result set fails them is reported as failed "
+                   "and its outputs are not written.")
 @click.option("--run-all",     is_flag=True,
               help="Non-interactive: auto-run all BAMs that can be fully inferred. "
                    "BAMs with blocking issues are skipped with a warning.")
@@ -1634,7 +1641,7 @@ def cohort_cmd(results_dirs, sample_sheet, output_dir, offline, verbose):
 def discover_cmd(
     bam_dir, reference, tss_sites, tss_db, threads, output_dir,
     gtf, gtf_version, polya_sites, polya_db, tso, tso_min_match, no_polyg_tso,
-    run_all, offline, seed, verbose,
+    no_strict, run_all, offline, seed, verbose,
 ):
     """
     Discover BAMs in a directory, infer their parameters, and run scNoiseMeter
@@ -1801,6 +1808,7 @@ def discover_cmd(
                 tso_seqs=tso_seqs,
                 tso_min_match=tso_min_match,
                 no_polyg_tso=no_polyg_tso,
+                strict=not no_strict,
             )
             results_summary.append((stem, bam_output_dir, "success", None))
             click.echo(f"  ✓ Completed: {bam_output_dir}")
@@ -1841,6 +1849,7 @@ def _run_single_bam_for_discover(
     tso_seqs: Optional[list] = None,
     tso_min_match: int = TSO_MIN_MATCH_LENGTH,
     no_polyg_tso: bool = False,
+    strict: bool = True,
 ) -> None:
     """Run the full scNoiseMeter pipeline on one BAM (used by discover_cmd)."""
     from scnoisemeter.modules.annotation import build_annotation_index
@@ -1902,6 +1911,10 @@ def _run_single_bam_for_discover(
         platform=meta.platform.value,
         unstranded=_is_unstranded_library(meta, "auto"),
     )
+    # The same pre-write checks as `run`.  A failure is reported for this BAM
+    # by the caller, and the remaining BAMs still run.
+    _check_barcode_gate(sm, meta, strict=strict)
+    _run_result_invariants(sm, ct, result, output_dir, sample_name, strict=strict)
     _attach_result_provenance(
         sm,
         gtf_path=gtf_path, gtf_version=gtf_version, gtf_source=gtf_source,
@@ -2600,6 +2613,12 @@ def run_plate_cmd(
             plate_result, plate_label,
             platform=plate_meta.platform.value,
             unstranded=_is_unstranded_library(plate_meta, library_strand),
+        )
+        # The same pre-write checks as `run`, on the pooled plate result.
+        _check_barcode_gate(plate_sm, plate_meta, strict=not no_strict)
+        _run_result_invariants(
+            plate_sm, plate_ct, plate_result, plate_output_dir, plate_label,
+            strict=not no_strict,
         )
         _attach_result_provenance(
             plate_sm,
@@ -3565,8 +3584,10 @@ def _write_compare_outputs(results: dict, output_dir: Path, label_a: str, label_
     rng = np.random.default_rng(0)
     stats_rows = []
     for cat in CATEGORY_ORDER:
-        frac_a = sm_a.read_fracs.get(cat.value, 0.0)
-        frac_b = sm_b.read_fracs.get(cat.value, 0.0)
+        # A category missing from read_fracs was not measured (the hotspot
+        # call without --reference), which is not a share of zero.
+        frac_a = sm_a.read_fracs.get(cat.value, float("nan"))
+        frac_b = sm_b.read_fracs.get(cat.value, float("nan"))
         paired_median = ci_low = ci_high = float("nan")
         col = f"read_frac_{cat.value}"
         if common_cells and col in ct_a.df and col in ct_b.df:

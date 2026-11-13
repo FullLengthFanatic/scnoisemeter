@@ -95,8 +95,8 @@ CATEGORY_CRITERIA: dict[ReadCategory, str] = {
     ReadCategory.MULTIMAPPER:         "Explicit NH tag > 1. MAPQ and producer-specific X* tags are not treated as generic multi-hit counts; low MAPQ is reported separately.",
     ReadCategory.CHIMERIC:            "SA evidence is inter-chromosomal, strand-discordant, or incompatible in query/genomic order; extreme paired insert size is a fallback.",
     ReadCategory.MITOCHONDRIAL:       "Maps to the mitochondrial chromosome (chrM / MT).",
-    ReadCategory.EXONIC_SENSE:        "≥1 aligned base overlaps an annotated exon on the same strand as the read.",
-    ReadCategory.EXONIC_ANTISENSE:    "≥1 aligned base overlaps an annotated exon on the opposite strand; interpretation depends on protocol strandedness and biology.",
+    ReadCategory.EXONIC_SENSE:        "Most of the read's aligned bases lie in an annotated exon on the same strand as the read.",
+    ReadCategory.EXONIC_ANTISENSE:    "Most of the read's aligned bases lie in an annotated exon on the opposite strand; interpretation depends on protocol strandedness and biology.",
     ReadCategory.INTRONIC_JXNSPAN:    "Intronic bases on an alignment with a CIGAR N; exact junction and motif evidence are checked independently.",
     ReadCategory.INTRONIC_BOUNDARY:   "Spans an exon–intron boundary (sense) with no CIGAR N at the junction — candidate incomplete reverse transcription.",
     ReadCategory.INTRONIC_PURE:       "Intronic alignment without CIGAR N or an exon–intron boundary; can represent pre-mRNA or technical capture.",
@@ -567,8 +567,10 @@ def _artifact_flags(sm: SampleMetrics) -> go.Figure:
         "Reads containing more than one TSO sequence or its reverse complement",
     ]
 
+    # A count is None when its check needs the genome and no --reference was given.
+    measured = [v is not None for v in values]
     denom = max(sm.n_reads_classified, 1)
-    fracs = [v / denom for v in values]
+    fracs = [(v or 0) / denom for v in values]
     max_frac = max(fracs) if fracs else 0.01
 
     def _pct(f: float) -> str:
@@ -584,9 +586,11 @@ def _artifact_flags(sm: SampleMetrics) -> go.Figure:
 
     # Axis ticks follow the largest bar; the labels above carry their own scale.
     _dec = 2 if max_frac >= 0.01 else 3 if max_frac >= 0.001 else 4
+    texts = [_pct(f) if ok else "not measured (no --reference)"
+             for f, ok in zip(fracs, measured)]
     hover = [
-        f"<b>{lbl}</b><br>{_pct(f)} of classified reads<br><i>{desc}</i>"
-        for lbl, f, desc in zip(labels, fracs, descriptions)
+        f"<b>{lbl}</b><br>{txt}{' of classified reads' if ok else ''}<br><i>{desc}</i>"
+        for lbl, txt, ok, desc in zip(labels, texts, measured, descriptions)
     ]
 
     fig = go.Figure(go.Bar(
@@ -594,7 +598,7 @@ def _artifact_flags(sm: SampleMetrics) -> go.Figure:
         y=labels,
         orientation="h",
         marker_color=colors,
-        text=[_pct(f) for f in fracs],
+        text=texts,
         textposition=["inside" if f > max_frac * 0.5 else "outside" for f in fracs],
         hovertext=hover,
         hoverinfo="text",

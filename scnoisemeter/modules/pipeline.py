@@ -271,6 +271,10 @@ class SampleResult:
     exonic_sense_endpoints:    list = field(default_factory=_make_endpoint_reservoir)
     read_assignments: dict = field(default_factory=dict)
     umi_tracking_enabled: bool = True
+    # False when no reference FASTA was given.  Internal priming, non-canonical
+    # junctions, RT-switch repeats and the intergenic hotspot call all read the
+    # genome sequence, so without it they are unmeasured rather than zero.
+    reference_checks_ran: bool = True
 
     n_reads_total:     int = 0
     n_reads_processed: int = 0
@@ -666,6 +670,15 @@ def run_pipeline(
 
     # Merge
     sample = SampleResult(bam_path=Path(bam_path), meta=meta)
+    # The workers warn and carry on when the FASTA cannot be opened, so "ran"
+    # means it opens, not merely that a path was given.
+    sample.reference_checks_ran = False
+    if reference_path:
+        try:
+            pysam.FastaFile(reference_path).close()
+            sample.reference_checks_ran = True
+        except Exception:                         # noqa: BLE001
+            pass
     sample.n_reads_mapped_index = mapped_index
     sample.n_reads_unmapped = unmapped_index
     sample.n_reads_total = mapped_index + unmapped_index
@@ -712,6 +725,10 @@ def merge_sample_results(base: SampleResult, other: SampleResult) -> None:
     base.umi_tracking_enabled = (
         getattr(base, "umi_tracking_enabled", True)
         and getattr(other, "umi_tracking_enabled", True)
+    )
+    base.reference_checks_ran = (
+        getattr(base, "reference_checks_ran", True)
+        and getattr(other, "reference_checks_ran", True)
     )
 
     for cb, cat_counts in other.read_counts.items():
