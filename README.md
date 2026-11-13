@@ -2,7 +2,7 @@
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19554841.svg)](https://doi.org/10.5281/zenodo.19554841)
 
-Current version: **0.9.1**
+Current version: **0.10.0**
 
 Quality control for single-cell RNA-seq alignments. It answers two questions about a library: where do the reads land, and which of them look like technical artifacts?
 

@@ -2,7 +2,7 @@
 
 **A barcode-aware alignment artifact and read-distribution QC framework for single-cell RNA-seq**
 
-Version 0.9.1. This document explains the scientific position of scNoiseMeter: what the
+Version 0.10.0. This document explains the scientific position of scNoiseMeter: what the
 categories mean, why they are drawn where they are, and what a reader should and should not
 conclude from the numbers. For implementation details see
 [methods_annotated.md](methods_annotated.md); for command and output reference see

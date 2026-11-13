@@ -96,7 +96,7 @@ CATEGORY_CRITERIA: dict[ReadCategory, str] = {
     ReadCategory.CHIMERIC:            "SA evidence is inter-chromosomal, strand-discordant, or incompatible in query/genomic order; extreme paired insert size is a fallback.",
     ReadCategory.MITOCHONDRIAL:       "Maps to the mitochondrial chromosome (chrM / MT).",
     ReadCategory.EXONIC_SENSE:        "Most of the read's aligned bases lie in an annotated exon on the same strand as the read.",
-    ReadCategory.EXONIC_ANTISENSE:    "Most of the read's aligned bases lie in an annotated exon on the opposite strand; interpretation depends on protocol strandedness and biology.",
+    ReadCategory.EXONIC_ANTISENSE:    "Most of the read's aligned bases lie in an annotated exon on the opposite strand, outside every gene on the read's own strand; interpretation depends on protocol strandedness and biology.",
     ReadCategory.INTRONIC_JXNSPAN:    "Intronic bases on an alignment with a CIGAR N; exact junction and motif evidence are checked independently.",
     ReadCategory.INTRONIC_BOUNDARY:   "Spans an exon–intron boundary (sense) with no CIGAR N at the junction — candidate incomplete reverse transcription.",
     ReadCategory.INTRONIC_PURE:       "Intronic alignment without CIGAR N or an exon–intron boundary; can represent pre-mRNA or technical capture.",

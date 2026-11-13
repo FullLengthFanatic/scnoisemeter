@@ -21,8 +21,9 @@ Classification hierarchy
   MULTIMAPPER       (NH > 1) → multimapper bucket, still base-classified
   MITOCHONDRIAL     maps to chrM / MT
   CHIMERIC          SA tag + distance/strand rules
-  EXONIC_SENSE      ≥1 bp overlap with exon, correct strand
-  EXONIC_ANTISENSE  ≥1 bp overlap with exon, wrong strand
+  EXONIC_SENSE      most aligned bases in an exon on the read's strand
+  EXONIC_ANTISENSE  most aligned bases in an exon on the other strand,
+                    outside every gene on the read's strand
   INTRONIC_JXNSPAN  intronic + CIGAR N at known/novel splice site
   INTRONIC_BOUNDARY spans exon-intron boundary, no splice op
   INTRONIC_PURE     entirely within intron body
