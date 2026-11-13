@@ -20,8 +20,8 @@ reported number says so here.
     0.743% to 0.507% of reads and from 0.969% to 0.589% of bases.
     `intronic_pure` 13.81% to 13.96%, `intronic_boundary` 3.47% to 3.55%,
     `intronic_jxnspan` 3.02% to 3.06%, `strand_concordance` 98.87% to 99.22%.
-    `exonic_sense` 64.80% to 64.77%: a few reads held more exonic bases than
-    either of the two labels their intronic bases were split between.
+    `exonic_sense` 64.80% to 64.77%: in a few reads the exonic bases were
+    the largest share only while the intronic bases were split over two labels.
   - chr21 of that sample: 19,847 of 505,649 reads move. 96% of them fall in
     five 2 kb windows at the rDNA arrays (8.21, 8.39 and 8.44 Mb, beside the
     5.8S genes), on lncRNA exons annotated on the other strand.
@@ -40,8 +40,9 @@ reported number says so here.
     Ranger documentation. Expect `exonic_antisense` below Cell Ranger's
     antisense share, most of all in nuclei.
   - Synthetic benchmark: antisense reads are now placed only in exons with no
-    gene on the other strand. Before that change 23 of the 200 landed inside
-    an intron of a gene on their own strand.
+    gene on the read's strand. Before that change 23 of the 200 lay inside an
+    intron of a gene on their own strand, where they are now intronic. Mean
+    per-category accuracy is 0.989, lowest 0.925.
 - **Without `--reference`, the genome-dependent checks are blank, not 0.**
   Internal priming, non-canonical junctions, RT-switch repeats and the
   intergenic hotspot call all read the genome sequence. Without a reference
@@ -72,6 +73,8 @@ reported number says so here.
 
 ### Tests
 
+- `tests/test_sense_intron_precedence.py` classifies reads on a gene nested
+  in an intron of a gene on the other strand, on both strands.
 - `tests/test_cli_other_commands.py` runs `compare`, `discover` and
   `run-plate` through the real command line. Before, only `run` was.
 - `tests/test_reference_dependent_blanks.py` covers the blank values in every
