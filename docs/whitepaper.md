@@ -399,21 +399,21 @@ read. Both are reported, and the veto is off by default because it lowers the he
 
 The numbers below are from the example PacBio Kinnex run whose report is shown in the README
 screenshots: 37.4 M reads, 2,047 cells, aligned with `pbmm2`, annotated with GENCODE v45, with
-PolyASite 3.0 and FANTOM5 CAGE auto-downloaded, run with version 0.8.0. They are one sample on one protocol, not
+PolyASite 3.0 and FANTOM5 CAGE auto-downloaded, run with version 0.10.0. They are one sample on one protocol, not
 reference values — but they show what the fields look like together, which no field description
 does on its own.
 
 | Field | Value | How to read it |
 |---|---|---|
-| `exonic_sense` (reads / bases) | 64.76% / 63.06% | The bulk of the library, as expected for a stranded long-read cDNA protocol. |
-| `broad_noncanonical_read_frac` | 23.22% | Not a contamination estimate. Dominated here by `intronic_pure` at 14.00%. |
-| `artifact_candidate_read_frac` | 3.70% | Almost entirely the chimeric rate: `intergenic_hotspot` adds only 0.002% in this sample. |
-| `strand_concordance` | 98.86% | Near 1 confirms a stranded library. Near 0.5 would mean unstranded, and would invalidate antisense comparisons. |
-| `intronic_pure` | 14.00% | Substantial, and expected for whole-cell long-read data; would be higher still for single nuclei. |
-| `three_prime_anchored_frac` | 99.62% | Almost every read's 3′ end sits at an annotated polyA site — the signature of an oligo(dT)-primed protocol working as designed. |
-| `five_prime_anchored_frac` | 84.02% | Lower than the 3′ figure, which is the normal asymmetry: 5′ completeness depends on reverse transcription reaching the cap. |
-| `both_ends_anchored_frac` | 83.84% | Candidate complete molecules. Not a transcript-compatibility claim. |
-| `polya_priming_frac` (`multiqc.json`) | 2.31% | The internal-priming flag. Sits alongside an `intergenic_hotspot` of 0.002%, i.e. flagged reads are not forming enriched intergenic loci here. |
+| `exonic_sense` (reads / bases) | 64.77% / 63.11% | The bulk of the library, as expected for a stranded long-read cDNA protocol. |
+| `broad_noncanonical_read_frac` | 23.31% | Not a contamination estimate. Dominated here by `intronic_pure` at 13.96%. |
+| `artifact_candidate_read_frac` | 3.90% | Almost entirely the chimeric rate: `intergenic_hotspot` adds only 0.006% in this sample. |
+| `strand_concordance` | 99.22% | Near 1 confirms a stranded library. Near 0.5 would mean unstranded, and would invalidate antisense comparisons. |
+| `intronic_pure` | 13.96% | Substantial, and expected for whole-cell long-read data; would be higher still for single nuclei. |
+| `three_prime_anchored_frac` | 95.68% | Nearly every read's 3′ end sits within 50 bp of an atlas polyA site that passes the default support filter, the signature of an oligo(dT)-primed protocol working as designed. Version 0.8.0 loaded the atlas whole and reported 99.62% for this sample. |
+| `five_prime_anchored_frac` | 84.30% | Lower than the 3′ figure, which is the normal asymmetry: 5′ completeness depends on reverse transcription reaching the cap. |
+| `both_ends_anchored_frac` | 81.36% | Candidate complete molecules. Not a transcript-compatibility claim. |
+| `polya_priming_frac` (`multiqc.json`) | 2.31% | The internal-priming flag. Sits alongside an `intergenic_hotspot` of 0.006%, i.e. flagged reads are not forming enriched intergenic loci here. |
 | `tso_invasion_frac` (`multiqc.json`) | 0.0045% | Low. This metric is highly sensitive to detection settings — see §7. |
 | `mitochondrial` | 3.77% | Interpret against the tissue, not a universal threshold. |
 

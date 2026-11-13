@@ -71,6 +71,15 @@ reported number says so here.
   `exonic_antisense` need "≥1 aligned base" in an exon. A read takes the
   category holding most of its aligned bases, and the legend now says so.
 
+### Docs
+
+- The README screenshots and the white paper's example table come from a
+  0.10.0 run of the same Kinnex sample. They were from 0.8.0. Against 0.8.0,
+  `three_prime_anchored_frac` reads 95.68% instead of 99.62% because the
+  polyA atlas is filtered at 25% support by default since 0.9.1, and the
+  chimeric share reads 3.89% instead of 3.70% after the 0.9.1 minus-strand
+  fix.
+
 ### Tests
 
 - `tests/test_sense_intron_precedence.py` classifies reads on a gene nested

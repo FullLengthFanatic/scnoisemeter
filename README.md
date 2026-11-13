@@ -88,7 +88,7 @@ Do not rely on an aligner name alone to identify the sequencer or library. `mini
 
 The interactive HTML report also covers [sample metadata](docs/report_preview1.png), [read and base fractions](docs/report_preview3.png), [length-stratified and per-cell composition](docs/report_preview4.png), [read-length distributions and artifact flags](docs/report_preview5.png), and [the top intergenic loci](docs/report_preview6.png).
 
-These screenshots come from a 10x Kinnex sample (37.4 M reads, 2,047 cells) run with version 0.8.0. A few intergenic and chimeric values differ slightly under the current version, so read the panels as a tour of the layout.
+These screenshots come from a 10x Kinnex sample (37.4 M reads, 2,047 cells) run with version 0.10.0.
 
 ## Classification
 
