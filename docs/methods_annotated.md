@@ -1,6 +1,6 @@
 # scNoiseMeter annotated methods
 
-**Code-linked implementation companion for version 0.9.1**
+**Code-linked implementation companion for version 0.10.0**
 
 This document maps the scientific rules to modules and functions. It avoids fixed line numbers because they become stale during refactoring. See [whitepaper.md](whitepaper.md) for rationale and literature context, and [documentation.md](documentation.md) for the CLI/output reference.
 
@@ -113,10 +113,12 @@ Distance alone is ignored. `_check_chimeric_paired()` adds inter-contig mates an
 1. shared coding–coding;
 2. shared coding–non-coding;
 3. sense exon;
-4. antisense exon;
-5. sense intron;
+4. sense intron;
+5. antisense exon;
 6. antisense intron;
 7. intergenic fallback.
+
+Sense intron ranks above antisense exon since 0.10.0. A gene on the read's own strand explains the base before a gene on the other strand does: unspliced RNA of the host gene needs no artifact. `exonic_antisense` therefore holds exons with no gene on the read's strand.
 
 The invariant is:
 
@@ -303,6 +305,7 @@ Explicit platform hints have priority. Minimap2 alone maps to `unknown`; bare ST
 - `tests/test_selfcheck.py`: one corruption per invariant, each asserted to fire by name, and a
   healthy result set that trips none of them.
 - `tests/test_cli_run.py`: `scnoisemeter run` through the real command line on the tiny fixtures: it completes, writes the documented files, records the priming settings, and stops when `--cell-barcodes` matches nothing.
+- `tests/test_sense_intron_precedence.py`: a gene nested in an intron of a gene on the other strand. Reads on the host strand are intronic, reads on the nested gene's strand are `exonic_sense`, and an antisense exon with no gene on the read's strand stays `exonic_antisense`.
 - `tests/test_cli_other_commands.py`: `compare`, `discover` and `run-plate` through the real command line: each completes, writes the documented files and its `qc.json`; `compare` stops when the whitelist matches no barcode; parallel and serial plate runs report the same metrics.
 - `tests/test_reference_dependent_blanks.py`: without `--reference`, or with a FASTA that cannot be opened, the genome-dependent counts are blank and the hotspot fractions absent in every output; with a reference they are numbers.
 - `.github/workflows/tests.yml`: Python 3.10-3.13 CI with Ruff (pinned) and pytest.

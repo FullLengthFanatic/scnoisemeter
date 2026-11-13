@@ -2,7 +2,7 @@
 
 **A barcode-aware alignment artifact and read-distribution QC framework for single-cell RNA-seq**
 
-Version 0.9.1. This document explains the scientific position of scNoiseMeter: what the
+Version 0.10.0. This document explains the scientific position of scNoiseMeter: what the
 categories mean, why they are drawn where they are, and what a reader should and should not
 conclude from the numbers. For implementation details see
 [methods_annotated.md](methods_annotated.md); for command and output reference see
@@ -83,7 +83,11 @@ exons, introns, or genes counted the same base multiple times.
 
 Opposite-strand genes are not automatically ambiguous. Ambiguity is formed from same-strand
 shared gene regions, while exonic sense and antisense are classified relative to read
-orientation. Users can state `stranded` or `unstranded`; automatic inference is intentionally
+orientation. Where a base lies in an intron of a gene on the read's strand and in an exon of a
+gene on the other strand, the read's own strand decides and the base is intronic: unspliced RNA
+of the host gene explains it without an artifact. Cell Ranger counts such reads as antisense.
+On a Cell Ranger 9.0.1 single-nucleus BAM, 88% of them carried its antisense tag. Expect
+`exonic_antisense` here to be lower than Cell Ranger's antisense share, most of all in nuclei. Users can state `stranded` or `unstranded`; automatic inference is intentionally
 conservative because aligner names do not identify library strandedness.
 
 ### 2.4 Avoid pseudo-replication
@@ -147,7 +151,7 @@ Small changes to the same read change the outcome in instructive ways. Remove th
 300 intronic bases are now aligned. They are counted as `intronic_boundary` bases, but the read
 stays `exonic_sense`, because 940 of its 1,240 aligned bases are exonic. Shift that unspliced
 read until most of it lies in the intron and it becomes `intronic_boundary`; place it wholly
-inside the intron and it is `intronic_pure`. Flip the read orientation and it becomes `exonic_antisense`. Add an `SA` tag pointing to
+inside the intron and it is `intronic_pure`. Flip the read orientation and it becomes `exonic_antisense`, unless a gene on that other strand has an intron there, which makes those bases intronic. Add an `SA` tag pointing to
 another contig and it becomes `chimeric` before annotation is ever consulted — a chimeric
 alignment has no single meaningful location.
 
@@ -164,7 +168,7 @@ exactly.
 | Category | Rule | What it usually means |
 |---|---|---|
 | `exonic_sense` | Aligned bases in an annotated exon, read on the gene's strand | The expected signal. In a healthy stranded library this dominates. |
-| `exonic_antisense` | Same, opposite strand | In a **stranded** library: candidate strand-switching during reverse transcription or template switching, or genuine regulated antisense transcription. In an **unstranded** library it is expected cDNA signal and is excluded from the broad composition. |
+| `exonic_antisense` | Aligned bases in an annotated exon on the opposite strand, with no gene on the read's strand there | In a **stranded** library: candidate strand-switching during reverse transcription or template switching, or genuine regulated antisense transcription. In an **unstranded** library it is expected cDNA signal and is excluded from the broad composition. |
 
 **Intronic** — these three separate the spliced/unspliced question that RNA velocity depends on.
 
@@ -395,21 +399,21 @@ read. Both are reported, and the veto is off by default because it lowers the he
 
 The numbers below are from the example PacBio Kinnex run whose report is shown in the README
 screenshots: 37.4 M reads, 2,047 cells, aligned with `pbmm2`, annotated with GENCODE v45, with
-PolyASite 3.0 and FANTOM5 CAGE auto-downloaded, run with version 0.8.0. They are one sample on one protocol, not
+PolyASite 3.0 and FANTOM5 CAGE auto-downloaded, run with version 0.10.0. They are one sample on one protocol, not
 reference values — but they show what the fields look like together, which no field description
 does on its own.
 
 | Field | Value | How to read it |
 |---|---|---|
-| `exonic_sense` (reads / bases) | 64.76% / 63.06% | The bulk of the library, as expected for a stranded long-read cDNA protocol. |
-| `broad_noncanonical_read_frac` | 23.22% | Not a contamination estimate. Dominated here by `intronic_pure` at 14.00%. |
-| `artifact_candidate_read_frac` | 3.70% | Almost entirely the chimeric rate: `intergenic_hotspot` adds only 0.002% in this sample. |
-| `strand_concordance` | 98.86% | Near 1 confirms a stranded library. Near 0.5 would mean unstranded, and would invalidate antisense comparisons. |
-| `intronic_pure` | 14.00% | Substantial, and expected for whole-cell long-read data; would be higher still for single nuclei. |
-| `three_prime_anchored_frac` | 99.62% | Almost every read's 3′ end sits at an annotated polyA site — the signature of an oligo(dT)-primed protocol working as designed. |
-| `five_prime_anchored_frac` | 84.02% | Lower than the 3′ figure, which is the normal asymmetry: 5′ completeness depends on reverse transcription reaching the cap. |
-| `both_ends_anchored_frac` | 83.84% | Candidate complete molecules. Not a transcript-compatibility claim. |
-| `polya_priming_frac` (`multiqc.json`) | 2.31% | The internal-priming flag. Sits alongside an `intergenic_hotspot` of 0.002%, i.e. flagged reads are not forming enriched intergenic loci here. |
+| `exonic_sense` (reads / bases) | 64.77% / 63.11% | The bulk of the library, as expected for a stranded long-read cDNA protocol. |
+| `broad_noncanonical_read_frac` | 23.31% | Not a contamination estimate. Dominated here by `intronic_pure` at 13.96%. |
+| `artifact_candidate_read_frac` | 3.90% | Almost entirely the chimeric rate: `intergenic_hotspot` adds only 0.006% in this sample. |
+| `strand_concordance` | 99.22% | Near 1 confirms a stranded library. Near 0.5 would mean unstranded, and would invalidate antisense comparisons. |
+| `intronic_pure` | 13.96% | Substantial, and expected for whole-cell long-read data; would be higher still for single nuclei. |
+| `three_prime_anchored_frac` | 95.68% | Nearly every read's 3′ end sits within 50 bp of an atlas polyA site that passes the default support filter, the signature of an oligo(dT)-primed protocol working as designed. Version 0.8.0 loaded the atlas whole and reported 99.62% for this sample. |
+| `five_prime_anchored_frac` | 84.30% | Lower than the 3′ figure, which is the normal asymmetry: 5′ completeness depends on reverse transcription reaching the cap. |
+| `both_ends_anchored_frac` | 81.36% | Candidate complete molecules. Not a transcript-compatibility claim. |
+| `polya_priming_frac` (`multiqc.json`) | 2.31% | The internal-priming flag. Sits alongside an `intergenic_hotspot` of 0.006%, i.e. flagged reads are not forming enriched intergenic loci here. |
 | `tso_invasion_frac` (`multiqc.json`) | 0.0045% | Low. This metric is highly sensitive to detection settings — see §7. |
 | `mitochondrial` | 3.77% | Interpret against the tissue, not a universal threshold. |
 

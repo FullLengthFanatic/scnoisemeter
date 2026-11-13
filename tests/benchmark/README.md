@@ -112,8 +112,11 @@ category).
   construction. Three categories sit a little lower by construction: some
   synthetic exonic reads land in exons shared by two same-strand genes and are
   correctly reported as `ambiguous_cod_*`, which costs EXONIC_SENSE,
-  EXONIC_ANTISENSE and INTRONIC_BOUNDARY a few percent each (0.92 to 0.93 with
-  GENCODE v45).
+  EXONIC_ANTISENSE and INTRONIC_BOUNDARY a few percent each (0.925 to 0.965
+  with GENCODE v45).
+- Antisense reads are placed in exons with no gene on the read's strand.
+  Inside an intron of a gene on their own strand they are intronic since
+  0.10.0.
 - The runner passes `--polya-min-support 25`, the default since 0.9.1. With
   the atlas loaded whole, 6 of the 10 synthetic hotspot loci on chr22 lie
   within 50 bp of a PolyASite record and are reported as INTERGENIC_NOVEL.

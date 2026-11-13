@@ -5,10 +5,44 @@ detected can move a reported value by orders of magnitude, so `cohort` refuses
 to pool result sets silently across versions. Any release that alters a
 reported number says so here.
 
-## Unreleased
+## 0.10.0 - 2026-11-13
 
 ### Reported values that change
 
+- **A base in a sense intron counts as intronic, even inside an antisense
+  exon.** An exon on the other strand used to outrank an intron on the read's
+  own strand. A read inside an intron of one gene that lay on an exon of a
+  gene on the opposite strand was `exonic_antisense`. Unspliced RNA of the
+  host gene explains such a read without an artifact, so the sense intron now
+  ranks first. `exonic_antisense` is left with exons that have no gene on the
+  read's strand.
+  - Kinnex example (37.4 M reads, whole cells): `exonic_antisense` goes from
+    0.743% to 0.507% of reads and from 0.969% to 0.589% of bases.
+    `intronic_pure` 13.81% to 13.96%, `intronic_boundary` 3.47% to 3.55%,
+    `intronic_jxnspan` 3.02% to 3.06%, `strand_concordance` 98.87% to 99.22%.
+    `exonic_sense` 64.80% to 64.77%: in a few reads the exonic bases were
+    the largest share only while the intronic bases were split over two labels.
+  - chr21 of that sample: 19,847 of 505,649 reads move. 96% of them fall in
+    five 2 kb windows at the rDNA arrays (8.21, 8.39 and 8.44 Mb, beside the
+    5.8S genes), on lncRNA exons annotated on the other strand.
+  - chr21 of a 10x 3' v4 single-nucleus library (human retina): 7,626 of
+    724,507 reads move, almost all unspliced reads inside host genes such as
+    PCBP3, GET1-SH3BGR and MCM3AP. `exonic_antisense` 3.32% to 2.27%.
+  - The alternative was tested. If these bases were strand-flipped copies of
+    the nested gene's transcripts, their ratio to that gene's sense bases
+    would match the library's own antisense:sense ratio in exons with nothing
+    on the other strand (1.1% in the cells, 6.7% in the nuclei). That ratio
+    accounts for 0.7% of the observed bases in the cells and 23% in the
+    nuclei.
+  - **This is not what Cell Ranger does.** In the nuclei BAM, Cell Ranger
+    9.0.1 tags 88% of the moved reads as antisense (`RE:E`, `AN` present, no
+    `GX`). That is an observation on one BAM, not a statement from the Cell
+    Ranger documentation. Expect `exonic_antisense` below Cell Ranger's
+    antisense share, most of all in nuclei.
+  - Synthetic benchmark: antisense reads are now placed only in exons with no
+    gene on the read's strand. Before that change 23 of the 200 lay inside an
+    intron of a gene on their own strand, where they are now intronic. Mean
+    per-category accuracy is 0.989, lowest 0.925.
 - **Without `--reference`, the genome-dependent checks are blank, not 0.**
   Internal priming, non-canonical junctions, RT-switch repeats and the
   intergenic hotspot call all read the genome sequence. Without a reference
@@ -37,8 +71,19 @@ reported number says so here.
   `exonic_antisense` need "≥1 aligned base" in an exon. A read takes the
   category holding most of its aligned bases, and the legend now says so.
 
+### Docs
+
+- The README screenshots and the white paper's example table come from a
+  0.10.0 run of the same Kinnex sample. They were from 0.8.0. Against 0.8.0,
+  `three_prime_anchored_frac` reads 95.68% instead of 99.62% because the
+  polyA atlas is filtered at 25% support by default since 0.9.1, and the
+  chimeric share reads 3.89% instead of 3.70% after the 0.9.1 minus-strand
+  fix.
+
 ### Tests
 
+- `tests/test_sense_intron_precedence.py` classifies reads on a gene nested
+  in an intron of a gene on the other strand, on both strands.
 - `tests/test_cli_other_commands.py` runs `compare`, `discover` and
   `run-plate` through the real command line. Before, only `run` was.
 - `tests/test_reference_dependent_blanks.py` covers the blank values in every

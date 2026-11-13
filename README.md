@@ -2,7 +2,7 @@
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19554841.svg)](https://doi.org/10.5281/zenodo.19554841)
 
-Current version: **0.9.1**
+Current version: **0.10.0**
 
 Quality control for single-cell RNA-seq alignments. It answers two questions about a library: where do the reads land, and which of them look like technical artifacts?
 
@@ -88,7 +88,7 @@ Do not rely on an aligner name alone to identify the sequencer or library. `mini
 
 The interactive HTML report also covers [sample metadata](docs/report_preview1.png), [read and base fractions](docs/report_preview3.png), [length-stratified and per-cell composition](docs/report_preview4.png), [read-length distributions and artifact flags](docs/report_preview5.png), and [the top intergenic loci](docs/report_preview6.png).
 
-These screenshots come from a 10x Kinnex sample (37.4 M reads, 2,047 cells) run with version 0.8.0. A few intergenic and chimeric values differ slightly under the current version, so read the panels as a tour of the layout.
+These screenshots come from a 10x Kinnex sample (37.4 M reads, 2,047 cells) run with version 0.10.0.
 
 ## Classification
 
@@ -110,7 +110,7 @@ Counts named `n_reads_*` are alignment records, so the two mates of a pair count
 | `ambiguous_cod_cod` | Same-strand region shared by protein-coding genes |
 | `ambiguous_cod_ncod` | Same-strand region shared by coding and non-coding genes |
 | `exonic_sense` | Exonic overlap on the read strand |
-| `exonic_antisense` | Exonic overlap on the opposite strand |
+| `exonic_antisense` | Exonic overlap on the opposite strand, with no gene on the read's strand there |
 | `intronic_jxnspan` | Intronic bases on an alignment containing a CIGAR `N` |
 | `intronic_boundary` | Exonic and intronic bases without a splice operation |
 | `intronic_pure` | Intronic bases without boundary or junction evidence |
@@ -121,7 +121,7 @@ Counts named `n_reads_*` are alignment records, so the two mates of a pair count
 | `intergenic_sparse` | Intergenic window below the enrichment/support thresholds |
 | `ambiguous` | Defensive fallback for an otherwise unresolved alignment |
 
-For the base-level fractions, aligned blocks are split at every annotation boundary and each piece receives exactly one category, so base counts sum exactly to the aligned reference bases even where genes overlap. Same-strand gene sharing is ambiguous; overlapping genes on opposite strands remain strand-resolvable.
+For the base-level fractions, aligned blocks are split at every annotation boundary and each piece receives exactly one category, so base counts sum exactly to the aligned reference bases even where genes overlap. Same-strand gene sharing is ambiguous; overlapping genes on opposite strands remain strand-resolvable. Where a piece lies in an intron of a gene on the read's strand and in an exon of a gene on the other strand, the read's own strand decides and the piece is intronic.
 
 Genomic distance by itself is not used to call an RNA split chimeric: a long gap may simply be an intron. Orphan/improper pairs are reported as `discordant_pair` flags and are not automatically called chimeric.
 

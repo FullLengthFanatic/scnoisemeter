@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scnoisemeter"
-version = "0.9.1"
+version = "0.10.0"
 description = "Barcode-aware alignment artifact and read-distribution QC for single-cell RNA-seq"
 readme = "README.md"
 # classifier.ReadResult uses @dataclass(slots=True), which is 3.10+.

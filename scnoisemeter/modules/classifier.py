@@ -21,8 +21,9 @@ Classification hierarchy
   MULTIMAPPER       (NH > 1) → multimapper bucket, still base-classified
   MITOCHONDRIAL     maps to chrM / MT
   CHIMERIC          SA tag + distance/strand rules
-  EXONIC_SENSE      ≥1 bp overlap with exon, correct strand
-  EXONIC_ANTISENSE  ≥1 bp overlap with exon, wrong strand
+  EXONIC_SENSE      most aligned bases in an exon on the read's strand
+  EXONIC_ANTISENSE  most aligned bases in an exon on the other strand,
+                    outside every gene on the read's strand
   INTRONIC_JXNSPAN  intronic + CIGAR N at known/novel splice site
   INTRONIC_BOUNDARY spans exon-intron boundary, no splice op
   INTRONIC_PURE     entirely within intron body
@@ -1105,8 +1106,10 @@ _BASE_CATEGORY_PRIORITY = [
     ("shared_cod_cod", ReadCategory.AMBIGUOUS_COD_COD),
     ("shared_cod_ncod", ReadCategory.AMBIGUOUS_COD_NCOD),
     ("exon_sense", ReadCategory.EXONIC_SENSE),
-    ("exon_anti", ReadCategory.EXONIC_ANTISENSE),
+    # A gene on the read's own strand explains the base before one on the
+    # other strand does: unspliced RNA of the host gene needs no artifact.
     ("intron_sense", ReadCategory.INTRONIC_PURE),
+    ("exon_anti", ReadCategory.EXONIC_ANTISENSE),
     ("intron_anti", ReadCategory.INTRONIC_PURE),
 ]
 

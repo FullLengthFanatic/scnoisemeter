@@ -65,7 +65,8 @@ Not yet covered:
 Key correctness invariants:
   * Strand-safe + exons: + strand exons with no base overlap to any - strand
     exon. Ensures EXONIC_ANTISENSE reads do not become EXONIC_SENSE vs an
-    overlapping - strand gene.
+    overlapping - strand gene. Antisense reads use the subset with no - strand
+    gene at all: inside an intron of a - strand gene they would be intronic.
   * True introns: inside a + strand gene body and outside ANY annotated exon.
   * Clean intergenic: >= 10 kb from any gene and not inside any exon.
   * JXNSPAN: read's mapped bases (both M segments) lie in intronic space, with
@@ -296,6 +297,15 @@ def build_all_pickers(genes, exons, chrom_size, fa, buffer=10_000):
             continue
         safe_plus_exons.append((s, e))
 
+    # --- + exons for antisense reads: no - strand gene there at all.  A
+    # - strand read inside an intron of a - strand gene is intronic.
+    minus_gene_union = _merge([(s, e) for s, e, st, *_ in genes if st == "-"])
+    minus_gene_starts = _starts(minus_gene_union)
+    antisense_plus_exons = [
+        (s, e) for s, e in safe_plus_exons
+        if not _overlaps(minus_gene_union, minus_gene_starts, s, e)
+    ]
+
     # --- + strand gene bodies and + strand introns ---
     plus_gene_union = _merge([(s, e) for s, e, st, *_ in genes if st == "+"])
     plus_gene_starts = _starts(plus_gene_union)
@@ -432,6 +442,7 @@ def build_all_pickers(genes, exons, chrom_size, fa, buffer=10_000):
 
     return {
         "safe_plus_exons": safe_plus_exons,
+        "antisense_plus_exons": antisense_plus_exons,
         "plus_introns": plus_introns,
         "jxnspan_introns": jxnspan_introns,
         "boundary_positions": boundary_positions,
@@ -764,7 +775,7 @@ def main():
             pos = random.randint(s + 10, e - READ_LEN - 10)
             r = make_read(name, ref_id[WORK_CHROM], pos, "+", cb, u)
         elif cat == "EXONIC_ANTISENSE":
-            s, e = random.choice(picks["safe_plus_exons"])
+            s, e = random.choice(picks["antisense_plus_exons"])
             pos = random.randint(s + 10, e - READ_LEN - 10)
             r = make_read(name, ref_id[WORK_CHROM], pos, "-", cb, u)
         elif cat == "INTRONIC_PURE":
