@@ -24,33 +24,41 @@ class ReadCategory(str, Enum):
     reported separately because they do not carry a comparable genomic
     location classification.
 
-    Hierarchy (earlier entries take priority over later ones during assignment):
+    Assignment.  Four gates are checked in order and the first that applies
+    is the category: UNASSIGNED, MULTIMAPPER, MITOCHONDRIAL, CHIMERIC.  Every
+    other read takes the category holding most of its aligned bases.  Each
+    base gets one category, in the order shared coding-coding, shared
+    coding-noncoding, sense exon, sense intron, antisense exon, antisense
+    intron, intergenic.
 
-      UNMAPPED          – read did not align; excluded from all fractions
-      SECONDARY         – SAM flag 0x100; skipped (redundant record)
-      SUPPLEMENTARY     – SAM flag 0x800; routed to chimeric detector only
-      MULTIMAPPER       – primary alignment with explicit multi-hit evidence
-      MITOCHONDRIAL     – maps to the mitochondrial contig (chrM / MT)
-      CHIMERIC          – SA tag with inter-chromosomal, strand-discordant,
-                          or incompatible query/genomic order evidence
-      EXONIC_SENSE      – overlaps ≥1 annotated exon base, correct strand
-      EXONIC_ANTISENSE  – overlaps ≥1 annotated exon base, wrong strand
-      INTRONIC_JXNSPAN  – intronic but CIGAR contains N near a splice site
-                          (candidate intron-retention or NNC transcript)
-      INTRONIC_PURE     – maps entirely within intron body, no junction signal
-      INTRONIC_BOUNDARY – spans an exon–intron boundary without a splice op
-                          (candidate incomplete RT)
-      INTERGENIC_REPEAT – intergenic, overlaps RepeatMasker annotation
-      INTERGENIC_HOTSPOT– intergenic, passes adaptive threshold but shows
-                          internal-priming / A-rich-3′ signature
-      INTERGENIC_NOVEL  – intergenic, passes adaptive threshold, strand-
-                          consistent, near annotated polyA site (candidate
-                          unannotated gene)
-      INTERGENIC_ENRICHED – enriched intergenic locus without enough evidence
+      UNMAPPED            - read did not align; excluded from all fractions
+      SECONDARY           - SAM flag 0x100; skipped (redundant record)
+      SUPPLEMENTARY       - SAM flag 0x800; routed to chimeric detector only
+      UNASSIGNED          - CB tag absent or not on the whitelist
+      MULTIMAPPER         - primary alignment with explicit multi-hit evidence
+      MITOCHONDRIAL       - maps to the mitochondrial contig (chrM / MT)
+      CHIMERIC            - SA tag with inter-chromosomal, strand-discordant,
+                            or incompatible query/genomic order evidence
+      AMBIGUOUS_COD_COD   - same-strand region shared by protein-coding genes
+      AMBIGUOUS_COD_NCOD  - same-strand region shared by a coding and a
+                            non-coding gene
+      EXONIC_SENSE        - annotated exon on the read's strand
+      EXONIC_ANTISENSE    - annotated exon on the other strand, outside every
+                            gene on the read's strand
+      INTRONIC_JXNSPAN    - intronic bases on an alignment with a CIGAR N
+      INTRONIC_BOUNDARY   - intronic bases on an unspliced alignment that also
+                            holds sense-exon bases (candidate incomplete RT)
+      INTRONIC_PURE       - intronic bases with no junction or boundary evidence
+      INTERGENIC_REPEAT   - intergenic, overlaps supplied repeat intervals
+      INTERGENIC_HOTSPOT  - enriched intergenic window with a genomic A-run
+                            (internal-priming) signature, away from an
+                            annotated polyA site
+      INTERGENIC_NOVEL    - enriched, strand-consistent, multi-barcode window
+                            with splice or annotated-polyA support
+      INTERGENIC_ENRICHED - enriched intergenic window without enough evidence
                             to call a hotspot or transcript candidate
-      INTERGENIC_SPARSE – intergenic, below adaptive threshold (likely noise)
-      AMBIGUOUS         – overlaps shared region of two or more genes
-      UNASSIGNED        – CB tag absent or not on whitelist
+      INTERGENIC_SPARSE   - intergenic, below the enrichment thresholds
+      AMBIGUOUS           - fallback for an otherwise unresolved alignment
     """
 
     UNMAPPED           = "unmapped"
@@ -349,22 +357,6 @@ SITE_COORD_OUT_OF_RANGE_DROP = 0.20
 # Fraction of the genome within POLYA_SITE_PROXIMITY of a loaded atlas site
 # above which the atlas is reported as too dense to act as a proximity test.
 POLYA_ATLAS_DENSITY_WARN = 0.20
-
-# The 12 canonical human polyA signal hexamers in descending frequency
-# (Beaudoing et al. 2000); the first two account for ~80% of real sites.
-# POLYA_HEXAMERS_STRICT is the subset used as positive evidence: a strict
-# hexamer 10-40 nt upstream occurs at 9.4% of random genomic positions, so the
-# full list is too permissive to carry evidential weight on its own.
-POLYA_HEXAMERS = (
-    "AATAAA", "ATTAAA", "AGTAAA", "TATAAA", "CATAAA", "GATAAA",
-    "AATATA", "AATACA", "AATAGA", "AAAAAG", "ACTAAA", "AAGAAA",
-)
-POLYA_HEXAMERS_STRICT = (
-    "AATAAA", "ATTAAA", "TATAAA", "AGTAAA", "CATAAA", "GATAAA",
-)
-# Distance window (bp) from hexamer start to the cleavage site.
-POLYA_HEXAMER_MIN_DIST = 10
-POLYA_HEXAMER_MAX_DIST = 40
 
 # Percent-A criterion for internal priming, the SQANTI3/pigeon
 # perc_A_downstream_TTS convention.  The cutoff is on a 0-100 scale: 60, not

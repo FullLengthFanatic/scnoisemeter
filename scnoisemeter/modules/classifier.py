@@ -3,43 +3,35 @@ classifier.py
 =============
 The core per-read classification engine.
 
-For every primary, non-secondary alignment the classifier:
+For every primary alignment (secondary and supplementary records are skipped)
+``ReadClassifier.classify()``:
 
-  1. Applies the priority hierarchy (multimapper → mito → chimeric →
-     exonic → intronic → intergenic) to assign a single :class:`ReadCategory`.
-  2. Simultaneously tallies the number of aligned *bases* falling into each
-     category (base-level fractions — the primary benchmarking metric).
-  3. Checks for TSO invasion signature in soft-clipped 5′ bases.
-  4. Checks for internal oligo-dT priming signature at the read 3′ end.
-  5. Checks splice-site canonicality for junction-spanning intronic reads.
+  1. Checks four gates in order and returns at the first that applies:
+     UNASSIGNED (no usable cell barcode), MULTIMAPPER (NH > 1),
+     MITOCHONDRIAL (chrM / MT), CHIMERIC (SA-tag evidence).
+  2. Otherwise splits the aligned blocks at every annotation boundary and
+     gives each piece exactly one category, in the order of
+     ``_BASE_CATEGORY_PRIORITY``: shared coding-coding, shared
+     coding-noncoding, sense exon, sense intron, antisense exon, antisense
+     intron, then intergenic.
+  3. Relabels the intronic bases as INTRONIC_JXNSPAN when the alignment has a
+     CIGAR N, or as INTRONIC_BOUNDARY when an unspliced alignment also holds
+     sense-exon bases.
+  4. Names the read after the category holding most of its aligned bases
+     (ties: ``_READ_TIEBREAK_PRIORITY``) and keeps the per-category base
+     tally for the base-level fractions.
+  5. Sets the artifact flags independently of the category: TSO invasion and
+     TSO concatemers, internal polyA priming, an untemplated polyA tail,
+     RT-switch direct repeats, non-canonical junctions and discordant pairs.
+     Internal priming, RT-switch repeats and junction canonicality read the
+     genome sequence and are skipped without a reference FASTA.
 
-Classification hierarchy
-------------------------
-  UNMAPPED          skip
-  SECONDARY         skip
-  SUPPLEMENTARY     chimeric detector only
-  MULTIMAPPER       (NH > 1) → multimapper bucket, still base-classified
-  MITOCHONDRIAL     maps to chrM / MT
-  CHIMERIC          SA tag + distance/strand rules
-  EXONIC_SENSE      most aligned bases in an exon on the read's strand
-  EXONIC_ANTISENSE  most aligned bases in an exon on the other strand,
-                    outside every gene on the read's strand
-  INTRONIC_JXNSPAN  intronic + CIGAR N at known/novel splice site
-  INTRONIC_BOUNDARY spans exon-intron boundary, no splice op
-  INTRONIC_PURE     entirely within intron body
-  INTERGENIC_*      no gene body overlap (sub-classified later by
-                    the IntegergenicProfiler module)
-  AMBIGUOUS         overlaps shared region of ≥2 genes
-  UNASSIGNED        CB tag absent or not on whitelist
+Intergenic reads leave this module as INTERGENIC_SPARSE.  The intergenic
+profiler promotes them to the other intergenic categories afterwards.
 
-For each read we also compute:
-  - Read-level category   (single enum, used for per-cell QC)
-  - Base-level breakdown  (dict category → n_bases, used for benchmarking)
-  - Flags: is_tso_invasion, is_polya_priming, has_noncanonical_junction
-
-This module is stateless: it exposes a single classify_read() function and
-a ReadResult dataclass.  Aggregation is the responsibility of the caller
-(the contig worker in pipeline.py).
+The classifier keeps no per-sample state beyond a per-contig interval cache.
+Aggregation is the responsibility of the caller (the contig worker in
+pipeline.py).
 """
 
 from __future__ import annotations
