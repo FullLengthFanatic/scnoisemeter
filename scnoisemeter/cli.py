@@ -205,7 +205,8 @@ def _shared_options(func):
                           f"{PRIMING_TEMPLATED_MIN} or more A's in the "
                           f"{PRIMING_LABEL_WINDOW} nt downstream of its priming site "
                           "(--priming-site-rule), the definition of "
-                          f"{PRIMING_DEFINITION_SOURCE}."),
+                          f"{PRIMING_DEFINITION_SOURCE}. The default was 'a_run' "
+                          "through 0.10.0; pass a_run to reproduce those results."),
         click.option("--priming-site-rule",
                      type=click.Choice(["auto", *PRIMING_SITE_RULES], case_sensitive=False),
                      default="auto", show_default=True,

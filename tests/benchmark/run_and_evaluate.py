@@ -98,8 +98,11 @@ def _common_run_flags(args):
     # Pinned rather than left to the default: unfiltered, the auto-downloaded
     # PolyASite atlas sits within 50 bp of most A-rich synthetic loci and
     # relabels them from hotspot to novel, so the run would score the atlas
-    # density rather than the classifier.
-    flags = ["--polya-min-support", "25"]
+    # density rather than the classifier.  The priming criterion is pinned to
+    # the A-run rule that synthesize_bam.py plants the Exp 4 polyA reads for
+    # (an A-run of 6 or more in the 20 bp past the alignment end).  Their
+    # sequence is all N, so the default 'count' finds no site and flags none.
+    flags = ["--polya-min-support", "25", "--priming-criterion", "a_run"]
     if args.barcode_whitelist:
         flags.extend(["--barcode-whitelist", args.barcode_whitelist])
     else:

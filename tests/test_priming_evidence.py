@@ -5,7 +5,8 @@ The 0.9 internal-priming work, transferred from flightcollapse.
 
 Each class pins one behaviour that a plausible future edit would break, and the
 option defaults are asserted explicitly: every setting here changes a reported
-number, so the release must be installable without moving one.
+number, so a default moves only in a release whose CHANGELOG names the numbers
+it changes.
 """
 
 from __future__ import annotations
@@ -177,7 +178,7 @@ class TestAtlasSupportFilter:
 
     def test_option_defaults(self):
         assert POLYA_MIN_SUPPORT_DEFAULT == 25.0
-        assert PRIMING_CRITERION_DEFAULT == "a_run"
+        assert PRIMING_CRITERION_DEFAULT == "count"
 
 
 class TestAtlasDensity:

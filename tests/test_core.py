@@ -459,7 +459,8 @@ class TestPolyAPrimingStrand:
 
     def _clf(self, downstream, upstream):
         index = MagicMock(); index.splice_sites = {}
-        return ReadClassifier(index, reference=self._FakeRef(downstream, upstream))
+        return ReadClassifier(index, reference=self._FakeRef(downstream, upstream),
+                              priming_criterion="a_run")
 
     def _read(self, is_reverse):
         r = MagicMock()

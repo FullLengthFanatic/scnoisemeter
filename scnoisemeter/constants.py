@@ -365,7 +365,9 @@ POLYA_ATLAS_DENSITY_WARN = 0.20
 # rather than as a correction.
 POLYA_PERC_A_WINDOW = 20
 POLYA_PERC_A_MIN = 60.0
-PRIMING_CRITERION_DEFAULT = "a_run"      # "a_run" | "perc_a" | "either"
+# "a_run" | "perc_a" | "either" | "count".  "count" flags a read whose
+# priming label (below) is templated; the default was "a_run" through 0.10.0.
+PRIMING_CRITERION_DEFAULT = "count"
 
 # Priming site and label of flight-polyafilter-bench (its docs/definition.json,
 # copied byte for byte to tests/data/definition.json).  The site is a 0-based
