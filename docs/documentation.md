@@ -115,7 +115,8 @@ BED coordinates are zero-based, half-open; midpoint is used for end-site resourc
 | `--obs-metadata` | none | per-cell cluster metadata for cluster summaries |
 | `--no-umi-tracking` | off | disable UMI-string sets to reduce memory; `--no-umi-dedup` is a legacy alias |
 | `--polya-min-support` | 25 | drop polyA atlas records supported in fewer than this percentage of samples (column 7 of a PolyASite BED). 0 loads the atlas whole; see the note below |
-| `--priming-criterion` | `a_run` | internal-priming test: `a_run` (consecutive genomic A's), `perc_a` (SQANTI3/pigeon `perc_A_downstream_TTS`, ≥60% A over 20 bp), or `either` |
+| `--priming-criterion` | `count` | internal-priming test: `count` (the read's priming label is templated: 8 or more A's in the 20 nt downstream of its priming site, the flight-polyafilter-bench definition), `a_run` (6 or more consecutive genomic A's past the alignment end; the default through 0.10.0), `perc_a` (SQANTI3/pigeon `perc_A_downstream_TTS`, ≥60% A over 20 bp), or `either` (`a_run` or `perc_a`) |
+| `--priming-site-rule` | `auto` | where a read's priming site is, for the priming label and `count`: `clip` (the alignment end, when the read's `pa` tag, or without one its 3′ soft clip, counts 20 or more A's; short reads) or `a_run` (where the terminal A run starts, when it holds 10 or more A's with at most one other base inside, aligned A's included; long reads). `auto` takes `clip` for Illumina, 10x, BD and Smart-seq and `a_run` for ONT, PacBio and unknown platforms |
 | `--anchor-veto-internal-priming` | off | require the absence of an internal-priming signature for a read to count towards 3′ anchoring; lowers `three_prime_anchored_frac` |
 | `--no-strict` | off | downgrade the pre-write sanity checks from errors to warnings (see §9a) |
 
@@ -288,7 +289,7 @@ Three checks run before any output is written. Each can be downgraded to a warni
 
 **Site-atlas coordinate range.** Contig names matching does not mean the assembly matches. An hg19 atlas against an hg38 BAM shares every contig name, so the existing naming check passes while every coordinate is displaced and every proximity test silently returns nothing. Positions falling beyond the end of their contig are the detectable part: above 20% out of range the atlas is discarded and its metrics reported as absent; above 1% it warns.
 
-**Result invariants.** Every run checks the finished result set against the structural properties the tool claims for it, and writes `<sample>.qc.json` with each verdict and its observed values. Checked: each composition sums to one; every fraction lies in [0, 1]; `artifact_candidate_*` does not exceed `broad_noncanonical_*`, whose categories contain it; `both_ends_anchored_frac` does not exceed either single-end fraction, being their conjunction on the same reads; no flag count exceeds `n_reads_classified`; UNASSIGNED does not exceed the classified total; UMI diversity ratios stay in [0, 1]; `n_cells` matches the per-cell table; `strand_concordance` matches its definition recomputed from the reported composition.
+**Result invariants.** Every run checks the finished result set against the structural properties the tool claims for it, and writes `<sample>.qc.json` with each verdict and its observed values. Checked: each composition sums to one; every fraction lies in [0, 1]; `artifact_candidate_*` does not exceed `broad_noncanonical_*`, whose categories contain it; `both_ends_anchored_frac` does not exceed either single-end fraction, being their conjunction on the same reads; no flag count exceeds `n_reads_classified`; the templated, non-templated and ambiguous counts sum to `n_priming_site_observed`, which does not exceed `n_reads_classified`; UNASSIGNED does not exceed the classified total; UMI diversity ratios stay in [0, 1]; `n_cells` matches the per-cell table; `strand_concordance` matches its definition recomputed from the reported composition.
 
 A violated invariant means a number about to be written is wrong, so the run stops. Two checks are warnings rather than errors because a documented configuration breaks them: reservoir-estimated reclassification scales promoted totals from a sub-sample, so exact conservation need not survive rounding; and `--anchor-veto-internal-priming` lowers the unrestricted 3′ fraction without lowering the PAS-restricted subset. Checks whose inputs are absent are skipped, not failed.
 
@@ -326,12 +327,16 @@ Each flag is written as a count of classified alignments. The matching rates (co
 
 - `n_tso_invasion`;
 - `n_tso_concatemer`;
-- `n_polya_priming` — genomic A-run beyond the read's 3′ end. A property of the locus, not of the molecule;
-- `n_polya_tail` — untemplated A-run in the read's own 3′ **soft** clip. A property of the molecule. Read with the previous flag: both set means a real 3′ end in A-rich sequence, which the genomic flag alone calls internal priming. Hard-clipped BAMs report 0 because the bases are absent from the record;
+- `n_polya_priming`: reads flagged by `--priming-criterion`. Under the default `count` these are the reads labelled templated, so the count equals `n_priming_templated`; under `a_run`, `perc_a` and `either`, the reads with A-rich reference past the alignment end. A property of the locus, not of the molecule;
+- `n_polya_tail`: reads whose own 3′ **soft** clip starts with 8 or more adenines. Clipped adenines come from the oligo(dT) primer in both cases, so they do not tell a real 3′ end from internal priming. The genome downstream of the site and the polyA signal do. `polya_tail_frac` is the share of reads with 8 or more clipped adenines at the 3′ end; the reads whose priming site is observed under the benchmark rules are counted in `n_priming_site_observed`. Hard-clipped BAMs report 0 because the bases are absent from the record;
+- `n_priming_site_observed`: reads whose priming site is observed under the flight-polyafilter-bench rule that `--priming-site-rule` selects, with the 20 nt downstream of the site on the contig. Blank without `--reference`;
+- `n_priming_templated`, `n_priming_nontemplated`, `n_priming_ambiguous`: those reads by label, from the A's in the 20 nt of reference downstream of the site: 8 or more, 4 or fewer, 5 to 7. The three sum to `n_priming_site_observed`. Blank without `--reference`;
 - `n_noncanon_junction`;
 - `n_rt_switch_repeat` — an intron whose two ends share a ≥6 bp direct repeat, the reverse-transcriptase template-switch signature. Independent of junction canonicality, because such an artifact can occupy a GT-AG boundary. Requires a reference FASTA;
 - `n_discordant_pair`;
 - `n_low_mapq`.
+
+The label shares `priming_templated_frac`, `priming_nontemplated_frac` and `priming_ambiguous_frac` are over `n_priming_site_observed`, not `n_reads_classified`. `read_metrics.tsv` writes them with six decimals, or as `not observable` when the run had no `--reference` or no read has a site. `<sample>.multiqc.json` carries them with `n_priming_site_observed`, as null when no read has a site, and leaves all four out without `--reference`. A share that cannot be computed is never written as 0.
 
 ### Ends and provenance
 

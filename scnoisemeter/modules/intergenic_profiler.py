@@ -9,7 +9,7 @@ pass significance thresholds into more informative sub-categories:
 
   INTERGENIC_SPARSE   → stays sparse  (below adaptive threshold)
   INTERGENIC_REPEAT   → overlaps RepeatMasker annotation
-  INTERGENIC_HOTSPOT  → passes threshold but shows internal-priming signature
+  INTERGENIC_HOTSPOT  → passes threshold and carries the A-run locus signature
   INTERGENIC_NOVEL    → passes threshold, strand-consistent, polyA-site-proximal
   INTERGENIC_ENRICHED → passes threshold without more specific evidence
 
@@ -28,7 +28,9 @@ caller: it has no local-background or mappability model.
 
 Hotspot classification heuristics (rule-based, no ML)
 ------------------------------------------------------
-A window is called INTERGENIC_HOTSPOT (internal-priming candidate) if ALL of:
+INTERGENIC_HOTSPOT is a locus signature, not an internal-priming rate, and
+its A-run rule is the same under every --priming-criterion.  A window is
+called INTERGENIC_HOTSPOT if ALL of:
   1. Monoexonic: all reads lack CIGAR N (no splice junctions)
   2. Strand-aware A/T-rich 3′ context within POLYA_CONTEXT_WINDOW bp of the
      modal read 3′ end in the reference
@@ -524,7 +526,7 @@ def _is_hotspot(
     near_polya_site: bool,
 ) -> bool:
     """
-    Rule-based hotspot (internal priming artifact) classifier.
+    Rule-based hotspot classifier: a locus signature, not an internal-priming rate.
 
     Requires monoexonic reads, an A-rich 3′ context, AND that the locus is
     NOT within POLYA_SITE_PROXIMITY bp of an annotated polyA site (such a

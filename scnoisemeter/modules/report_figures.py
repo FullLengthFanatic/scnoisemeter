@@ -53,7 +53,7 @@ CATEGORY_COLOURS = {
     ReadCategory.INTRONIC_BOUNDARY:   "#c67261",   # clay
     ReadCategory.INTERGENIC_SPARSE:   "#635dfd",   # indigo — not enriched
     ReadCategory.INTERGENIC_REPEAT:   "#00c8d7",   # cyan
-    ReadCategory.INTERGENIC_HOTSPOT:  "#f33179",   # magenta — internal-priming candidate
+    ReadCategory.INTERGENIC_HOTSPOT:  "#f33179",   # magenta: A-run locus signature
     ReadCategory.INTERGENIC_NOVEL:    "#8b68ad",   # muted purple — candidate biology
     ReadCategory.INTERGENIC_ENRICHED: "#c2ae3e",   # gold — enriched, unresolved
     ReadCategory.CHIMERIC:            "#393eca",   # blue
@@ -101,9 +101,9 @@ CATEGORY_CRITERIA: dict[ReadCategory, str] = {
     ReadCategory.INTRONIC_BOUNDARY:   "Spans an exon–intron boundary (sense) with no CIGAR N at the junction — candidate incomplete reverse transcription.",
     ReadCategory.INTRONIC_PURE:       "Intronic alignment without CIGAR N or an exon–intron boundary; can represent pre-mRNA or technical capture.",
     ReadCategory.INTERGENIC_REPEAT:   "Outside gene bodies with ≥50% sampled aligned span overlapping supplied repeat intervals.",
-    ReadCategory.INTERGENIC_HOTSPOT:  "Enriched fixed window, monoexonic, with strand-aware genomic A/T-run context and no nearby matched polyA site — internal-priming candidate.",
+    ReadCategory.INTERGENIC_HOTSPOT:  "Enriched fixed window, monoexonic, with strand-aware genomic A/T-run context and no nearby matched polyA site: a locus signature, not an internal-priming rate.",
     ReadCategory.INTERGENIC_NOVEL:    "Intergenic, above significance threshold, strand-consistent, multi-barcode, AND splice or polyA evidence — candidate unannotated transcript.",
-    ReadCategory.INTERGENIC_ENRICHED: "Fixed intergenic window with significant enrichment but insufficient positive evidence for either internal priming or a transcript candidate.",
+    ReadCategory.INTERGENIC_ENRICHED: "Fixed intergenic window with significant enrichment but insufficient positive evidence for either the hotspot's A-run signature or a transcript candidate.",
     ReadCategory.INTERGENIC_SPARSE:   "Intergenic window not promoted by the global-rate enrichment/support screen.",
     ReadCategory.AMBIGUOUS:           "Maps to a region where multiple genes overlap and the sub-type (cod/cod or cod/ncod) cannot be determined.",
     ReadCategory.AMBIGUOUS_COD_COD:   "Maps to a same-strand region shared by two protein-coding gene bodies.",
@@ -694,7 +694,7 @@ def _intergenic_loci_plots(intergenic_loci: list) -> "list[go.Figure]":
     # how intergenic_repeat and intergenic_enriched came to share a colour.
     cat_colours = CATEGORY_COLOURS
     cat_labels = {
-        ReadCategory.INTERGENIC_HOTSPOT: "Internal priming hotspot",
+        ReadCategory.INTERGENIC_HOTSPOT: "A-run hotspot",
         ReadCategory.INTERGENIC_NOVEL:   "Candidate unannotated transcript",
         ReadCategory.INTERGENIC_ENRICHED:"Enriched, unresolved",
         ReadCategory.INTERGENIC_REPEAT:  "Repeat-derived",

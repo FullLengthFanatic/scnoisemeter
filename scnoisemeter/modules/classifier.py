@@ -21,8 +21,9 @@ For every primary alignment (secondary and supplementary records are skipped)
      (ties: ``_READ_TIEBREAK_PRIORITY``) and keeps the per-category base
      tally for the base-level fractions.
   5. Sets the artifact flags independently of the category: TSO invasion and
-     TSO concatemers, internal polyA priming, an untemplated polyA tail,
-     RT-switch direct repeats, non-canonical junctions and discordant pairs.
+     TSO concatemers, internal polyA priming with the read's priming site and
+     label, a clipped polyA tail, RT-switch direct repeats, non-canonical
+     junctions and discordant pairs.
      Internal priming, RT-switch repeats and junction canonicality read the
      genome sequence and are skipped without a reference FASTA.
 
@@ -122,10 +123,10 @@ class ReadResult:
         20 nt downstream of the site, in transcript sense; None when
         ``priming_site_observed`` is False.  Computed under every criterion.
     has_polya_tail : bool
-        True if the 3′ SOFT clip carries an untemplated A-run of at least
-        POLYA_TAIL_MIN_LENGTH.  Independent per-molecule evidence: a read with
-        both this and ``is_polya_priming`` is a real cleavage site in an A-rich
-        context, which the genomic test alone reports as internal priming.
+        True if the 3′ SOFT clip starts with a run of at least
+        POLYA_TAIL_MIN_LENGTH A's.  Clipped adenines come from the oligo(dT)
+        primer in both cases, so they do not tell a real 3′ end from internal
+        priming; ``priming_label`` reads the genome downstream of the site.
         Always False on a hard-clipped BAM, where the bases are unavailable.
     has_noncanonical_junction : bool
         True if any CIGAR N operation falls at a non-canonical splice site
@@ -769,13 +770,12 @@ class ReadClassifier:
         return True, priming_label(window.upper().count(base))
 
     def _polya_tail_stats(self, read: pysam.AlignedSegment) -> tuple[int, int, float]:
-        """``(soft_clip_len, terminal untemplated A-run, A-fraction)`` at the 3' end.
+        """``(soft_clip_len, terminal clipped A-run, A-fraction)`` at the 3' end.
 
-        A genomic A-run downstream says the *locus* is A-rich; it cannot tell a
-        real cleavage site from a stretch that primes internally in every
-        library.  An A-run in the soft clip immediately outside the aligned
-        block is not templated by the reference, so it is per-molecule evidence
-        that this read carried a polyA tail.
+        The run counts A's from the clipped base next to the aligned block.
+        Clipped adenines come from the oligo(dT) primer in both cases, so they
+        do not tell a real 3' end from internal priming.  The genome downstream
+        of the priming site and the polyA signal do (``_priming_label``).
 
         Only SOFT clips are counted: hard-clipped bases are absent from
         ``query_sequence``, so a hard-clipped BAM reports 0 rather than
@@ -813,7 +813,7 @@ class ReadClassifier:
         return clip_len, run, frac
 
     def _has_polya_tail(self, read: pysam.AlignedSegment) -> bool:
-        """True when the 3' soft clip carries an untemplated polyA tail."""
+        """True when the 3' soft clip starts with POLYA_TAIL_MIN_LENGTH or more A's."""
         _clip, run, frac = self._polya_tail_stats(read)
         if run < POLYA_TAIL_MIN_LENGTH:
             return False

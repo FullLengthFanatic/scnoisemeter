@@ -65,7 +65,7 @@ def classifier():
 
 
 # ---------------------------------------------------------------------------
-# Untemplated 3' polyA tail from the read's own soft clip
+# Clipped 3' polyA tail from the read's own soft clip
 # ---------------------------------------------------------------------------
 
 class TestPolyATail:

@@ -332,9 +332,11 @@ def _check_comparability(cohort: Cohort) -> None:
         cohort.warnings.append(
             "Samples were run with different polyA settings (--polya-min-support, "
             "--priming-criterion, --priming-site-rule or "
-            "--anchor-veto-internal-priming). The intergenic "
-            "hotspot and novel categories, the internal-priming flag and 3' anchoring "
-            "are not comparable across them."
+            "--anchor-veto-internal-priming). The internal-priming flag, the "
+            "priming labels and 3' anchoring are not comparable across them. The "
+            "intergenic hotspot and novel categories depend on --polya-min-support "
+            "only: the hotspot is a locus signature whose A-run rule is the same "
+            "under every --priming-criterion."
         )
 
     if cohort.has_mixed_strandedness:

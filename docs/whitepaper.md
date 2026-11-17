@@ -20,12 +20,12 @@ mechanism.
 scNoiseMeter therefore treats technical-noise analysis as an evidence-labeling and composition
 problem. Every mapped primary alignment receives one mutually exclusive location/alignment
 category, its aligned reference bases are partitioned without double-counting, and independent
-context flags record evidence such as internal priming, an untemplated polyA tail, TSO sequence,
+context flags record evidence such as internal priming, a clipped polyA tail, TSO sequence,
 non-canonical splice boundaries, reverse-transcriptase template-switch repeats, low mapping
-confidence, or pair discordance. Where a flag describes the genome rather than the molecule, a
-companion flag describing the molecule is reported beside it, because the two disagree in
-precisely the cases that matter. Results are aggregated by sample, cell, cluster, read length,
-or plate well.
+confidence, or pair discordance. Internal priming is judged from the genome downstream of the
+read's priming site, not from clipped adenines, which the oligo(dT) primer supplies at a real 3′
+end and at an internal-priming site alike. Results are aggregated by sample, cell, cluster,
+read length, or plate well.
 
 The tool reports a broad non-canonical composition and a narrower artifact-candidate composition.
 Neither is presented as an estimate of contamination. Every run additionally checks its own
@@ -185,7 +185,7 @@ is enriched. See §3.5.
 |---|---|---|
 | `intergenic_sparse` | Intergenic, below the enrichment screen | Diffuse background: mismapping, residual genomic DNA, or annotation that does not cover a real transcript. |
 | `intergenic_repeat` | ≥50% of sampled aligned span overlaps supplied repeat intervals | Multi-copy sequence, where placement is intrinsically uncertain. Note that Alu poly-A tails make repeats also the densest source of genomic A-runs, so this category and internal priming overlap physically. |
-| `intergenic_hotspot` | Enriched, monoexonic, A-rich strand-aware 3′ context, and *not* near a strand-matched annotated polyA site | The internal oligo(dT) priming candidate. This is one of only two categories in the artifact-candidate set. |
+| `intergenic_hotspot` | Enriched, monoexonic, A-rich strand-aware 3′ context, and *not* near a strand-matched annotated polyA site | `intergenic_hotspot` is a locus signature: 6 or more consecutive adenines within 20 nt of the modal read end of an intergenic cluster. It is not an internal-priming rate, and it keeps this rule under every `--priming-criterion`. This is one of only two categories in the artifact-candidate set. |
 | `intergenic_novel` | Enriched, dominant-strand, multiple real barcodes, plus splice or annotated-polyA support | Candidate unannotated transcript. A label for follow-up, not a discovery claim. |
 | `intergenic_enriched` | Enriched, none of the above | Deliberately named for the statistic rather than a cause. Calling this a hotspot would convert enrichment into a mechanism. |
 
@@ -212,10 +212,10 @@ evidence:
   *place in the genome*, not about the molecule. It says an oligo-dT primer *could* have
   annealed here. It cannot say whether this particular molecule was primed there or arrived
   by genuine cleavage and polyadenylation.
-- **Untemplated 3′ polyA tail** — an A-run in the read's own soft-clipped end, outside the
-  aligned block. Those bases are in the read but not in the reference, so the molecule brought
-  them: this is evidence about the molecule rather than the locus. The two flags are most
-  informative together, and the table in §3.3.1 explains why.
+- **Clipped 3′ polyA tail**: 8 or more adenines at the start of the read's own 3′ soft clip,
+  outside the aligned block. Clipped adenines come from the oligo(dT) primer in both cases, so
+  they do not tell a real 3′ end from internal priming. The label of §3.3.1 reads the genome
+  downstream of the priming site instead.
 - **Non-canonical junction** — a CIGAR `N` interval whose donor/acceptor pair is neither an
   annotated junction nor GT–AG/GC–AG/AT–AC.
 - **RT template-switch repeat** — the two ends of one intron share a short identical sequence.
@@ -232,7 +232,7 @@ Keeping these orthogonal to the taxonomy is what allows a read to be, for exampl
 `exonic_sense` *and* internally primed — a combination that a single-label scheme would have to
 discard.
 
-#### 3.3.1 Why two polyA flags rather than one
+#### 3.3.1 The priming site and its label
 
 Internal oligo-dT priming is the artifact most often blamed for spurious 3′ signal, and the usual
 test for it is genomic: look at the reference sequence just past the read's 3′ end and ask whether
@@ -242,20 +242,30 @@ the median A-content in the 20 bp downstream window is
 **30% at annotated polyA sites and 30% at random genomic positions**. The genomic context
 barely distinguishes the two, because A-rich stretches are simply common.
 
-What does distinguish them is whether the A's the read carries are in the genome. At a real
-cleavage site the polyA tail is added enzymatically after transcription, so those bases appear in
-the read but not in the reference, and the aligner pushes them into a soft clip. At an internal
-priming event the A's the read carries are the genome's own, and they align.
+Clipped adenines come from the oligo(dT) primer in both cases, so they do not tell a real 3′ end
+from internal priming. The genome downstream of the site and the polyA signal do. The site is
+where the primer annealed: the boundary at which the read's polyA begins, on the transcript
+strand. A short read whose polyA was clipped, or counted in a Cell Ranger `pa` tag, has its site
+at the alignment end (rule `clip`). A long read that keeps its polyA has it at the first base of
+the terminal A run, aligned adenines included (rule `a_run`). On such a read the alignment end
+lies past any templated adenines, so the genomic test above, which starts at the alignment end,
+misses them. `--priming-site-rule` picks the rule per platform. The rules and the label are
+those of the flight-polyafilter-bench benchmark, and the label counts the adenines in the 20 nt
+of reference downstream of the site:
 
-Reading the two flags together therefore separates four situations that a single flag collapses
-into two:
+| Site observed | Adenines in the 20 nt downstream | Label | Reading |
+|---|---|---|---|
+| yes | 8 or more | templated | internal priming in most reads; the benchmark estimates real sites at about 3% (nuclei) to 19% (cells) of this class |
+| yes | 4 or fewer | non-templated | tail priming, a real 3′ end |
+| yes | 5 to 7 | ambiguous | reported, not interpreted |
+| no | not counted | none | not observable: the read does not reach the polyA |
 
-| genomic A-run downstream | untemplated tail in the soft clip | what it means |
-|---|---|---|
-| yes | no | internal priming — the classical case, now with corroboration |
-| yes | yes | a real 3′ end that happens to sit in A-rich sequence; the genomic test alone calls this an artifact |
-| no | yes | a real 3′ end |
-| no | no | no evidence either way |
+`polya_tail_frac` is the share of reads with 8 or more clipped adenines at the 3′ end; the reads
+whose priming site is observed under the benchmark rules are counted in
+`n_priming_site_observed`. Each label's share of those reads is reported as
+`priming_templated_frac`, `priming_nontemplated_frac` and `priming_ambiguous_frac`. Under the
+default `--priming-criterion count`, the internal-priming flag marks the reads labelled
+templated.
 
 Only soft clips are read. If an aligner hard-clips, the bases are removed from the record
 entirely, and scNoiseMeter reports no tail — which means "not observable here", not "no tail on
@@ -336,13 +346,13 @@ a third of the genome, and the novel-gene evidence route is nearly free. Filteri
 its own per-site support column restores it: 25% support leaves 6.3% of the genome within the
 window and 50% leaves 2.4%. Every run measures and reports the density of the atlas it loaded.
 Since 0.9.1 the default is 25% support. Earlier versions loaded the atlas whole, and in the
-synthetic benchmark that setting reported 6 of 10 internal-priming loci as `intergenic_novel`.
+synthetic benchmark that setting reported 6 of 10 seeded hotspot loci as `intergenic_novel`.
 
 Enriched windows are then interpreted by the independent evidence in §3.2. The ordering matters:
 repeat overlap is tested before enrichment, so a window that is both repeat-derived and A-rich is
 reported as `intergenic_repeat`. Because Alu poly-A tails are the densest genomic A-runs, some
-genuine internal-priming loci are therefore labelled by their sequence context rather than their
-mechanism. The per-locus table carries `repeat_overlap_fraction` alongside the category so this
+windows that carry the hotspot's A-run signature are therefore labelled by their repeat overlap
+instead. The per-locus table carries `repeat_overlap_fraction` alongside the category so this
 is recoverable.
 
 ## 4. Aggregate metrics
@@ -364,10 +374,11 @@ contamination rate, and its components should be reported alongside it.
 
 ### Artifact-candidate composition
 
-The narrow set contains only `intergenic_hotspot` and `chimeric` — the two categories with
-positive alignment or context evidence for a specific mechanism. Even this is not ground truth:
-A-rich contexts coincide with real 3′ ends, and `SA` evidence represents real fusions as well as
-technical ones.
+The narrow set contains only `intergenic_hotspot` and `chimeric`, the two categories with
+positive alignment or sequence-context evidence of an artifact signature. Even this is not
+ground truth. `intergenic_hotspot` is a locus signature, not an internal-priming rate, and A-rich
+contexts coincide with real 3′ ends; `SA` evidence represents real fusions as well as technical
+ones.
 
 ### UMI sequence diversity
 
@@ -422,8 +433,9 @@ Patterns that should attract attention, rather than any single threshold:
 - **`strand_concordance` near 0.5 with a `stranded` declaration.** The declaration is wrong, or
   the library is not what it is thought to be. Every antisense and endpoint number downstream is
   then measuring something else.
-- **`intergenic_hotspot` rising with `polya_priming_frac`.** The two agreeing is the coherent
-  internal-priming signature; the flag rising alone is likelier to be threshold sensitivity.
+- **`intergenic_hotspot` rising with `polya_priming_frac`.** Both read A-rich reference sequence
+  past the reads' 3′ ends, by different rules. The hotspot is a locus signature, not an
+  internal-priming rate; for the reads, look at `priming_templated_frac`.
 - **`three_prime_anchored_frac` far below the 5′ figure** in an oligo(dT) protocol. That
   inverts the expected asymmetry and points at the atlas or the reference, not the library.
 - **`multimapper` exactly 0 on a long-read BAM.** Expected, not reassuring — see §3.2.
@@ -431,9 +443,12 @@ Patterns that should attract attention, rather than any single threshold:
   alignments; if it appears to, check whether read names were rewritten and the pairing is real.
 - **A category that is absent rather than zero.** This means the evidence was never available.
   Absent and zero are different claims and the output distinguishes them deliberately.
-- **`polya_priming_frac` high while `polya_tail_frac` is comparably high in the same reads.**
-  Read together (§3.3.1), that is a population of real 3′ ends sitting in A-rich sequence, not
-  an internal-priming problem. The genomic flag alone would have said the opposite.
+- **`polya_priming_frac` and `polya_tail_frac` both high in the same reads.** Not a sign of
+  real 3′ ends in A-rich sequence. Clipped adenines come from the oligo(dT) primer in both cases,
+  so the tail flag cannot vouch for the site. On chromosomes 20 to 22 of a 10x Single Cell 3′ v4
+  library run with `--priming-criterion a_run`, the benchmark labels 6,392 of the 6,398 reads
+  with an observed site and both flags templated. Read `priming_templated_frac` against
+  `priming_nontemplated_frac` (§3.3.1).
 - **`rt_switch_repeat_frac` elevated while non-canonical junctions are not.** Template-switch
   artifacts can occupy canonical GT–AG boundaries, so the junction-motif check will not see them.
   This is the pairing that makes the direct-repeat flag worth having.
@@ -509,7 +524,7 @@ scNoiseMeter complements rather than replaces:
 - isoform-model QC such as SQANTI3 and pigeon, which share several of the same underlying signals
   (RT-switching evidence, intra-priming, junction canonicality) at transcript-model level.
   Where a signal is shared, the definition here is deliberately aligned with theirs so the
-  numbers can be read side by side: `--priming-criterion perc_a` is their
+  numbers can be read side by side: `--priming-criterion perc_a` (the default is `count`) is their
   `perc_A_downstream_TTS` convention, and the direct-repeat test is the same RT-switch signature
   they apply to transcript models, applied instead to individual alignments;
 - read-structure artifact classifiers, which work from the read rather than the alignment and can
@@ -541,7 +556,9 @@ structural rather than statistical, which is what makes them checkable at all: e
 sums to one; every fraction lies between zero and one; the artifact-candidate composition cannot
 exceed the broad non-canonical one, because its categories are a subset of them; both-end
 anchoring cannot exceed either single end, because it is their conjunction on the same reads; no
-flag count exceeds the denominator it is reported over; unique UMI strings cannot outnumber the
+flag count exceeds the denominator it is reported over; the templated, non-templated and
+ambiguous counts sum to the reads with an observed priming site, which cannot outnumber the
+classified reads; unique UMI strings cannot outnumber the
 reads carrying them. A violation means a number about to be written is wrong, so the run stops
 rather than emitting it. The point is the failure mode being guarded against: a broken invariant
 would not announce itself as a crash — it would look like a slightly wrong figure in a table
@@ -568,8 +585,8 @@ Important remaining limitations:
 - multimapping undetectable where the aligner omits `NH`;
 - no gene-aware molecule deduplication, and intergenic promotion counts reads rather than
   UMI-collapsed molecules, so one heavily amplified molecule can carry a window over threshold;
-- the untemplated-tail flag is unavailable on hard-clipped BAMs, where the bases are absent from
-  the record;
+- the clipped-tail flag is unavailable on hard-clipped BAMs, where the bases are absent from
+  the record, and so is the `clip` rule's priming site unless the read carries a `pa` tag;
 - the RT direct-repeat flag cannot separate a template-switch artifact from a genuine junction in
   repetitive sequence;
 - no read-level NUMT inference from competing alignments;
@@ -594,7 +611,8 @@ A defensible methods section should state:
 - custom TSO sequence and whether poly-G checking was enabled;
 - the polyA-atlas support threshold (`--polya-min-support`), because it changes what
   "near an annotated polyA site" means and therefore both intergenic rules that depend on it;
-- the internal-priming criterion (`--priming-criterion`), and whether the anchoring veto was on;
+- the internal-priming criterion (`--priming-criterion`), the priming-site rule as resolved in
+  `run_info.json` (`--priming-site-rule`), and whether the anchoring veto was on;
 - seed, thread count, and whether intergenic reclassification was reservoir-estimated;
 - which denominator and aggregate metric was reported.
 

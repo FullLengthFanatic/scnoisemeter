@@ -154,13 +154,17 @@ The CLI resolves protocol-aware motifs with `_default_tso_sequences()` and `_eff
 
 `_check_polya_priming()` uses reference sequence after the 3′ end of `+` alignments and before the 3′ end of `-` alignments, checking A and T runs respectively. It returns no flag when reference context cannot be fetched.
 
-`priming_criterion` selects the test: `a_run` requires `POLYA_RUN_MIN_LENGTH` consecutive matching bases anywhere in `POLYA_CONTEXT_WINDOW`; `perc_a` requires `POLYA_PERC_A_MIN` percent over the first `POLYA_PERC_A_WINDOW` bases, the SQANTI3/pigeon convention on a 0–100 scale; `either` accepts one or both. The fraction is counted on `T` for a reverse alignment rather than reverse-complementing the slice. `ReadClassifier.__init__` rejects any other value, so the option cannot be accepted and silently ignored. Threaded CLI → `run_pipeline` → task dict → `_contig_worker` → `ReadClassifier`.
+`priming_criterion` selects the test: `count`, the default, flags a read whose priming label is `templated`; `a_run` requires `POLYA_RUN_MIN_LENGTH` consecutive matching bases anywhere in `POLYA_CONTEXT_WINDOW`; `perc_a` requires `POLYA_PERC_A_MIN` percent over the first `POLYA_PERC_A_WINDOW` bases, the SQANTI3/pigeon convention on a 0 to 100 scale; `either` accepts `a_run`, `perc_a` or both. The fraction is counted on `T` for a reverse alignment rather than reverse-complementing the slice. `ReadClassifier.__init__` rejects any other value, so the option cannot be accepted and silently ignored. Threaded CLI → `run_pipeline` → task dict → `_contig_worker` → `ReadClassifier`.
 
-### Untemplated 3′ polyA tail
+`_priming_label()` returns `(site observed, label)` for every read when a reference is loaded, under every criterion. The site is `priming_site.observed_site(read, priming_site_rule)`, the rule of flight-polyafilter-bench: `clip` is the alignment end when `clipped_polya_length()` (the `pa` tag, or the 3′ soft clip) reaches `PRIMING_CLIP_MIN`; `a_run` is where `terminal_a_run()` starts, aligned A's included, when the run holds `PRIMING_RUN_MIN` A's with up to `PRIMING_RUN_TOLERANCE` other bases inside. The label counts A's in the `PRIMING_LABEL_WINDOW` nt downstream of the site in transcript sense (`[site, site + 20)` forward, `[site - 20, site)` counted on `T` reverse): at least `PRIMING_TEMPLATED_MIN` is `templated`, at most `PRIMING_NONTEMPLATED_MAX` is `nontemplated`, otherwise `ambiguous`. No reference, no site, or a window cut short by the contig end gives `(False, None)`, and the read is not counted as one with a site. The CLI resolves `--priming-site-rule auto` with `site_rule_for(meta.platform)` before the classifier is built and records the resolved rule in `run_info.json`.
+
+### Clipped 3′ polyA tail
 
 `_polya_tail_stats()` returns `(soft_clip_len, terminal run, A-fraction)` for the transcript-3′ clip: the trailing clip counted on `A` for a forward alignment, the leading clip counted on `T` for a reverse one, reversed so index 0 is always the base adjacent to the cleavage site. Only CIGAR op 4 qualifies; op 5 returns `(0, 0, 0.0)` because hard-clipped bases are absent from `query_sequence` and indexing the aligned sequence would read alignment bases as a tail.
 
 `_has_polya_tail()` requires `run >= POLYA_TAIL_MIN_LENGTH`. `POLYA_TAIL_MIN_FRAC` defaults to 0 and is therefore not part of the decision: a genuine 12 bp tail inside a 60 bp clip carrying adapter or TSO sequence scores about 0.2, so requiring both would implicitly demand a ~45 bp tail.
+
+Clipped adenines come from the oligo(dT) primer in both cases, so they do not tell a real 3′ end from internal priming. The genome downstream of the site and the polyA signal do. `polya_tail_frac` is the share of reads with 8 or more clipped adenines at the 3′ end; the reads whose priming site is observed under the benchmark rules are counted in `n_priming_site_observed`.
 
 ### RT template-switch direct repeat
 
@@ -188,7 +192,7 @@ The pipeline stores a uniform reservoir of up to 500,000 intergenic records. Eac
 
 `_assign_local_read_share()` sets `IntergenicLocus.local_read_share` after every window is scored, since it needs the whole window set. Per contig it sorts by start and builds a prefix sum, so each window's ±`LOCAL_SHARE_FLANK` neighbourhood total is a subtraction rather than a scan — one sort per contig instead of a neighbourhood walk per window.
 
-The minimum-read and adjusted-p thresholds determine enrichment. Barcode support is required for `intergenic_novel`, not for technical hotspots, allowing barcode-free sample-level BAMs to reveal internal-priming candidates.
+The minimum-read and adjusted-p thresholds determine enrichment. Barcode support is required for `intergenic_novel`, not for `intergenic_hotspot`, so barcode-free sample-level BAMs still report hotspots. `intergenic_hotspot` is a locus signature: 6 or more consecutive adenines within 20 nt of the modal read end of an intergenic cluster. It is not an internal-priming rate, and it keeps this rule under every `--priming-criterion`.
 
 ### Evidence hierarchy
 
@@ -215,6 +219,8 @@ The repeat label is an annotation class and does not require Poisson enrichment.
 `_check_barcode_gate()` compares `n_reads_unassigned / n_reads_classified` against `UNASSIGNED_GATE_WARN`, only when `meta.barcode_aware is True`. Counters that are not numbers are skipped via `_as_number()` rather than raised on: the guard runs before every report and must not be what fails a valid run.
 
 `modules/selfcheck.py` runs the result invariants and writes `<sample>.qc.json` (called from `run`, `compare`, `discover` and `run-plate`). A NaN value is an unmeasured metric and is skipped like a missing one. `run_invariants()` returns passing and failing checks alike; `failures()` filters by severity; the whole block is wrapped at the call site so a defect in the checking code cannot fail an otherwise valid analysis. Severity is `ERROR` except where a documented configuration legitimately breaks the property — reservoir-estimated reclassification for the conservation checks, and the anchoring veto for the PAS-subset check.
+
+Two checks cover the priming labels: `priming_labels_sum_to_site_reads` (the templated, non-templated and ambiguous counts sum to `n_priming_site_observed`) and `priming_site_reads_not_above_classified` (`n_priming_site_observed` does not exceed `n_reads_classified`). Both are skipped when the counts are `None`, as they are without `--reference`.
 
 ## 8. End anchoring
 
@@ -296,7 +302,7 @@ Explicit platform hints have priority. Minimap2 alone maps to `unknown`; bare ST
   handling, the version / annotation / strandedness comparability warnings, ranking fallback when
   a metric predates some samples, sample-sheet labelling and ordering, and that the deviation
   heatmap leaves a near-zero row neutral instead of painting it as the strongest signal.
-- `tests/test_priming_evidence.py`: the untemplated-tail measurement including hard clips,
+- `tests/test_priming_evidence.py`: the clipped-tail measurement including hard clips,
   reverse-strand orientation and the adapter-bearing clip; atlas support filtering, hexamer
   extraction and BED3 passthrough; atlas density and its warning; and the option defaults.
 - `tests/test_robustness_transfers.py`: both guards in both directions -- firing on the failure
@@ -329,12 +335,12 @@ aggregate sets from `constants.py` so they cannot drift from the classifier agai
 | Interpret repeats | Supply a matching RepeatMasker BED |
 | Reproduce reservoirs | Seeded by default (42); keep thread count fixed |
 | Keep polyA-site proximity discriminating | `--polya-min-support` defaults to 25; raise it to 50 for a stricter atlas. With 0, PolyASite 3.0 puts 37.4% of the genome within the proximity window; the run reports the density it measured |
-| Compare internal priming with isoform-QC numbers | Use `--priming-criterion perc_a`, the SQANTI3/pigeon convention. It disagrees with the default on 3 to 5% of windows, so switch for comparability, not correction |
+| Compare internal priming with isoform-QC numbers | Use `--priming-criterion perc_a`, the SQANTI3/pigeon convention. It disagrees with `a_run` on 3 to 5% of windows, so switch for comparability, not correction. The default, `count`, is the flight-polyafilter-bench label at the site `--priming-site-rule` gives; `a_run` reproduces 0.10.0 |
 | Stop proximity outvoting contrary evidence at the 3′ end | Use `--anchor-veto-internal-priming`; it lowers `three_prime_anchored_frac` |
 | Detect RT template-switch artifacts | Supply `--reference`; the direct-repeat flag needs it and is silent without it |
 | Continue past a failed pre-write check | `--no-strict`. Prefer fixing the cause: each of the three checks fires on a condition that otherwise produces a complete but wrong result set |
 | Alter intergenic thresholds | Change named constants, document them, and revalidate |
 
-Every option in the first block above changes what a reported number means, which is why each is recorded in `run_info.json`. `--polya-min-support` defaults to 25 since 0.9.1; the other two default to pre-0.9 behaviour. Changing one mid-study splits the cohort.
+Every option in the first block above changes what a reported number means, which is why each is recorded in `run_info.json`. `--polya-min-support` defaults to 25 since 0.9.1, `--priming-criterion` to `count` (it was `a_run` through 0.10.0), and the anchoring veto stays off as before 0.9. Changing one mid-study splits the cohort.
 
 Do not tune `--chimeric-distance`; it is deprecated and has no role in any decision.

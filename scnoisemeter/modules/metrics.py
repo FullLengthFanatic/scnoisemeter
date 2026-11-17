@@ -159,9 +159,10 @@ class SampleMetrics:
     # and n_noncanon_junction read the genome sequence: None without --reference.
     n_tso_invasion:        int = 0
     n_polya_priming:       Optional[int] = 0
-    # Reads whose own 3' soft clip carried an untemplated polyA tail.  Counted
-    # independently of n_polya_priming: a read in both is a real cleavage site
-    # in A-rich context, which the genomic test alone calls internal priming.
+    # Reads whose own 3' soft clip starts with 8 or more A's.  Clipped adenines
+    # come from the oligo(dT) primer in both cases, so this count does not tell
+    # a real 3' end from internal priming; the label counts below read the
+    # genome downstream of the priming site.
     n_polya_tail:          int = 0
     # Reads whose priming site was observed, and how many of them carry each
     # label of the benchmark's definition.  The label reads the genome, so all

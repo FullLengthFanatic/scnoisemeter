@@ -50,9 +50,10 @@ class ReadCategory(str, Enum):
                             holds sense-exon bases (candidate incomplete RT)
       INTRONIC_PURE       - intronic bases with no junction or boundary evidence
       INTERGENIC_REPEAT   - intergenic, overlaps supplied repeat intervals
-      INTERGENIC_HOTSPOT  - enriched intergenic window with a genomic A-run
-                            (internal-priming) signature, away from an
-                            annotated polyA site
+      INTERGENIC_HOTSPOT  - enriched intergenic window with 6 or more
+                            consecutive A's within 20 nt of its modal read
+                            end, away from an annotated polyA site: a locus
+                            signature, not an internal-priming rate
       INTERGENIC_NOVEL    - enriched, strand-consistent, multi-barcode window
                             with splice or annotated-polyA support
       INTERGENIC_ENRICHED - enriched intergenic window without enough evidence
@@ -311,11 +312,12 @@ INTERGENIC_REPEAT_MIN_FRACTION = 0.50
 
 
 # ---------------------------------------------------------------------------
-# Internal priming / hotspot detection
+# Internal priming and the hotspot's A-run signature
 # ---------------------------------------------------------------------------
 
-# Length of A-run immediately downstream of read 3′ end in reference
-# required to flag as internal-priming candidate
+# Length of A-run downstream of a read's alignment end (the a_run criterion)
+# or of a window's modal read end (the intergenic_hotspot locus signature,
+# which keeps this rule under every --priming-criterion)
 POLYA_RUN_MIN_LENGTH = 6
 POLYA_CONTEXT_WINDOW = 20   # bp of reference to inspect downstream of read end
 
@@ -389,10 +391,13 @@ PRIMING_RUN_TOLERANCE = 1
 PRIMING_SITE_RULES = ("clip", "a_run")
 PRIMING_DEFINITION_SOURCE = "flight-polyafilter-bench 1.2.0"
 
-# Untemplated 3' polyA tail measured from the read's own soft clip.  A genomic
-# A-run says the locus is A-rich; an untemplated A-run outside the alignment
-# says this molecule carried a tail, which is the per-molecule evidence that
-# separates a real cleavage site in A-rich context from internal priming.
+# Clipped 3' polyA tail: a run of A's from the first base of the read's own
+# 3' soft clip.  Clipped adenines come from the oligo(dT) primer in both cases,
+# so they do not tell a real 3' end from internal priming.  The genome
+# downstream of the site and the polyA signal do.  polya_tail_frac is the share
+# of reads with 8 or more clipped adenines at the 3' end; the reads whose
+# priming site is observed under the benchmark rules are counted in
+# n_priming_site_observed.
 # Only SOFT clips are read: hard-clipped bases are absent from query_sequence,
 # so a hard-clipped BAM must report "no tail" rather than index wrong bases.
 POLYA_TAIL_MIN_LENGTH = 8
