@@ -163,6 +163,13 @@ class SampleMetrics:
     # independently of n_polya_priming: a read in both is a real cleavage site
     # in A-rich context, which the genomic test alone calls internal priming.
     n_polya_tail:          int = 0
+    # Reads whose priming site was observed, and how many of them carry each
+    # label of the benchmark's definition.  The label reads the genome, so all
+    # four are None without --reference.
+    n_priming_site_observed: Optional[int] = 0
+    n_priming_templated:     Optional[int] = 0
+    n_priming_nontemplated:  Optional[int] = 0
+    n_priming_ambiguous:     Optional[int] = 0
     # Junctions whose two ends share a direct repeat: the RT template-switching
     # signature.  Independent of n_noncanon_junction, because an RT artifact can
     # sit on a canonical GT-AG boundary.
@@ -412,8 +419,14 @@ def compute_metrics(
         sm.n_tso_concatemer    += flags.get("tso_concat", 0)
         sm.n_discordant_pair   += flags.get("discordant_pair", 0)
         sm.n_low_mapq          += flags.get("low_mapq", 0)
+        sm.n_priming_site_observed += flags.get("priming_site", 0)
+        sm.n_priming_templated     += flags.get("priming_templated", 0)
+        sm.n_priming_nontemplated  += flags.get("priming_nontemplated", 0)
+        sm.n_priming_ambiguous     += flags.get("priming_ambiguous", 0)
     if not reference_checks_ran:
         sm.n_polya_priming = sm.n_noncanon_junction = sm.n_rt_switch_repeat = None
+        sm.n_priming_site_observed = sm.n_priming_templated = None
+        sm.n_priming_nontemplated = sm.n_priming_ambiguous = None
         # Reads a hotspot call would have claimed stay in the other intergenic
         # categories, so the composition still sums to one without this key.
         sm.read_fracs.pop(hotspot, None)
@@ -733,6 +746,19 @@ def load_obs_metadata(path: str) -> pd.DataFrame:
     return df[["cell_barcode", "cluster"]]
 
 
+def priming_label_fracs(sm: SampleMetrics) -> dict:
+    """``priming_<label>_frac``: each label's share of the reads with an observed site.
+
+    None where no share exists: without --reference (the counts are None) or
+    when no read has an observed site (the denominator is 0).
+    """
+    denom = sm.n_priming_site_observed
+    return {
+        f"priming_{label}_frac": getattr(sm, f"n_priming_{label}") / denom if denom else None
+        for label in ("templated", "nontemplated", "ambiguous")
+    }
+
+
 def to_multiqc_json(sm: SampleMetrics) -> dict:
     """
     Format SampleMetrics as a MultiQC custom content JSON dict.
@@ -763,6 +789,13 @@ def to_multiqc_json(sm: SampleMetrics) -> dict:
                           ("rt_switch_repeat_frac", sm.n_rt_switch_repeat)):
         if _count is not None:
             data[_name] = round(_count / (sm.n_reads_classified or 1), 8)
+    # The label shares are over the reads with an observed site, not over
+    # n_reads_classified.  Left out without --reference, null when no read
+    # has a site.
+    if sm.n_priming_site_observed is not None:
+        data["n_priming_site_observed"] = sm.n_priming_site_observed
+        for _name, _frac in priming_label_fracs(sm).items():
+            data[_name] = None if _frac is None else round(_frac, 8)
     # Add per-category read fractions
     for cat_name, frac in sm.read_fracs.items():
         data[f"read_frac_{cat_name}"] = round(frac, 4)

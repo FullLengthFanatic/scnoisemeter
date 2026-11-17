@@ -95,6 +95,7 @@ from scnoisemeter.modules.metrics import (
     compute_length_stratification,
     compute_metrics,
     load_obs_metadata,
+    priming_label_fracs,
     to_multiqc_json,
 )
 from scnoisemeter.modules.pipeline import run_pipeline
@@ -2145,6 +2146,10 @@ def _build_per_well_metrics_row(well_sm, *, plate_id: str, well_id: str,
         ),
         "n_tso_invasion":        well_sm.n_tso_invasion,
         "n_polya_priming":       well_sm.n_polya_priming,
+        "n_priming_site_observed": well_sm.n_priming_site_observed,
+        "n_priming_templated":     well_sm.n_priming_templated,
+        "n_priming_nontemplated":  well_sm.n_priming_nontemplated,
+        "n_priming_ambiguous":     well_sm.n_priming_ambiguous,
         "n_tso_concatemer":      well_sm.n_tso_concatemer,
         "bam_path":              str(bam_path),
     }
@@ -3420,9 +3425,13 @@ def _write_run_outputs(sm, ct, result, output_dir: Path, sample_name: str,
                  "per_cell_noise_iqr", "n_tso_invasion", "n_polya_priming",
                  "n_polya_tail", "n_noncanon_junction", "n_rt_switch_repeat",
                  "n_tso_concatemer", "n_discordant_pair",
-                 "n_low_mapq", "n_numt_intervals_loaded"]:
+                 "n_low_mapq", "n_numt_intervals_loaded",
+                 "n_priming_site_observed", "n_priming_templated",
+                 "n_priming_nontemplated", "n_priming_ambiguous"]:
         value = getattr(sm, attr, "")
         rows.append((attr, "" if value is None else value))
+    for name, frac in priming_label_fracs(sm).items():
+        rows.append((name, "not observable" if frac is None else f"{frac:.6f}"))
     for cat_name, frac in sm.read_fracs.items():
         rows.append((f"read_frac_{cat_name}", f"{frac:.6f}"))
     for cat_name, frac in sm.base_fracs.items():

@@ -11,21 +11,32 @@ number, so the release must be installable without moving one.
 from __future__ import annotations
 
 import gzip
+import json
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pysam
 import pytest
+from click.testing import CliRunner
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from test_priming_site import L_VECTORS, S_VECTORS, build, contig, segment  # noqa: E402
+from test_priming_site import (  # noqa: E402
+    CONTIG_LEN,
+    L_VECTORS,
+    S_VECTORS,
+    build,
+    contig,
+    segment,
+)
 
 from scnoisemeter.cli import (  # noqa: E402
+    _build_per_well_metrics_row,
     _load_polya_sites,
     _polya_atlas_density,
     _warn_if_atlas_too_dense,
+    cli,
 )
 from scnoisemeter.constants import (  # noqa: E402
     POLYA_MIN_SUPPORT_DEFAULT,
@@ -34,6 +45,7 @@ from scnoisemeter.constants import (  # noqa: E402
     ReadCategory,
 )
 from scnoisemeter.modules.classifier import ReadClassifier  # noqa: E402
+from scnoisemeter.modules.metrics import SampleMetrics  # noqa: E402
 from scnoisemeter.modules.priming_site import observed_site  # noqa: E402
 
 
@@ -320,3 +332,111 @@ def test_record_without_cigar_has_no_label(rule, classifier_for):
     read = segment(900, "100M30S", "C" * 100 + "A" * 30)
     read.cigartuples = None
     assert clf._priming_label(read) == (False, None)
+
+
+# ---------------------------------------------------------------------------
+# Label counts and shares over the reads with an observed site, through `run`
+# ---------------------------------------------------------------------------
+
+LABEL_COUNTS = ("n_priming_site_observed", "n_priming_templated",
+                "n_priming_nontemplated", "n_priming_ambiguous")
+LABEL_FRACS = ("priming_templated_frac", "priming_nontemplated_frac",
+               "priming_ambiguous_frac")
+
+# L1 non-templated, L2 templated, L4_6 ambiguous, L5 hard-clipped (no site)
+ONE_CONTIG = {"chrV": ["L1", "L2", "L4_6", "L5"]}
+TWO_CONTIGS = {"chrV1": ["L1", "L2"], "chrV2": ["L4_6", "L5"]}
+
+
+def _vector_library(tmp_path: Path, layout: dict) -> tuple[Path, Path]:
+    """BAM and FASTA of *layout*, ``{contig: [vector id, ...]}``.
+
+    Each vector takes a CONTIG_LEN block of its contig, planted as the
+    appendix plants chrS, and its plus-strand read moves with the block.
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    fasta = tmp_path / "vectors.fa"
+    fasta.write_text("".join(
+        f">{name}\n{''.join(contig(L_VECTORS[v]) for v in vectors)}\n"
+        for name, vectors in layout.items()
+    ))
+    pysam.faidx(str(fasta))
+    header = pysam.AlignmentHeader.from_dict({
+        "HD": {"VN": "1.6", "SO": "coordinate"},
+        "SQ": [{"SN": name, "LN": CONTIG_LEN * len(vectors)}
+               for name, vectors in layout.items()],
+    })
+    bam = tmp_path / "vectors.bam"
+    with pysam.AlignmentFile(str(bam), "wb", header=header) as out:
+        for name, vectors in layout.items():
+            for block, v in enumerate(vectors):
+                fields = build(L_VECTORS[v], False)[0].to_dict()
+                fields.update(name=v, ref_name=name,
+                              ref_pos=str(int(fields["ref_pos"]) + block * CONTIG_LEN))
+                out.write(pysam.AlignedSegment.from_dict(fields, header))
+    pysam.index(str(bam))
+    return bam, fasta
+
+
+def _run_vectors(tiny_gtf, tmp_path: Path, layout: dict, *, reference: bool,
+                 threads: int = 1) -> tuple[dict, dict]:
+    """``run --platform ont`` (site rule a_run) on the layout: read_metrics rows, MultiQC data."""
+    bam, fasta = _vector_library(tmp_path, layout)
+    polya = tmp_path / "polya.bed"
+    polya.write_text("chr1\t5990\t6010\tsite\t1\t+\n")
+    out = tmp_path / "out"
+    result = CliRunner().invoke(cli, [
+        "run", "--bam", str(bam), "--gtf", str(tiny_gtf),
+        "--polya-sites", str(polya), "--tss-db", "none",
+        "--platform", "ont", "--library-strand", "stranded",
+        "--threads", str(threads), "--no-cache", "--output-dir", str(out),
+        *(["--reference", str(fasta)] if reference else []),
+    ])
+    assert result.exit_code == 0, result.output
+    rows = (out / "vectors.read_metrics.tsv").read_text().splitlines()
+    multiqc = json.loads((out / "vectors.multiqc.json").read_text())
+    return dict(line.split("\t", 1) for line in rows), multiqc["data"]["vectors"]
+
+
+def test_label_counts_are_over_reads_with_an_observed_site(tiny_gtf, tmp_path):
+    metrics, multiqc = _run_vectors(tiny_gtf, tmp_path, ONE_CONTIG, reference=True)
+    assert metrics["n_reads_classified"] == "4"           # L5 is classified, it has no site
+    assert [metrics[k] for k in LABEL_COUNTS] == ["3", "1", "1", "1"]
+    assert [metrics[k] for k in LABEL_FRACS] == ["0.333333"] * 3
+    assert multiqc["n_priming_site_observed"] == 3
+    assert [multiqc[k] for k in LABEL_FRACS] == [0.33333333] * 3
+
+
+def test_label_counts_are_not_observable_without_reference(tiny_gtf, tmp_path):   # Review Focus 5
+    metrics, multiqc = _run_vectors(tiny_gtf, tmp_path, ONE_CONTIG, reference=False)
+    assert [metrics[k] for k in LABEL_COUNTS] == [""] * 4
+    assert [metrics[k] for k in LABEL_FRACS] == ["not observable"] * 3
+    assert [k for k in multiqc if "priming" in k] == []
+
+
+def test_no_read_with_a_site_leaves_the_shares_not_observable(tiny_gtf, tmp_path):
+    # L3 ends right before its A10, L5 is hard-clipped: neither has a site
+    metrics, multiqc = _run_vectors(tiny_gtf, tmp_path, {"chrV": ["L3", "L5"]}, reference=True)
+    assert [metrics[k] for k in LABEL_COUNTS] == ["0"] * 4
+    assert [metrics[k] for k in LABEL_FRACS] == ["not observable"] * 3
+    assert multiqc["n_priming_site_observed"] == 0
+    assert [multiqc[k] for k in LABEL_FRACS] == [None] * 3
+
+
+@pytest.mark.parametrize("threads", [1, 2])
+def test_label_counts_merge_across_contigs(threads, tiny_gtf, tmp_path):
+    metrics, multiqc = _run_vectors(tiny_gtf, tmp_path, TWO_CONTIGS, reference=True,
+                                    threads=threads)
+    assert [metrics[k] for k in LABEL_COUNTS] == ["3", "1", "1", "1"]
+    assert [multiqc[k] for k in LABEL_FRACS] == [0.33333333] * 3
+
+
+@pytest.mark.parametrize("value", [None, 3])
+def test_per_well_row_carries_the_label_counts(value):
+    sm = SampleMetrics(sample_name="w", bam_path="w.bam", platform="smartseq",
+                       pipeline_stage="pre_filter", aligner="STAR")
+    for key in LABEL_COUNTS:
+        setattr(sm, key, value)
+    row = _build_per_well_metrics_row(sm, plate_id="P1", well_id="A1",
+                                      bam_path="w.bam", well_meta_from_sheet=None)
+    assert [row[k] for k in LABEL_COUNTS] == [value] * 4

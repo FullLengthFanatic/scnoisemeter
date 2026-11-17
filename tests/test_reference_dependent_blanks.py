@@ -17,8 +17,12 @@ from scnoisemeter.cli import cli
 from scnoisemeter.modules.metrics import SampleMetrics
 from scnoisemeter.modules.report_figures import _artifact_flags
 
-NEEDS_GENOME = ("n_polya_priming", "n_noncanon_junction", "n_rt_switch_repeat")
+NEEDS_GENOME = ("n_polya_priming", "n_noncanon_junction", "n_rt_switch_repeat",
+                "n_priming_site_observed", "n_priming_templated",
+                "n_priming_nontemplated", "n_priming_ambiguous")
 HOTSPOT = ("read_frac_intergenic_hotspot", "base_frac_intergenic_hotspot")
+# The label shares are rows of words, not blanks, when there is no share.
+LABEL_FRACS = ("priming_templated_frac", "priming_nontemplated_frac", "priming_ambiguous_frac")
 
 
 def _annotation_args(tiny_gtf, tmp_path):
@@ -49,6 +53,8 @@ def test_read_metrics_leaves_the_genome_checks_blank_without_reference(tiny_bam,
         assert metrics[key] == "", key
     for key in HOTSPOT:
         assert key not in metrics, key
+    for key in LABEL_FRACS:
+        assert metrics[key] == "not observable", key
     assert metrics["n_tso_invasion"] == "0"      # needs no genome, so it was measured
 
 
@@ -63,7 +69,8 @@ def test_read_metrics_reports_the_genome_checks_with_reference(tiny_bam, tiny_gt
 def test_multiqc_json_omits_the_genome_checks_without_reference(tiny_bam, tiny_gtf, tmp_path):
     out = _run(tiny_bam, tiny_gtf, tmp_path)
     data = json.loads((out / "tiny.multiqc.json").read_text())["data"]["tiny"]
-    for key in ("polya_priming_frac", "rt_switch_repeat_frac", "read_frac_intergenic_hotspot"):
+    for key in ("polya_priming_frac", "rt_switch_repeat_frac", "read_frac_intergenic_hotspot",
+                "n_priming_site_observed", *LABEL_FRACS):
         assert key not in data, key
     assert "tso_invasion_frac" in data
 
@@ -108,3 +115,5 @@ def test_a_reference_that_cannot_be_opened_counts_as_no_reference(tiny_bam, tiny
     metrics = _metrics(_run(tiny_bam, tiny_gtf, tmp_path, "--reference", str(broken)))
     for key in NEEDS_GENOME:
         assert metrics[key] == "", key
+    for key in LABEL_FRACS:
+        assert metrics[key] == "not observable", key

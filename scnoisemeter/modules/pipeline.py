@@ -82,6 +82,10 @@ def _dd_flags():
         "tso_concat": 0,
         "discordant_pair": 0,
         "low_mapq": 0,
+        "priming_site": 0,
+        "priming_templated": 0,
+        "priming_nontemplated": 0,
+        "priming_ambiguous": 0,
     }
 
 
@@ -413,6 +417,9 @@ def _contig_worker(args: dict) -> ContigResult:
                     result.artifact_flags[cb]["polya"] += 1
                 if res.has_polya_tail:
                     result.artifact_flags[cb]["polya_tail"] += 1
+                if res.priming_site_observed:
+                    result.artifact_flags[cb]["priming_site"] += 1
+                    result.artifact_flags[cb][f"priming_{res.priming_label}"] += 1
                 if res.has_rt_switch_repeat:
                     result.artifact_flags[cb]["rt_switch"] += 1
                 if res.has_noncanonical_junction:
