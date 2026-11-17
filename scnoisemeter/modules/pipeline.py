@@ -324,6 +324,7 @@ def _contig_worker(args: dict) -> ContigResult:
     tso_min_match       = args.get("tso_min_match", TSO_MIN_MATCH_LENGTH)
     tso_check_polyg     = args.get("tso_check_polyg", True)
     priming_criterion   = args.get("priming_criterion", PRIMING_CRITERION_DEFAULT)
+    priming_site_rule   = args.get("priming_site_rule", "a_run")
     store_read_assignments = args.get("store_read_assignments", False)
 
     if worker_seed is not None:
@@ -348,6 +349,7 @@ def _contig_worker(args: dict) -> ContigResult:
         tso_check_polyg=tso_check_polyg,
         reference=reference,
         priming_criterion=priming_criterion,
+        priming_site_rule=priming_site_rule,
     )
 
     result = ContigResult(contig=contig)
@@ -558,6 +560,7 @@ def run_pipeline(
     tso_min_match: int = TSO_MIN_MATCH_LENGTH,
     tso_check_polyg: bool = True,
     priming_criterion: str = PRIMING_CRITERION_DEFAULT,
+    priming_site_rule: str = "a_run",
     store_read_assignments: bool = False,
 ) -> SampleResult:
     """
@@ -647,6 +650,7 @@ def run_pipeline(
             "tso_min_match":       tso_min_match,
             "tso_check_polyg":     tso_check_polyg,
             "priming_criterion":   priming_criterion,
+            "priming_site_rule":   priming_site_rule,
             "store_read_assignments": store_read_assignments,
         }
         for contig in contigs

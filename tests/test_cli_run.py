@@ -60,7 +60,12 @@ def test_run_info_records_the_settings_that_change_a_number(tiny_bam, tiny_gtf, 
     assert result.exit_code == 0, result.output
     info = json.loads((out / "tiny.run_info.json").read_text())
     assert info["priming"] == {"polya_min_support": 25.0, "criterion": "perc_a",
-                               "anchor_veto_internal_priming": False}
+                               "anchor_veto_internal_priming": False,
+                               # --platform ont, --priming-site-rule auto
+                               "site_rule": "a_run",
+                               "definition_source": "flight-polyafilter-bench 1.2.0",
+                               "templated_min": 8, "nontemplated_max": 4,
+                               "label_window": 20}
     assert info["intergenic_reclassification_sampled"] is False
 
 

@@ -13,10 +13,14 @@ from __future__ import annotations
 import gzip
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
+import pysam
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from test_priming_site import L_VECTORS, S_VECTORS, build, contig, segment  # noqa: E402
 
 from scnoisemeter.cli import (  # noqa: E402
     _load_polya_sites,
@@ -27,8 +31,10 @@ from scnoisemeter.constants import (  # noqa: E402
     POLYA_MIN_SUPPORT_DEFAULT,
     POLYA_TAIL_MIN_LENGTH,
     PRIMING_CRITERION_DEFAULT,
+    ReadCategory,
 )
 from scnoisemeter.modules.classifier import ReadClassifier  # noqa: E402
+from scnoisemeter.modules.priming_site import observed_site  # noqa: E402
 
 
 class _Read:
@@ -199,6 +205,107 @@ class TestAtlasDensity:
 class TestPrimingCriterionOption:
     def test_unknown_criterion_is_rejected(self):
         from scnoisemeter.modules.annotation import AnnotationIndex
-        with pytest.raises(ValueError, match="a_run|perc_a|either"):
-            ReadClassifier(AnnotationIndex.__new__(AnnotationIndex),
-                           priming_criterion="percent")
+        index = AnnotationIndex.__new__(AnnotationIndex)
+        with pytest.raises(ValueError, match=r"a_run\|perc_a\|either\|count"):
+            ReadClassifier(index, priming_criterion="percent")
+        assert ReadClassifier(index, priming_criterion="count").priming_criterion == "count"
+
+    def test_unknown_site_rule_is_rejected(self):
+        with pytest.raises(ValueError, match=r"clip\|a_run"):
+            ReadClassifier(MagicMock(splice_sites={}), priming_site_rule="auto")
+
+
+# ---------------------------------------------------------------------------
+# Per-read priming label and the count criterion, on the Appendix A vectors
+# ---------------------------------------------------------------------------
+
+_COMP = str.maketrans("ACGT", "TGCA")
+
+
+@pytest.fixture
+def classifier_for(tmp_path):
+    """``(name, minus, criterion, rule)`` -> a classifier on the vector's contig, and its read.
+
+    The FASTA holds chrS as the appendix plants it, or its reverse complement
+    for the mirrored (minus) read.
+    """
+    opened = []
+
+    def make(name, minus, criterion="count", rule="a_run"):
+        v = {**L_VECTORS, **S_VECTORS}[name]
+        seq = contig(v).translate(_COMP)[::-1] if minus else contig(v)
+        fasta = tmp_path / f"{name}_{'minus' if minus else 'plus'}.fa"
+        fasta.write_text(f">chrS\n{seq}\n")
+        pysam.faidx(str(fasta))
+        opened.append(pysam.FastaFile(str(fasta)))
+        clf = ReadClassifier(MagicMock(splice_sites={}), reference=opened[-1],
+                             priming_criterion=criterion, priming_site_rule=rule)
+        return clf, build(v, minus)[0]
+
+    yield make
+    for fa in opened:
+        fa.close()
+
+
+def blank_result(clf, read):
+    return clf._make_result(read, "", "", ReadCategory.EXONIC_SENSE, {}, False)
+
+
+@pytest.mark.parametrize("minus", [False, True])
+@pytest.mark.parametrize("name,rule,label", [
+    ("L1", "a_run", "nontemplated"), ("L2", "a_run", "templated"),
+    ("L4_6", "a_run", "ambiguous"), ("L7", "a_run", "templated"), ("L9", "a_run", "templated"),
+    ("S1", "clip", "nontemplated"), ("S2", "clip", "templated"),
+])
+def test_label_on_observed_site(name, rule, label, minus, classifier_for):
+    clf, read = classifier_for(name, minus, criterion="count", rule=rule)
+    assert clf._priming_label(read) == (True, label)
+
+
+@pytest.mark.parametrize("name,rule", [
+    ("L3", "a_run"), ("L5", "a_run"), ("L10", "a_run"), ("S4", "clip"), ("S6", "clip"),
+])
+def test_no_site_no_label(name, rule, classifier_for):
+    clf, read = classifier_for(name, False, criterion="count", rule=rule)
+    assert clf._priming_label(read) == (False, None)
+
+
+def test_trimmed_read_gets_the_same_site_and_label_as_the_untrimmed_one(classifier_for):
+    # L2 keeps its poly(A); S2 is the same molecule after Cell Ranger trimming
+    kept_clf, kept = classifier_for("L2", False, criterion="count", rule="a_run")
+    trim_clf, trimmed = classifier_for("S2", False, criterion="count", rule="clip")
+    assert observed_site(kept, "a_run") == observed_site(trimmed, "clip") == 1000
+    assert kept_clf._priming_label(kept) == trim_clf._priming_label(trimmed) == (True, "templated")
+
+
+def test_count_flag_is_the_templated_label(classifier_for):
+    clf, read = classifier_for("L2", False, "count", "a_run")
+    res = clf._decorate_independent_flags(read, blank_result(clf, read))
+    assert res.is_polya_priming and res.priming_site_observed and res.priming_label == "templated"
+
+
+def test_old_criteria_are_untouched(classifier_for):
+    clf, read = classifier_for("L2", False, "a_run", "a_run")
+    res = clf._decorate_independent_flags(read, blank_result(clf, read))
+    assert res.is_polya_priming is False            # alignment end 1010, no A-run downstream: the anchor conflict of the brief
+    assert res.priming_label == "templated"         # the label is still reported
+
+
+def test_no_reference_means_not_observable():        # Review Focus 5
+    clf = ReadClassifier(MagicMock(splice_sites={}), reference=None, priming_criterion="count")
+    assert clf._priming_label(build(L_VECTORS["L2"], False)[0]) == (False, None)
+
+
+def test_site_near_contig_end_has_no_label(classifier_for):   # Review Focus 3
+    clf, read = classifier_for("L1_at_contig_end", False, "count", "a_run")   # site at 1990 of 2000
+    assert clf._priming_label(read) == (False, None)
+
+
+@pytest.mark.parametrize("rule", ["a_run", "clip"])
+def test_record_without_cigar_has_no_label(rule, classifier_for):
+    # A mapped record with CIGAR '*' was classified before the label existed;
+    # the label is computed on every read, so it must not raise on one.
+    clf, _ = classifier_for("L1", False, "a_run", rule)
+    read = segment(900, "100M30S", "C" * 100 + "A" * 30)
+    read.cigartuples = None
+    assert clf._priming_label(read) == (False, None)

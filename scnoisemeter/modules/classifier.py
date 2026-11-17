@@ -56,6 +56,8 @@ from scnoisemeter.constants import (
     POLYA_TAIL_MIN_LENGTH,
     POLYA_TAIL_SCAN,
     PRIMING_CRITERION_DEFAULT,
+    PRIMING_LABEL_WINDOW,
+    PRIMING_SITE_RULES,
     RT_SWITCH_REPEAT_MIN,
     RT_SWITCH_REPEAT_SCAN,
     TSO_10X,
@@ -67,6 +69,7 @@ from scnoisemeter.constants import (
     SamFlag,
 )
 from scnoisemeter.modules.annotation import AnnotationIndex
+from scnoisemeter.modules.priming_site import observed_site, priming_label
 
 # Import new sub-categories (defined in constants but also referenced directly)
 _AMBIGUOUS_COD_COD  = ReadCategory.AMBIGUOUS_COD_COD
@@ -109,6 +112,15 @@ class ReadResult:
     is_polya_priming : bool
         True if A-rich stretch detected immediately downstream of 3′ end.
         This is a property of the locus in the reference, not of the molecule.
+        Under the ``count`` criterion it is ``priming_label == "templated"``.
+    priming_site_observed : bool
+        True if the read has a priming site under the classifier's site rule
+        and the 20 nt downstream of it lie on the contig.  Always False
+        without a reference FASTA.
+    priming_label : str | None
+        "templated", "nontemplated" or "ambiguous" from the A count of the
+        20 nt downstream of the site, in transcript sense; None when
+        ``priming_site_observed`` is False.  Computed under every criterion.
     has_polya_tail : bool
         True if the 3′ SOFT clip carries an untemplated A-run of at least
         POLYA_TAIL_MIN_LENGTH.  Independent per-molecule evidence: a read with
@@ -158,6 +170,8 @@ class ReadResult:
     query_bases:            int = 0
     has_polya_tail:         bool = False
     has_rt_switch_repeat:   bool = False
+    priming_site_observed:  bool = False
+    priming_label:          Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +215,13 @@ class ReadClassifier:
     reference : pysam.FastaFile | None
         Reference FASTA for polyA context check and splice-site dinucleotide
         lookup.  If None, those checks are skipped.
+    priming_criterion : str
+        Internal-priming test: ``a_run``, ``perc_a``, ``either`` or ``count``
+        (the read's priming label is templated).
+    priming_site_rule : str
+        ``clip`` or ``a_run``, the rule that gives a read its priming site
+        (``priming_site.observed_site``).  The CLI resolves ``auto`` per
+        platform before it gets here.
     """
 
     def __init__(
@@ -217,17 +238,24 @@ class ReadClassifier:
         tso_check_polyg: bool = True,
         reference: Optional[pysam.FastaFile] = None,
         priming_criterion: str = PRIMING_CRITERION_DEFAULT,
+        priming_site_rule: str = "a_run",
     ):
         self.index = index
         self.barcode_tag = barcode_tag
         self.umi_tag = umi_tag
         self.whitelist = whitelist
         self.chimeric_distance = chimeric_distance
-        if priming_criterion not in {"a_run", "perc_a", "either"}:
+        if priming_criterion not in {"a_run", "perc_a", "either", "count"}:
             raise ValueError(
-                f"priming_criterion must be a_run|perc_a|either, got {priming_criterion!r}"
+                f"priming_criterion must be a_run|perc_a|either|count, got {priming_criterion!r}"
             )
         self.priming_criterion = priming_criterion
+        if priming_site_rule not in PRIMING_SITE_RULES:
+            raise ValueError(
+                f"priming_site_rule must be {'|'.join(PRIMING_SITE_RULES)}, "
+                f"got {priming_site_rule!r}"
+            )
+        self.priming_site_rule = priming_site_rule
         self.paired_end_chimeric = paired_end_chimeric
         # ``None`` preserves the programmatic API's historical defaults;
         # an explicit empty list disables motif matching.  The CLI supplies
@@ -386,7 +414,12 @@ class ReadClassifier:
         """Attach evidence flags independently of the primary category."""
         result.is_tso_concatemer = self._check_tso_concatemer(read)
         result.is_tso_invasion = self._check_tso_invasion(read)
-        result.is_polya_priming = self._check_polya_priming(read)
+        result.priming_site_observed, result.priming_label = self._priming_label(read)
+        result.is_polya_priming = (
+            result.priming_label == "templated"
+            if self.priming_criterion == "count"
+            else self._check_polya_priming(read)
+        )
         result.has_polya_tail = self._has_polya_tail(read)
         result.has_rt_switch_repeat = self._has_rt_switch_repeat(read)
         result.is_discordant_pair = self._is_discordant_pair(read)
@@ -704,6 +737,36 @@ class ReadClassifier:
         if self.priming_criterion == "perc_a":
             return perc_a >= POLYA_PERC_A_MIN
         return perc_a >= POLYA_PERC_A_MIN or bool(run_re.search(context))
+
+    def _priming_label(self, read: pysam.AlignedSegment) -> tuple[bool, Optional[str]]:
+        """``(site observed, label)`` under the benchmark's definition.
+
+        The site is ``observed_site`` under ``priming_site_rule``.  The label
+        comes from the A count of the PRIMING_LABEL_WINDOW nt downstream of
+        it in transcript sense: ``[site, site + 20)`` on a forward read; on a
+        reverse read ``[site - 20, site)``, where the transcript's A's read as
+        T's.  No reference, no CIGAR, no site, or a window cut short by the
+        contig end gives ``(False, None)``, so the read does not count as one
+        with a site.
+        """
+        if self.reference is None or not read.cigartuples:
+            return False, None
+        site = observed_site(read, self.priming_site_rule)
+        if site is None:
+            return False, None
+        contig = read.reference_name
+        try:
+            if read.is_reverse:
+                window = self.reference.fetch(contig, max(0, site - PRIMING_LABEL_WINDOW), site)
+                base = "T"
+            else:
+                window = self.reference.fetch(contig, site, site + PRIMING_LABEL_WINDOW)
+                base = "A"
+        except (ValueError, KeyError):
+            return False, None
+        if len(window) < PRIMING_LABEL_WINDOW:
+            return False, None
+        return True, priming_label(window.upper().count(base))
 
     def _polya_tail_stats(self, read: pysam.AlignedSegment) -> tuple[int, int, float]:
         """``(soft_clip_len, terminal untemplated A-run, A-fraction)`` at the 3' end.

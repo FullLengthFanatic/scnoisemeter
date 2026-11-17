@@ -62,6 +62,11 @@ from scnoisemeter.constants import (
     POLYA_MIN_SUPPORT_RECOMMENDED,
     POLYA_SITE_PROXIMITY,
     PRIMING_CRITERION_DEFAULT,
+    PRIMING_DEFINITION_SOURCE,
+    PRIMING_LABEL_WINDOW,
+    PRIMING_NONTEMPLATED_MAX,
+    PRIMING_SITE_RULES,
+    PRIMING_TEMPLATED_MIN,
     SITE_COORD_OUT_OF_RANGE_DROP,
     SITE_COORD_OUT_OF_RANGE_WARN,
     TSO_10X,
@@ -93,6 +98,7 @@ from scnoisemeter.modules.metrics import (
     to_multiqc_json,
 )
 from scnoisemeter.modules.pipeline import run_pipeline
+from scnoisemeter.modules.priming_site import site_rule_for
 from scnoisemeter.modules.report import (
     write_cohort_report,
     write_compare_report,
@@ -186,13 +192,29 @@ def _shared_options(func):
                           "pass 0 to reproduce those results. A BED without that column "
                           "is unaffected."),
         click.option("--priming-criterion",
-                     type=click.Choice(["a_run", "perc_a", "either"], case_sensitive=False),
+                     type=click.Choice(["a_run", "perc_a", "either", "count"],
+                                       case_sensitive=False),
                      default=PRIMING_CRITERION_DEFAULT, show_default=True,
                      help="Internal-priming test. 'a_run' is a run of consecutive genomic "
                           "A's (pre-0.9 behaviour); 'perc_a' is the SQANTI3/pigeon "
                           "perc_A_downstream_TTS convention (>=60% A over 20 bp); 'either' "
                           "flags a read satisfying one or both. The two agree on 95-97% of "
-                          "windows, so this is for comparability, not correction."),
+                          "windows, so this is for comparability, not correction. 'count' "
+                          "flags a read labelled templated: "
+                          f"{PRIMING_TEMPLATED_MIN} or more A's in the "
+                          f"{PRIMING_LABEL_WINDOW} nt downstream of its priming site "
+                          "(--priming-site-rule), the definition of "
+                          f"{PRIMING_DEFINITION_SOURCE}."),
+        click.option("--priming-site-rule",
+                     type=click.Choice(["auto", *PRIMING_SITE_RULES], case_sensitive=False),
+                     default="auto", show_default=True,
+                     help="Where a read's priming site is, for the per-read priming label "
+                          "and the 'count' criterion. 'clip' is the alignment end when the "
+                          "3' soft clip holds the poly(A) or the read carries a pa tag "
+                          "(short reads); 'a_run' is where the terminal A run starts, "
+                          "aligned A's included (long reads). 'auto' takes 'clip' for "
+                          "Illumina, 10x, BD and Smart-seq and 'a_run' for ONT, PacBio and "
+                          "unknown platforms."),
         click.option("--no-strict", is_flag=True,
                      help="Downgrade the pre-report sanity checks from errors to warnings. "
                           "By default a run whose barcode gate leaves most reads unassigned "
@@ -448,6 +470,11 @@ def _effective_tso_sequences(user_sequences: Optional[list], platform: Platform)
     return list(user_sequences) if user_sequences is not None else _default_tso_sequences(platform)
 
 
+def _resolve_site_rule(option: str, platform: Platform) -> str:
+    """--priming-site-rule with 'auto' replaced by the platform's rule."""
+    return site_rule_for(platform) if option == "auto" else option
+
+
 def _effective_polyg_check(enabled: bool, sequences: list[str]) -> bool:
     """The poly-G shortcut is specific to the built-in 10x motif."""
     return enabled and TSO_10X in sequences
@@ -472,6 +499,7 @@ def _attach_result_provenance(
     tso_seqs, tso_min_match, tso_check_polyg,
     polya_min_support: float = POLYA_MIN_SUPPORT_DEFAULT,
     priming_criterion: str = PRIMING_CRITERION_DEFAULT,
+    priming_site_rule: str,
     anchor_veto_internal_priming: bool = False,
     version_warning: Optional[str] = None,
 ) -> dict:
@@ -503,6 +531,11 @@ def _attach_result_provenance(
             "polya_min_support": float(polya_min_support),
             "criterion": priming_criterion,
             "anchor_veto_internal_priming": bool(anchor_veto_internal_priming),
+            "site_rule": priming_site_rule,
+            "definition_source": PRIMING_DEFINITION_SOURCE,
+            "templated_min": PRIMING_TEMPLATED_MIN,
+            "nontemplated_max": PRIMING_NONTEMPLATED_MAX,
+            "label_window": PRIMING_LABEL_WINDOW,
         },
     }
     sm._gtf_info   = provenance["gtf"]
@@ -951,7 +984,7 @@ def run_cmd(
     bam, sample_name, tagged_bam, cell_barcodes,
     gtf, gtf_version, barcode_whitelist, whitelist_db, barcode_tag, umi_tag,
     chemistry, platform, library_strand, pipeline_stage, chimeric_distance, tso, tso_min_match, no_polyg_tso,
-    polya_min_support, priming_criterion, no_strict, anchor_veto_internal_priming,
+    polya_min_support, priming_criterion, priming_site_rule, no_strict, anchor_veto_internal_priming,
     repeats, reference, threads, no_umi_dedup, no_cache,
     exclude_biotypes, output_dir, obs_metadata, polya_sites, polya_db,
     tss_sites, tss_db, numt_bed, offline, seed, verbose,
@@ -1119,6 +1152,7 @@ def run_cmd(
         _resolve_tso(tso, tso_min_match), meta.platform
     )
     tso_check_polyg = _effective_polyg_check(not no_polyg_tso, tso_seqs)
+    site_rule = _resolve_site_rule(priming_site_rule, meta.platform)
 
     # Run pipeline
     result = run_pipeline(
@@ -1131,6 +1165,7 @@ def run_cmd(
         tso_min_match=tso_min_match,
         tso_check_polyg=tso_check_polyg,
         priming_criterion=priming_criterion,
+        priming_site_rule=site_rule,
         threads=threads,
         store_umis=not no_umi_dedup,
         reference_path=reference,
@@ -1232,6 +1267,7 @@ def run_cmd(
         tso_check_polyg=tso_check_polyg,
         polya_min_support=polya_min_support,
         priming_criterion=priming_criterion,
+        priming_site_rule=site_rule,
         anchor_veto_internal_priming=anchor_veto_internal_priming,
         version_warning=version_warning,
     )
@@ -1345,7 +1381,7 @@ def compare_cmd(
     bam_a, bam_b, label_a, label_b, matched_reads, tso_a, tso_b,
     gtf, gtf_version, barcode_whitelist, whitelist_db, barcode_tag, umi_tag,
     chemistry, platform, library_strand, pipeline_stage, chimeric_distance, tso, tso_min_match, no_polyg_tso,
-    polya_min_support, priming_criterion, no_strict, anchor_veto_internal_priming,
+    polya_min_support, priming_criterion, priming_site_rule, no_strict, anchor_veto_internal_priming,
     repeats, reference, threads, no_umi_dedup, no_cache,
     exclude_biotypes, output_dir, obs_metadata, polya_sites, polya_db,
     tss_sites, tss_db, numt_bed, offline, seed, verbose,
@@ -1439,6 +1475,7 @@ def compare_cmd(
             _resolve_tso(tso_side, tso_min_match), meta.platform
         )
         tso_check_polyg = _effective_polyg_check(not no_polyg_tso, tso_seqs)
+        site_rule = _resolve_site_rule(priming_site_rule, meta.platform)
         result = run_pipeline(
             bam_path, index, meta,
             whitelist=whitelist,
@@ -1448,6 +1485,7 @@ def compare_cmd(
             tso_min_match=tso_min_match,
             tso_check_polyg=tso_check_polyg,
             priming_criterion=priming_criterion,
+            priming_site_rule=site_rule,
             threads=threads,
             store_umis=not no_umi_dedup,
             reference_path=reference,
@@ -1497,6 +1535,7 @@ def compare_cmd(
             tso_check_polyg=tso_check_polyg,
             polya_min_support=polya_min_support,
             priming_criterion=priming_criterion,
+            priming_site_rule=site_rule,
             anchor_veto_internal_priming=anchor_veto_internal_priming,
             version_warning=version_warning,
         )
@@ -1860,6 +1899,7 @@ def _run_single_bam_for_discover(
     bam_path = info.bam_path
     tso_seqs = _effective_tso_sequences(tso_seqs, meta.platform)
     tso_check_polyg = _effective_polyg_check(not no_polyg_tso, tso_seqs)
+    site_rule = site_rule_for(meta.platform)
 
     # Validate sort order and chromosome naming
     _validate_sort_order(meta)
@@ -1882,6 +1922,7 @@ def _run_single_bam_for_discover(
         tso_sequences=tso_seqs,
         tso_min_match=tso_min_match,
         tso_check_polyg=tso_check_polyg,
+        priming_site_rule=site_rule,
         threads=threads,
         store_umis=True,
         seed=seed,
@@ -1923,6 +1964,7 @@ def _run_single_bam_for_discover(
         tss_paths=tss_paths, tss_db=tss_db, tss_user_supplied=tss_user_supplied,
         tso_seqs=tso_seqs, tso_min_match=tso_min_match,
         tso_check_polyg=tso_check_polyg,
+        priming_site_rule=site_rule,
         version_warning=version_warning,
     )
 
@@ -2042,6 +2084,9 @@ def _plate_well_task(task: dict) -> dict:
             tso_min_match=task.get("tso_min_match", TSO_MIN_MATCH_LENGTH),
             tso_check_polyg=task.get("tso_check_polyg", True),
             priming_criterion=task.get("priming_criterion", PRIMING_CRITERION_DEFAULT),
+            priming_site_rule=_resolve_site_rule(
+                task.get("priming_site_rule", "auto"), meta.platform
+            ),
             threads=task["threads"],
             store_umis=task["store_umis"],
             reference_path=task["reference"],
@@ -2229,7 +2274,7 @@ def run_plate_cmd(
     plate_dir, sample_sheet, sequencer, sample_name, plate_ids, parallel_wells,
     gtf, gtf_version, barcode_whitelist, whitelist_db, barcode_tag, umi_tag,
     chemistry, platform, library_strand, pipeline_stage, chimeric_distance, tso, tso_min_match, no_polyg_tso,
-    polya_min_support, priming_criterion, no_strict, anchor_veto_internal_priming,
+    polya_min_support, priming_criterion, priming_site_rule, no_strict, anchor_veto_internal_priming,
     repeats, reference, threads, no_umi_dedup, no_cache,
     exclude_biotypes, output_dir, obs_metadata, polya_sites, polya_db,
     tss_sites, tss_db, numt_bed, offline, seed, verbose,
@@ -2368,6 +2413,7 @@ def run_plate_cmd(
         _resolve_tso(tso, tso_min_match), _first_meta.platform
     )
     tso_check_polyg = _effective_polyg_check(not no_polyg_tso, tso_seqs)
+    plate_site_rule = _resolve_site_rule(priming_site_rule, _first_meta.platform)
 
     # Build annotation index ONCE for all wells
     index = build_annotation_index(
@@ -2453,6 +2499,7 @@ def run_plate_cmd(
                     "tso_min_match":    tso_min_match,
                     "tso_check_polyg":  tso_check_polyg,
                     "priming_criterion": priming_criterion,
+                    "priming_site_rule": priming_site_rule,
                     "anchor_veto_internal_priming": bool(anchor_veto_internal_priming),
                     "threads":          _threads_per_well,
                     "store_umis":       not no_umi_dedup,
@@ -2545,6 +2592,7 @@ def run_plate_cmd(
                         tso_min_match=tso_min_match,
                         tso_check_polyg=tso_check_polyg,
                         priming_criterion=priming_criterion,
+                        priming_site_rule=_resolve_site_rule(priming_site_rule, meta.platform),
                         threads=threads,
                         store_umis=not no_umi_dedup,
                         reference_path=reference,
@@ -2630,6 +2678,7 @@ def run_plate_cmd(
             tso_check_polyg=tso_check_polyg,
             polya_min_support=polya_min_support,
             priming_criterion=priming_criterion,
+            priming_site_rule=plate_site_rule,
             anchor_veto_internal_priming=anchor_veto_internal_priming,
             version_warning=version_warning,
         )
