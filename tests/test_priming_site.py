@@ -35,6 +35,7 @@ from scnoisemeter.constants import (
     Platform,
 )
 from scnoisemeter.modules.priming_site import (
+    clipped_polya_length,
     observed_site,
     priming_label,
     site_rule_for,
@@ -175,6 +176,37 @@ def test_clip_rule(name, minus):
 def test_cell_ranger_trim_with_mismatches_keeps_the_alignment_end():      # Review Focus 2
     read, _ = build(S_VECTORS["S7"], False)
     assert observed_site(read, "clip") == 1000 and observed_site(read, "a_run") is None
+
+
+@pytest.mark.parametrize("minus", [False, True])
+def test_bd_read_with_aligned_adenines_keeps_the_alignment_end(minus):    # Review Focus 2
+    # 10 templated A's aligned before 30 clipped ones: the run starts at 1000,
+    # the clip rule stays at the alignment end, 1010 (mirror 990).
+    read, want = build(SVector({1000: "A10"}, 900, "110M30S", "C100 A10 A30", None, 1010), minus)
+    assert observed_site(read, "clip") == want and observed_site(read, "a_run") == 1000
+
+
+# The pa tag, when present, is the clipped length: it gives a site to a read
+# with no clip at all, and takes it from a clean 30 A clip when it says 5.
+_PA_DECIDES = {
+    "tag_without_clip": SVector({}, 900, "100M", "C100", 25, 1000),
+    "short_tag_over_clean_clip": SVector({}, 900, "100M30S", "C100 A30", 5, None),
+}
+
+
+@pytest.mark.parametrize("name", _PA_DECIDES)
+@pytest.mark.parametrize("minus", [False, True])
+def test_pa_tag_decides_the_clip_rule(name, minus):
+    read, want = build(_PA_DECIDES[name], minus)
+    assert observed_site(read, "clip") == want
+
+
+@pytest.mark.parametrize("minus", [False, True])
+def test_clipped_polya_length(minus):
+    s7 = S_VECTORS["S7"]
+    assert clipped_polya_length(build(s7, minus)[0]) == 34
+    assert clipped_polya_length(build(s7._replace(pa=None), minus)[0]) == 31
+    assert clipped_polya_length(build(S_VECTORS["S4"], minus)[0]) == 0
 
 
 def test_record_without_sequence_has_no_site():                           # Review Focus 5
