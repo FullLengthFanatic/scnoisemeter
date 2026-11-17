@@ -367,6 +367,26 @@ POLYA_PERC_A_WINDOW = 20
 POLYA_PERC_A_MIN = 60.0
 PRIMING_CRITERION_DEFAULT = "a_run"      # "a_run" | "perc_a" | "either"
 
+# Priming site and label of flight-polyafilter-bench (its docs/definition.json,
+# copied byte for byte to tests/data/definition.json).  The site is a 0-based
+# boundary at the read's 3' end in transcript sense; the label counts the A's
+# in the 20 nt downstream of it: 8 or more templated, 4 or fewer
+# non-templated, 5 to 7 ambiguous.  Rule "clip" (short reads): the alignment
+# end when the read's pa tag, or without one its 3' soft clip, counts at
+# least PRIMING_CLIP_MIN A's (in the clip also PRIMING_CLIP_PURITY of its
+# bases).  Rule "a_run" (long reads): where the terminal A run starts,
+# aligned A's included, when the run holds PRIMING_RUN_MIN A's with up to
+# PRIMING_RUN_TOLERANCE interior non-A bases.
+PRIMING_LABEL_WINDOW = 20
+PRIMING_TEMPLATED_MIN = 8
+PRIMING_NONTEMPLATED_MAX = 4
+PRIMING_CLIP_MIN = 20
+PRIMING_CLIP_PURITY = 0.9
+PRIMING_RUN_MIN = 10
+PRIMING_RUN_TOLERANCE = 1
+PRIMING_SITE_RULES = ("clip", "a_run")
+PRIMING_DEFINITION_SOURCE = "flight-polyafilter-bench 1.2.0"
+
 # Untemplated 3' polyA tail measured from the read's own soft clip.  A genomic
 # A-run says the locus is A-rich; an untemplated A-run outside the alignment
 # says this molecule carried a tail, which is the per-molecule evidence that

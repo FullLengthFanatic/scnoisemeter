@@ -1,0 +1,35 @@
+{
+  "source": "flight-polyafilter-bench",
+  "version": "1.2.0",
+  "site": {
+    "coordinate": "0-based boundary; plus strand: first reference base after the last cDNA base; minus strand: the last cDNA base is the base at the site",
+    "strand": "read strand; reads are transcript-sense",
+    "short_read": {
+      "anchor": "alignment_end",
+      "clip_min": 20,
+      "clip_purity_min": 0.9,
+      "tag": "pa"
+    },
+    "long_read": {
+      "anchor": "a_run_start",
+      "run_min": 10,
+      "run_tolerance": 1,
+      "min_mapq": 20,
+      "min_after": {
+        "BD67": 30,
+        "10x_FL": 0
+      }
+    }
+  },
+  "label": {
+    "window": 20,
+    "templated_min": 8,
+    "nontemplated_max": 4
+  },
+  "rate": {
+    "unit": "molecule",
+    "unique_mapq": 255,
+    "share_all": "templated / (templated + nontemplated + ambiguous)",
+    "share_resolved": "templated / (templated + nontemplated)"
+  }
+}
