@@ -141,6 +141,42 @@ class TestComparabilityWarnings:
         cohort = load_cohort([tmp_path / "a", tmp_path / "b"])
         assert not any("polyA settings" in w for w in cohort.warnings)
 
+    _PRIMING_011 = {"polya_min_support": 25.0, "criterion": "a_run",
+                    "anchor_veto_internal_priming": False, "site_rule": "a_run",
+                    "definition_source": "flight-polyafilter-bench 1.2.0",
+                    "templated_min": 8, "nontemplated_max": 4, "label_window": 20}
+
+    def _polya_warnings(self, tmp_path, *samples):
+        """``(platform, priming)`` per sample -> the polyA-settings warnings."""
+        dirs = []
+        for i, (platform, priming) in enumerate(samples):
+            dirs.append(_write_results_dir(
+                tmp_path, f"s{i}", V072,
+                run_info={"scnoisemeter_version": "0.11.0", "platform": platform,
+                          "priming": priming}))
+        return [w for w in load_cohort(dirs).warnings if "polyA settings" in w]
+
+    @pytest.mark.parametrize("criterion", ["a_run", "count"])
+    def test_each_platform_on_its_own_site_rule_does_not_warn(self, tmp_path, criterion):
+        # --priming-site-rule auto: clip for 10x short reads, a_run for ONT long reads
+        p = {**self._PRIMING_011, "criterion": criterion}
+        assert self._polya_warnings(tmp_path, ("ont", p),
+                                    ("illumina_10x", {**p, "site_rule": "clip"})) == []
+
+    def test_results_without_the_label_keys_do_not_warn(self, tmp_path):
+        old = {k: self._PRIMING_011[k]
+               for k in ("polya_min_support", "criterion", "anchor_veto_internal_priming")}
+        assert self._polya_warnings(tmp_path, ("ont", old), ("ont", self._PRIMING_011)) == []
+
+    def test_site_rule_override_warns_and_names_the_option(self, tmp_path):
+        warnings = self._polya_warnings(tmp_path, ("ont", self._PRIMING_011),
+                                        ("ont", {**self._PRIMING_011, "site_rule": "clip"}))
+        assert len(warnings) == 1 and "--priming-site-rule" in warnings[0]
+
+    def test_count_compares_the_label_definition(self, tmp_path):
+        p = {**self._PRIMING_011, "criterion": "count"}
+        assert self._polya_warnings(tmp_path, ("ont", p), ("ont", {**p, "templated_min": 7}))
+
     def test_mixed_strandedness_warns_and_is_flagged(self, tmp_path):
         _write_results_dir(tmp_path, "tenx", V072,
                            run_info={"scnoisemeter_version": "0.8.0", "unstranded": False})

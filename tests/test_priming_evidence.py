@@ -256,6 +256,8 @@ def blank_result(clf, read):
     ("L1", "a_run", "nontemplated"), ("L2", "a_run", "templated"),
     ("L4_6", "a_run", "ambiguous"), ("L7", "a_run", "templated"), ("L9", "a_run", "templated"),
     ("S1", "clip", "nontemplated"), ("S2", "clip", "templated"),
+    ("L6", "a_run", "nontemplated"), ("S3", "clip", "nontemplated"),
+    ("S7", "clip", "nontemplated"),                 # Review Focus 2
 ])
 def test_label_on_observed_site(name, rule, label, minus, classifier_for):
     clf, read = classifier_for(name, minus, criterion="count", rule=rule)
@@ -296,9 +298,18 @@ def test_no_reference_means_not_observable():        # Review Focus 5
     assert clf._priming_label(build(L_VECTORS["L2"], False)[0]) == (False, None)
 
 
-def test_site_near_contig_end_has_no_label(classifier_for):   # Review Focus 3
-    clf, read = classifier_for("L1_at_contig_end", False, "count", "a_run")   # site at 1990 of 2000
+@pytest.mark.parametrize("minus", [False, True])
+def test_site_near_contig_end_has_no_label(minus, classifier_for):   # Review Focus 3
+    # site at 1990 of 2000; the mirror puts it at 10, a window below the contig start
+    clf, read = classifier_for("L1_at_contig_end", minus, "count", "a_run")
     assert clf._priming_label(read) == (False, None)
+
+
+def test_read_aligned_entirely_to_adenines_is_labelled(classifier_for):   # Review Focus 3
+    # L9's genome: 15 A's at 990.  The read is those 15 A's only, so its site
+    # is its first aligned base and the window holds them all.
+    clf, _ = classifier_for("L9", False, "count", "a_run")
+    assert clf._priming_label(segment(990, "15M", "A" * 15)) == (True, "templated")
 
 
 @pytest.mark.parametrize("rule", ["a_run", "clip"])

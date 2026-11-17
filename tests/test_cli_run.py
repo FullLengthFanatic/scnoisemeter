@@ -69,6 +69,13 @@ def test_run_info_records_the_settings_that_change_a_number(tiny_bam, tiny_gtf, 
     assert info["intergenic_reclassification_sampled"] is False
 
 
+def test_explicit_site_rule_overrides_the_platform_rule(tiny_bam, tiny_gtf, tmp_path):
+    result, out = _run(tiny_bam, tiny_gtf, tmp_path, "--priming-site-rule", "clip")
+    assert result.exit_code == 0, result.output
+    info = json.loads((out / "tiny.run_info.json").read_text())
+    assert info["priming"]["site_rule"] == "clip"          # auto would give a_run on ONT
+
+
 def test_cell_barcodes_matching_nothing_stops_the_run(tiny_bam, tiny_gtf, tmp_path):
     barcodes = tmp_path / "barcodes.tsv"
     barcodes.write_text("TTTTTTTTTTTTTTTT-1\n")

@@ -39,7 +39,8 @@ from typing import Optional
 
 import pandas as pd
 
-from scnoisemeter.constants import CATEGORY_ORDER
+from scnoisemeter.constants import CATEGORY_ORDER, Platform
+from scnoisemeter.modules.priming_site import site_rule_for
 
 logger = logging.getLogger(__name__)
 
@@ -265,6 +266,32 @@ def _order_samples(cohort: Cohort) -> None:
     )
 
 
+def _priming_settings(run_info: dict) -> dict:
+    """
+    The entries of ``run_info["priming"]`` that two samples must share.
+
+    Under ``--priming-site-rule auto`` a short-read and a long-read sample get
+    different site rules by design, so the rule counts only where it overrides
+    the one ``auto`` gives the sample's platform.  The label definition decides
+    the flag only under ``count``; elsewhere a change of it comes with a change
+    of version, which has its own warning.  Results written before either key
+    existed compare on the three options alone.
+    """
+    p = run_info["priming"]
+    settings = {k: p.get(k) for k in
+                ("polya_min_support", "criterion", "anchor_veto_internal_priming")}
+    try:
+        platform = Platform(run_info.get("platform"))
+    except ValueError:
+        platform = Platform.UNKNOWN
+    rule = p.get("site_rule")
+    settings["site_rule_override"] = rule if rule not in (None, site_rule_for(platform)) else None
+    if p.get("criterion") == "count":
+        settings["definition"] = [p.get(k) for k in (
+            "definition_source", "templated_min", "nontemplated_max", "label_window")]
+    return settings
+
+
 def _check_comparability(cohort: Cohort) -> None:
     """Warn about the ways a cross-sample comparison can be misleading."""
     missing_info = [s.label for s in cohort.samples if s.run_info is None]
@@ -298,13 +325,14 @@ def _check_comparability(cohort: Cohort) -> None:
         )
 
     priming = {
-        json.dumps(p, sort_keys=True)
-        for p in ((s.run_info or {}).get("priming") for s in cohort.samples) if p
+        json.dumps(_priming_settings(s.run_info), sort_keys=True)
+        for s in cohort.samples if (s.run_info or {}).get("priming")
     }
     if len(priming) > 1:
         cohort.warnings.append(
             "Samples were run with different polyA settings (--polya-min-support, "
-            "--priming-criterion or --anchor-veto-internal-priming). The intergenic "
+            "--priming-criterion, --priming-site-rule or "
+            "--anchor-veto-internal-priming). The intergenic "
             "hotspot and novel categories, the internal-priming flag and 3' anchoring "
             "are not comparable across them."
         )
