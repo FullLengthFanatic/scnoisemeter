@@ -211,7 +211,10 @@ evidence:
   immediately beyond the read's 3′ end. Read this carefully: it is a statement about the
   *place in the genome*, not about the molecule. It says an oligo-dT primer *could* have
   annealed here. It cannot say whether this particular molecule was primed there or arrived
-  by genuine cleavage and polyadenylation.
+  by genuine cleavage and polyadenylation. This is `--priming-criterion a_run`, the default
+  through 0.10.0. The default `--priming-criterion count` flags instead the reads labelled
+  templated: 8 or more adenines in the 20 nt of reference downstream of the read's priming site
+  (§3.3.1). That label also reads the genome, so the same caveat holds.
 - **Clipped 3′ polyA tail**: 8 or more adenines at the start of the read's own 3′ soft clip,
   outside the aligned block. Clipped adenines come from the oligo(dT) primer in both cases, so
   they do not tell a real 3′ end from internal priming. The label of §3.3.1 reads the genome

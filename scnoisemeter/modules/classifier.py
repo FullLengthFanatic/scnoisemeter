@@ -780,7 +780,7 @@ class ReadClassifier:
         Only SOFT clips are counted: hard-clipped bases are absent from
         ``query_sequence``, so a hard-clipped BAM reports 0 rather than
         silently indexing into the wrong bases.  Index 0 of the examined slice
-        is always the base adjacent to the cleavage site, so the run is
+        is always the base adjacent to the aligned block, so the run is
         measured outward from the alignment in transcript orientation.
         """
         cigar = read.cigartuples

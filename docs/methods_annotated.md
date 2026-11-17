@@ -160,7 +160,7 @@ The CLI resolves protocol-aware motifs with `_default_tso_sequences()` and `_eff
 
 ### Clipped 3′ polyA tail
 
-`_polya_tail_stats()` returns `(soft_clip_len, terminal run, A-fraction)` for the transcript-3′ clip: the trailing clip counted on `A` for a forward alignment, the leading clip counted on `T` for a reverse one, reversed so index 0 is always the base adjacent to the cleavage site. Only CIGAR op 4 qualifies; op 5 returns `(0, 0, 0.0)` because hard-clipped bases are absent from `query_sequence` and indexing the aligned sequence would read alignment bases as a tail.
+`_polya_tail_stats()` returns `(soft_clip_len, terminal run, A-fraction)` for the transcript-3′ clip: the trailing clip counted on `A` for a forward alignment, the leading clip counted on `T` for a reverse one, reversed so index 0 is always the base adjacent to the aligned block. Only CIGAR op 4 qualifies; op 5 returns `(0, 0, 0.0)` because hard-clipped bases are absent from `query_sequence` and indexing the aligned sequence would read alignment bases as a tail.
 
 `_has_polya_tail()` requires `run >= POLYA_TAIL_MIN_LENGTH`. `POLYA_TAIL_MIN_FRAC` defaults to 0 and is therefore not part of the decision: a genuine 12 bp tail inside a 60 bp clip carrying adapter or TSO sequence scores about 0.2, so requiring both would implicitly demand a ~45 bp tail.
 
