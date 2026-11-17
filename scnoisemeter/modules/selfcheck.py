@@ -220,6 +220,26 @@ def run_invariants(sm, ct=None, result=None) -> list:
             "denominator each of them is reported over.",
             n_reads_classified=classified, exceeding=over)
 
+    # -- priming labels partition the reads with an observed site -------------
+    # Integer form of "the three label fractions sum to one". All four counts
+    # are None without --reference, and then neither check runs.
+    site = _num(getattr(sm, "n_priming_site_observed", None))
+    labels = {attr: _num(getattr(sm, attr, None))
+              for attr in ("n_priming_templated", "n_priming_nontemplated",
+                           "n_priming_ambiguous")}
+    if site is not None and None not in labels.values():
+        label_sum = sum(labels.values())
+        add("priming_labels_sum_to_site_reads", label_sum == site, ERROR,
+            "Every read with an observed priming site carries exactly one "
+            "label, so the templated, non-templated and ambiguous counts sum "
+            "to n_priming_site_observed.",
+            n_priming_site_observed=site, label_sum=label_sum, **labels)
+    if site is not None and classified is not None:
+        add("priming_site_reads_not_above_classified", site <= classified, ERROR,
+            "Reads with an observed priming site are classified reads, so "
+            "n_priming_site_observed cannot exceed n_reads_classified.",
+            n_priming_site_observed=site, n_reads_classified=classified)
+
     unassigned = _num(getattr(sm, "n_reads_unassigned", None))
     if classified is not None and unassigned is not None:
         add("unassigned_not_above_classified", unassigned <= classified, ERROR,

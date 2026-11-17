@@ -62,7 +62,15 @@ def healthy():
     sm.five_prime_anchored_frac = 0.80
     sm.both_ends_anchored_frac = 0.75
     sm.umi_sequence_diversity = {"exonic_sense": 0.4}
+    sm.n_priming_site_observed = 100
+    sm.n_priming_templated = 30
+    sm.n_priming_nontemplated = 50
+    sm.n_priming_ambiguous = 20
     return sm, _CT(3)
+
+
+PRIMING_SUM = "priming_labels_sum_to_site_reads"
+PRIMING_BOUND = "priming_site_reads_not_above_classified"
 
 
 def _names(checks, severity=ERROR):
@@ -91,6 +99,14 @@ class TestHealthyResultSet:
         checks = run_invariants(sm, ct, _Result())
         assert all(c.ok for c in checks)
         assert "invariants hold" in summarise(checks)
+
+    def test_priming_label_checks_run_and_pass(self, healthy):
+        sm, ct = healthy
+        by_name = {c.name: c for c in run_invariants(sm, ct, _Result())}
+        assert by_name[PRIMING_SUM].ok
+        assert by_name[PRIMING_SUM].severity == ERROR
+        assert by_name[PRIMING_BOUND].ok
+        assert by_name[PRIMING_BOUND].severity == ERROR
 
 
 class TestEachInvariantCanFail:
@@ -150,6 +166,21 @@ class TestEachInvariantCanFail:
         assert "read_fractions_sum_to_one" in _names(
             run_invariants(sm, ct, _Result()))
 
+    def test_priming_labels_do_not_sum_to_site_reads(self, healthy):
+        sm, ct = healthy
+        sm.n_priming_ambiguous = 25
+        names = _names(run_invariants(sm, ct, _Result()))
+        assert PRIMING_SUM in names
+        assert PRIMING_BOUND not in names
+
+    def test_priming_site_reads_above_classified(self, healthy):
+        sm, ct = healthy
+        sm.n_priming_site_observed = 5000
+        sm.n_priming_templated = 4930
+        names = _names(run_invariants(sm, ct, _Result()))
+        assert PRIMING_BOUND in names
+        assert PRIMING_SUM not in names
+
 
 class TestSeverity:
     def test_reservoir_estimation_downgrades_conservation_to_a_warning(self, healthy):
@@ -183,6 +214,41 @@ class TestAbsentInputs:
         assert "n_cells_matches_cell_table" not in names
         # the taxonomy check needs no sample data and must still run
         assert "artifact_candidate_categories_subset_of_broad" in names
+
+    def test_without_reference_the_priming_checks_are_skipped(self, healthy):
+        """Without --reference the four counts are None: not observable, not 0."""
+        sm, ct = healthy
+        sm.n_priming_site_observed = sm.n_priming_templated = None
+        sm.n_priming_nontemplated = sm.n_priming_ambiguous = None
+        checks = run_invariants(sm, ct, _Result())
+        names = {c.name for c in checks}
+        assert PRIMING_SUM not in names
+        assert PRIMING_BOUND not in names
+        assert failures(checks, ERROR) == []
+
+    @pytest.mark.parametrize("attr", ["n_priming_templated",
+                                      "n_priming_nontemplated",
+                                      "n_priming_ambiguous"])
+    def test_absent_label_count_skips_only_the_label_sum(self, healthy, attr):
+        sm, ct = healthy
+        setattr(sm, attr, None)
+        names = {c.name for c in run_invariants(sm, ct, _Result())}
+        assert PRIMING_SUM not in names
+        assert PRIMING_BOUND in names
+
+    def test_absent_site_count_skips_both(self, healthy):
+        sm, ct = healthy
+        sm.n_priming_site_observed = None
+        names = {c.name for c in run_invariants(sm, ct, _Result())}
+        assert PRIMING_SUM not in names
+        assert PRIMING_BOUND not in names
+
+    def test_absent_classified_count_skips_only_the_site_bound(self, healthy):
+        sm, ct = healthy
+        sm.n_reads_classified = None
+        names = {c.name for c in run_invariants(sm, ct, _Result())}
+        assert PRIMING_BOUND not in names
+        assert PRIMING_SUM in names
 
 
 class TestQCReport:
