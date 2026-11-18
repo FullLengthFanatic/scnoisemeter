@@ -5,9 +5,97 @@ detected can move a reported value by orders of magnitude, so `cohort` refuses
 to pool result sets silently across versions. Any release that alters a
 reported number says so here.
 
-## Unreleased
+## 0.11.0 - <date set by Simone>
 
-No reported value changes.
+### Reported values that change
+
+The values below are slice values: chr21 and chr22 of two libraries, and only
+part of each chromosome (regions given per library). Whole-library values
+follow once those runs are done.
+
+- **The internal-priming flag takes the definition of flight-polyafilter-bench
+  by default.** Under the new default `--priming-criterion count`,
+  `n_polya_priming` and `polya_priming_frac` count the reads whose priming
+  site was observed and labelled templated: 8 or more adenines in the 20 nt of
+  reference downstream of the site. Through 0.10.0 they counted the reads with
+  6 or more consecutive adenines in the 20 bp past the alignment end on `+`
+  (T's before it on `-`), tested on every read. `--priming-criterion a_run`
+  reproduces 0.10.0, and a run that named any criterion gets the values it
+  got before.
+  - 10x 3' v4, retinal organoid cells (1179), chr21:30,000,001-46,709,983 and
+    chr22:1-37,000,000, 8,141,019 reads: `n_polya_priming` 149,273 to 9,735,
+    `polya_priming_frac` 1.834% to 0.120%. Under `a_run` every read was tested
+    at its alignment end. Under `count` only the 21,613 reads with an observed
+    site can be flagged.
+  - PacBio Kinnex long reads of a FLIGHT-seq library from the same cell pool
+    (BD67), chr21:1-39,000,000 and chr22:1-30,000,000, 717,526 reads:
+    `n_polya_priming` 9,022 to 244,001, `polya_priming_frac` 1.257% to 34.006%.
+    The aligner often aligns the templated adenines, so the alignment end, and
+    the old window with it, lies past them. `count` starts the window where
+    the terminal A run starts.
+  - Everything built from the same per-read flag moves with it: the per-cell
+    `n_polya` of `cell_metrics.tsv` (1179: 25,254 of 39,487 cells change,
+    column sum 137,107 to 8,678), `median_polya_rate` of
+    `cluster_metrics.tsv`, `n_polya_priming` of `per_well_metrics.tsv`, the
+    "Internal polyA priming" bar of the HTML report and the `cohort` tables.
+- **`three_prime_anchored_frac` moves only with
+  `--anchor-veto-internal-priming`.** The veto drops the reads flagged for
+  internal priming from the 3' anchor. Under `count` those are the reads
+  labelled templated, never a read without an observed site.
+  `both_ends_anchored_frac` and `full_length_read_frac` move with it.
+  `three_prime_at_pas_site_frac` does not, because the veto does not apply to
+  the PAS-restricted subset. Without the veto, the default, no anchoring
+  fraction moves.
+- **New counts: the priming label of each read with an observed site.** The
+  site is the benchmark's, chosen by the new `--priming-site-rule`. `clip`
+  (short reads) is the alignment end of a read whose `pa` tag, or without one
+  its 3' soft clip, counts 20 or more adenines (in the clip also 90% of its
+  bases). `a_run` (long reads) is where the terminal A run starts, aligned
+  adenines included: 10 or more, one non-adenine allowed. `auto`, the
+  default, picks by platform. The label reads the 20 nt of reference
+  downstream of the site: 8 or more adenines templated, 4 or fewer
+  non-templated, 5 to 7 ambiguous. Every criterion computes it.
+  - `read_metrics.tsv` and `per_well_metrics.tsv` gain
+    `n_priming_site_observed`, `n_priming_templated`,
+    `n_priming_nontemplated` and `n_priming_ambiguous`, empty without
+    `--reference`. `read_metrics.tsv` gains `priming_templated_frac`,
+    `priming_nontemplated_frac` and `priming_ambiguous_frac`, each label's
+    share of the reads with a site, written as `not observable` without
+    `--reference` or when no read has a site. The MultiQC JSON carries
+    `n_priming_site_observed` and the three shares, left out without
+    `--reference` and null when no read has a site.
+  - 1179, same regions: 21,613 reads with a site, `priming_templated_frac`
+    45.04% (non-templated 29.98%, ambiguous 24.98%). The benchmark's per-read
+    share over the `pa`-tagged reads of these regions is 45.70%. The gap is
+    322 reads with a poly(A) soft clip and no `pa` tag, which `clip` counts
+    and the benchmark's 10x tables leave out.
+  - BD67, same regions: 601,298 reads with a site, `priming_templated_frac`
+    40.58% (non-templated 35.59%, ambiguous 23.83%). The benchmark's share
+    over these regions is 39.66%. It counts only reads at MAPQ 20 or more
+    with 30 nt of bead sequence after the run; with those filters on the same
+    reads the gap is 0.005 points.
+- **`run_info.json` records the site rule and the label definition.** Its
+  `priming` block gains `site_rule` (the rule in use, after `auto` resolves),
+  `definition_source` (`flight-polyafilter-bench 1.2.0`), `templated_min`,
+  `nontemplated_max` and `label_window`. `cohort` now also compares the site
+  rule where it overrides the one `auto` gives the sample's platform, and the
+  label definition under `count`. A cohort that pools 0.10.0 results with
+  0.11.0 defaults gets the "different polyA settings" warning next to the
+  version warning.
+- **Two new `qc.json` checks**, both errors: `priming_labels_sum_to_site_reads`
+  (the three label counts sum to `n_priming_site_observed`) and
+  `priming_site_reads_not_above_classified` (`n_priming_site_observed` does
+  not exceed `n_reads_classified`). Neither runs without `--reference`, so
+  `n_checks` grows by two with a reference and stays as it was without.
+- **What does not move.** The read and base fractions of every category,
+  `intergenic_hotspot` (a locus signature: its A-run rule is the same under
+  every `--priming-criterion`), `n_polya_tail` and `polya_tail_frac` (reads
+  whose 3' soft clip starts with 8 or more adenines), and the anchoring
+  fractions without the veto. On both libraries above and on the test
+  fixtures, the values 0.10.0 wrote to `read_metrics.tsv`, the MultiQC JSON,
+  `qc.json` and `cell_metrics.tsv` are identical under
+  `--priming-criterion a_run`, `n_checks` aside, and under the defaults
+  identical apart from the values named here.
 
 ### Removed
 
