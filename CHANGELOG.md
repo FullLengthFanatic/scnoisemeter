@@ -9,9 +9,9 @@ reported number says so here.
 
 ### Reported values that change
 
-The values below are slice values: chr21 and chr22 of two libraries, and only
-part of each chromosome (regions given per library). Whole-library values
-follow once those runs are done.
+The values below come from whole-library runs of two libraries, under 0.10.0
+and under the 0.11.0 defaults. A check on sub-regions of chr21 and chr22 of
+the same libraries gave the same pattern.
 
 - **The internal-priming flag takes the definition of flight-polyafilter-bench
   by default.** Under the new default `--priming-criterion count`,
@@ -22,22 +22,23 @@ follow once those runs are done.
   (T's before it on `-`), tested on every read. `--priming-criterion a_run`
   reproduces 0.10.0, and a run that named any criterion gets the values it
   got before.
-  - 10x 3' v4, retinal organoid cells (1179), chr21:30,000,001-46,709,983 and
-    chr22:1-37,000,000, 8,141,019 reads: `n_polya_priming` 149,273 to 9,735,
-    `polya_priming_frac` 1.834% to 0.120%. Under `a_run` every read was tested
-    at its alignment end. Under `count` only the 21,613 reads with an observed
-    site can be flagged.
+  - 10x 3' v4, retinal organoid cells (1179), whole library, 573,890,175
+    reads: `n_polya_priming` 11,447,261 to 717,246, `polya_priming_frac`
+    1.995% to 0.125%. Under `a_run` every read was tested at its alignment
+    end. Under `count` only the 1,479,475 reads with an observed site can be
+    flagged.
   - PacBio Kinnex long reads of a FLIGHT-seq library from the same cell pool
-    (BD67), chr21:1-39,000,000 and chr22:1-30,000,000, 717,526 reads:
-    `n_polya_priming` 9,022 to 244,001, `polya_priming_frac` 1.257% to 34.006%.
-    The aligner often aligns the templated adenines, so the alignment end, and
-    the old window with it, lies past them. `count` starts the window where
-    the terminal A run starts.
+    (BD67), whole library, 61,074,922 reads: `n_polya_priming` 992,854 to
+    22,392,047, `polya_priming_frac` 1.626% to 36.663%. The aligner often
+    aligns the templated adenines, so the alignment end, and the old window
+    with it, lies past them. `count` starts the window where the terminal A
+    run starts.
   - Everything built from the same per-read flag moves with it: the per-cell
-    `n_polya` of `cell_metrics.tsv` (1179: 25,254 of 39,487 cells change,
-    column sum 137,107 to 8,678), `median_polya_rate` of
-    `cluster_metrics.tsv`, `n_polya_priming` of `per_well_metrics.tsv`, the
-    "Internal polyA priming" bar of the HTML report and the `cohort` tables.
+    `n_polya` of `cell_metrics.tsv` (1179: 174,707 of its 307,675 barcodes,
+    those with 10 or more classified reads, change; column sum 11,032,681 to
+    702,541), `median_polya_rate` of `cluster_metrics.tsv`, `n_polya_priming`
+    of `per_well_metrics.tsv`, the "Internal polyA priming" bar of the HTML
+    report and the `cohort` tables.
 - **`three_prime_anchored_frac` moves only with
   `--anchor-veto-internal-priming`.** The veto drops the reads flagged for
   internal priming from the 3' anchor. Under `count` those are the reads
@@ -64,16 +65,22 @@ follow once those runs are done.
     `--reference` or when no read has a site. The MultiQC JSON carries
     `n_priming_site_observed` and the three shares, left out without
     `--reference` and null when no read has a site.
-  - 1179, same regions: 21,613 reads with a site, `priming_templated_frac`
-    45.04% (non-templated 29.98%, ambiguous 24.98%). The benchmark's per-read
-    share over the `pa`-tagged reads of these regions is 45.70%. The gap is
-    322 reads with a poly(A) soft clip and no `pa` tag, which `clip` counts
-    and the benchmark's 10x tables leave out.
-  - BD67, same regions: 601,298 reads with a site, `priming_templated_frac`
-    40.58% (non-templated 35.59%, ambiguous 23.83%). The benchmark's share
-    over these regions is 39.66%. It counts only reads at MAPQ 20 or more
-    with 30 nt of bead sequence after the run; with those filters on the same
-    reads the gap is 0.005 points.
+  - 1179, whole library: 1,479,475 reads with a site,
+    `priming_templated_frac` 48.48% (non-templated 28.25%, ambiguous
+    23.27%). The benchmark's per-read share over the `pa`-tagged reads is
+    48.85%. The gap is 12,479 reads with a poly(A) soft clip and no `pa` tag,
+    which `clip` counts and the benchmark's 10x tables leave out. The
+    benchmark reports 10x shares per molecule, at MAPQ 255 and in called
+    cells: 48.40% for this library. Duplicates, MAPQ and cell calling make
+    the step from its per-read share.
+  - BD67, whole library: 54,002,545 reads with a site,
+    `priming_templated_frac` 41.46% (non-templated 35.89%, ambiguous
+    22.65%). The benchmark's long-read sites cover chr1-22 and chrX. There
+    scNoiseMeter finds 51,197,024 reads with a site, 40.95% templated,
+    against the benchmark's 41.17%. The benchmark counts only reads at MAPQ
+    20 or more with 30 nt of bead sequence after the run; with those filters
+    on the same reads the two shares are equal. The other 2,805,521 reads
+    with a site lie on chrM and chrY, 50.90% templated.
 - **`run_info.json` records the site rule and the label definition.** Its
   `priming` block gains `site_rule` (the rule in use, after `auto` resolves),
   `definition_source` (`flight-polyafilter-bench 1.2.0`), `templated_min`,
@@ -91,11 +98,12 @@ follow once those runs are done.
   `intergenic_hotspot` (a locus signature: its A-run rule is the same under
   every `--priming-criterion`), `n_polya_tail` and `polya_tail_frac` (reads
   whose 3' soft clip starts with 8 or more adenines), and the anchoring
-  fractions without the veto. On both libraries above and on the test
-  fixtures, the values 0.10.0 wrote to `read_metrics.tsv`, the MultiQC JSON,
-  `qc.json` and `cell_metrics.tsv` are identical under
-  `--priming-criterion a_run`, `n_checks` aside, and under the defaults
-  identical apart from the values named here.
+  fractions without the veto. On both whole libraries, the values 0.10.0
+  wrote to `read_metrics.tsv`, the MultiQC JSON, `qc.json` and
+  `cell_metrics.tsv` are identical under the defaults apart from the values
+  named here and `n_checks`. Under `--priming-criterion a_run` they are
+  identical apart from `n_checks` on the chr21-22 sub-regions of both
+  libraries and on the test fixtures.
 
 ### Removed
 
