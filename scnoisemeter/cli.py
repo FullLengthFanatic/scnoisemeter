@@ -3365,7 +3365,7 @@ def _write_run_info(sm, output_dir: Path, sample_name: str, result=None) -> None
     """
     Machine-readable provenance next to the metrics.
 
-    `read_metrics.tsv` carries only numbers, so nothing downstream could tell
+    `read_metrics.tsv` carries no provenance, so nothing downstream could tell
     which tool version, platform or annotation produced them.  `cohort` needs
     exactly that to refuse to pool incomparable samples, and it is the record a
     reader of an archived result set needs anyway.

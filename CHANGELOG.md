@@ -77,7 +77,10 @@ the same libraries gave the same pattern.
     `priming_templated_frac` 41.46% (non-templated 35.89%, ambiguous
     22.65%). The benchmark's long-read sites cover chr1-22 and chrX. There
     scNoiseMeter finds 51,197,024 reads with a site, 40.95% templated,
-    against the benchmark's 41.17%. The benchmark counts only reads at MAPQ
+    against 41.17% over the benchmark's long-read sites
+    (`long_read_sites.parquet`, weighted by accepted reads). That share is
+    computed here, not one the benchmark reports: its BD67 share, 19.4%, is
+    over short-read molecules. The benchmark counts only reads at MAPQ
     20 or more with 30 nt of bead sequence after the run; with those filters
     on the same reads the two shares are equal. The other 2,805,521 reads
     with a site lie on chrM and chrY, 50.90% templated.

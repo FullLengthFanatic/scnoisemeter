@@ -426,7 +426,11 @@ TSS and TSO sources with how each was obtained. Since 0.9 it also carries a `pri
 `polya_min_support`, the internal-priming `criterion`, and whether the anchoring veto was on --
 three settings that change what a reported number means, so `cohort` can flag runs that
 disagree on them, and with `intergenic_reclassification_sampled`, which is true when the
-intergenic categories were estimated from the reservoir. `read_metrics.tsv` holds only numbers, so this is what lets a later reader, or
+intergenic categories were estimated from the reservoir. Since 0.11.0 the `priming` block also
+holds `site_rule` (the `--priming-site-rule` in use, after `auto` resolves), `definition_source`,
+`templated_min`, `nontemplated_max` and `label_window`; `cohort` compares the site rule where it
+overrides the platform's and, under `count`, the label definition. `read_metrics.tsv` holds no
+provenance, so this is what lets a later reader, or
 `cohort`, establish whether two result sets are comparable.
 
 ### `cohort.summary.tsv`

@@ -427,7 +427,7 @@ does on its own.
 | `three_prime_anchored_frac` | 95.68% | Nearly every read's 3′ end sits within 50 bp of an atlas polyA site that passes the default support filter, the signature of an oligo(dT)-primed protocol working as designed. Version 0.8.0 loaded the atlas whole and reported 99.62% for this sample. |
 | `five_prime_anchored_frac` | 84.30% | Lower than the 3′ figure, which is the normal asymmetry: 5′ completeness depends on reverse transcription reaching the cap. |
 | `both_ends_anchored_frac` | 81.36% | Candidate complete molecules. Not a transcript-compatibility claim. |
-| `polya_priming_frac` (`multiqc.json`) | 2.31% | The internal-priming flag. Sits alongside an `intergenic_hotspot` of 0.006%, i.e. flagged reads are not forming enriched intergenic loci here. |
+| `polya_priming_frac` (`multiqc.json`) | 2.31% | The internal-priming flag under `--priming-criterion a_run`, the default of 0.10.0. Under the 0.11.0 default, `count`, the flag marks the reads labelled templated (§3.3.1), which on Kinnex long reads is a much larger share (see the changelog). Sits alongside an `intergenic_hotspot` of 0.006%, i.e. flagged reads are not forming enriched intergenic loci here. |
 | `tso_invasion_frac` (`multiqc.json`) | 0.0045% | Low. This metric is highly sensitive to detection settings — see §7. |
 | `mitochondrial` | 3.77% | Interpret against the tissue, not a universal threshold. |
 
@@ -623,6 +623,6 @@ Do not relabel `broad_noncanonical_read_frac` as percent contamination. Report i
 categories and the narrower artifact-candidate composition alongside it.
 
 Every run writes `<sample>.run_info.json` next to the metrics, carrying the version, platform,
-strandedness, annotation sources, and the priming settings above. The metrics table itself holds only numbers, so this file is
+strandedness, annotation sources, and the priming settings above. The metrics table itself holds no provenance, so this file is
 the record that makes an archived result set interpretable later, and it is what the cross-sample
 comparison uses to decide whether two samples may be placed side by side at all.
