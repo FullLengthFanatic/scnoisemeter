@@ -458,3 +458,26 @@ def test_per_well_row_carries_the_label_counts(value):
     row = _build_per_well_metrics_row(sm, plate_id="P1", well_id="A1",
                                       bam_path="w.bam", well_meta_from_sheet=None)
     assert [row[k] for k in LABEL_COUNTS] == [value] * 4
+
+
+# ---------------------------------------------------------------------------
+# --anchor-veto-internal-priming reads the sixth endpoint field
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("veto,anchored", [(False, 1.0), (True, 0.75)])
+def test_anchor_veto_drops_only_the_flagged_read(veto, anchored, tmp_path):
+    from scnoisemeter.modules.metrics import compute_metrics
+    from scnoisemeter.modules.pipeline import SampleResult
+    from scnoisemeter.utils.bam_inspector import BamMetadata
+    result = SampleResult(tmp_path / "s.bam", BamMetadata(path=tmp_path / "s.bam"))
+    # four reads end at one poly(A) site; the sixth field is the per-read flag
+    result.exonic_sense_endpoints.extend([
+        ("chr1", "+", 1000, 5000, "templated", True),
+        ("chr1", "+", 1100, 5000, "nontemplated", False),
+        ("chr1", "+", 1200, 5000, "no_site", False),
+        ("chr1", "+", 1300, 5000, "five_fields"),       # written before 0.9
+    ])
+    result._polya_site_dict = {("chr1", "+"): [5000]}
+    result._anchor_veto_internal_priming = veto
+    sm, _ = compute_metrics(result, "s")
+    assert sm.three_prime_anchored_frac == anchored
