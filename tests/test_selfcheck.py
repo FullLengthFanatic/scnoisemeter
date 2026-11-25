@@ -173,6 +173,13 @@ class TestEachInvariantCanFail:
         assert PRIMING_SUM in names
         assert PRIMING_BOUND not in names
 
+    def test_priming_labels_short_of_site_reads(self, healthy):
+        sm, ct = healthy
+        sm.n_priming_ambiguous = 15                 # labels sum to 95, 100 reads have a site
+        names = _names(run_invariants(sm, ct, _Result()))
+        assert PRIMING_SUM in names
+        assert PRIMING_BOUND not in names
+
     def test_priming_site_reads_above_classified(self, healthy):
         sm, ct = healthy
         sm.n_priming_site_observed = 5000

@@ -201,6 +201,22 @@ def test_pa_tag_decides_the_clip_rule(name, minus):
     assert observed_site(read, "clip") == want
 
 
+# At the clip rule's minimum: 20 A's, in the clip or in the pa tag, give a
+# site and a tag of 19 does not.
+_AT_CLIP_MIN = {
+    "clip_of_20": SVector({}, 900, "100M20S", "C100 A20", None, 1000),
+    "tag_of_20": SVector({}, 900, "100M", "C100", 20, 1000),
+    "tag_of_19": SVector({}, 900, "100M", "C100", 19, None),
+}
+
+
+@pytest.mark.parametrize("name", _AT_CLIP_MIN)
+@pytest.mark.parametrize("minus", [False, True])
+def test_clip_rule_at_the_clip_minimum(name, minus):
+    read, want = build(_AT_CLIP_MIN[name], minus)
+    assert observed_site(read, "clip") == want
+
+
 @pytest.mark.parametrize("minus", [False, True])
 def test_clipped_polya_length(minus):
     s7 = S_VECTORS["S7"]
