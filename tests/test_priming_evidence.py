@@ -376,7 +376,8 @@ ONE_CONTIG = {"chrV": ["L1", "L2", "L4_6", "L5"]}
 TWO_CONTIGS = {"chrV1": ["L1", "L2"], "chrV2": ["L4_6", "L5"]}
 
 
-def _vector_library(tmp_path: Path, layout: dict) -> tuple[Path, Path]:
+def _vector_library(tmp_path: Path, layout: dict,
+                    table: dict = L_VECTORS) -> tuple[Path, Path]:
     """BAM and FASTA of *layout*, ``{contig: [vector id, ...]}``.
 
     Each vector takes a CONTIG_LEN block of its contig, planted as the
@@ -385,7 +386,7 @@ def _vector_library(tmp_path: Path, layout: dict) -> tuple[Path, Path]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     fasta = tmp_path / "vectors.fa"
     fasta.write_text("".join(
-        f">{name}\n{''.join(contig(L_VECTORS[v]) for v in vectors)}\n"
+        f">{name}\n{''.join(contig(table[v]) for v in vectors)}\n"
         for name, vectors in layout.items()
     ))
     pysam.faidx(str(fasta))
@@ -398,7 +399,7 @@ def _vector_library(tmp_path: Path, layout: dict) -> tuple[Path, Path]:
     with pysam.AlignmentFile(str(bam), "wb", header=header) as out:
         for name, vectors in layout.items():
             for block, v in enumerate(vectors):
-                fields = build(L_VECTORS[v], False)[0].to_dict()
+                fields = build(table[v], False)[0].to_dict()
                 fields.update(name=v, ref_name=name,
                               ref_pos=str(int(fields["ref_pos"]) + block * CONTIG_LEN))
                 out.write(pysam.AlignedSegment.from_dict(fields, header))
@@ -407,16 +408,17 @@ def _vector_library(tmp_path: Path, layout: dict) -> tuple[Path, Path]:
 
 
 def _run_vectors(tiny_gtf, tmp_path: Path, layout: dict, *, reference: bool,
-                 threads: int = 1) -> tuple[dict, dict]:
-    """``run --platform ont`` (site rule a_run) on the layout: read_metrics rows, MultiQC data."""
-    bam, fasta = _vector_library(tmp_path, layout)
+                 threads: int = 1, platform: str = "ont",
+                 table: dict = L_VECTORS) -> tuple[dict, dict]:
+    """``run --platform <platform>`` (default ont, rule a_run): read_metrics rows, MultiQC data."""
+    bam, fasta = _vector_library(tmp_path, layout, table)
     polya = tmp_path / "polya.bed"
     polya.write_text("chr1\t5990\t6010\tsite\t1\t+\n")
     out = tmp_path / "out"
     result = CliRunner().invoke(cli, [
         "run", "--bam", str(bam), "--gtf", str(tiny_gtf),
         "--polya-sites", str(polya), "--tss-db", "none",
-        "--platform", "ont", "--library-strand", "stranded",
+        "--platform", platform, "--library-strand", "stranded",
         "--threads", str(threads), "--no-cache", "--output-dir", str(out),
         *(["--reference", str(fasta)] if reference else []),
     ])
@@ -459,6 +461,15 @@ def test_label_counts_merge_across_contigs(threads, tiny_gtf, tmp_path):
                                     threads=threads)
     assert [metrics[k] for k in LABEL_COUNTS] == ["3", "1", "1", "1"]
     assert [multiqc[k] for k in LABEL_FRACS] == [0.33333333] * 3
+
+
+def test_short_reads_take_the_clip_rule_under_auto(tiny_gtf, tmp_path):
+    # S1 and S7 have a site under clip; under a_run S7 has none, GTG breaks its clipped A run
+    metrics, _ = _run_vectors(tiny_gtf, tmp_path, {"chrV": ["S1", "S7"]}, reference=True,
+                              platform="illumina_10x", table=S_VECTORS)
+    info = json.loads((tmp_path / "out" / "vectors.run_info.json").read_text())
+    assert info["priming"]["site_rule"] == "clip"
+    assert metrics["n_priming_site_observed"] == "2"
 
 
 @pytest.mark.parametrize("value", [None, 3])

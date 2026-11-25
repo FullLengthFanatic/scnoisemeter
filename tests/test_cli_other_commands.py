@@ -152,6 +152,7 @@ def test_run_plate_writes_plate_and_per_well_tables(tiny_bam, tiny_gtf, tmp_path
     wells = (out / "P1.per_well_metrics.tsv").read_text().splitlines()
     assert len(wells) == 3                      # header and two wells
     assert _metrics(out / "P1.read_metrics.tsv")["n_cells"] == "2"
+    assert json.loads((out / "P1.run_info.json").read_text())["priming"]["site_rule"] == "clip"
 
 
 def test_run_plate_checks_the_plate_result_before_writing(tiny_bam, tiny_gtf, tmp_path):
