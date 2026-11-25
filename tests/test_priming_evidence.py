@@ -227,6 +227,23 @@ class TestPrimingCriterionOption:
         with pytest.raises(ValueError, match=r"clip\|a_run"):
             ReadClassifier(MagicMock(splice_sites={}), priming_site_rule="auto")
 
+    def test_run_pipeline_without_a_site_rule_takes_the_platform_rule(self, tmp_path, monkeypatch):
+        # A Python caller that names no rule gets what --priming-site-rule auto gives
+        from scnoisemeter.constants import Platform
+        from scnoisemeter.modules import pipeline
+        from scnoisemeter.utils.bam_inspector import BamMetadata
+        seen = []
+
+        def worker(args):
+            seen.append(args["priming_site_rule"])
+            return pipeline.ContigResult(contig=args["contig"])
+
+        monkeypatch.setattr(pipeline, "_contig_worker", worker)
+        meta = BamMetadata(path=tmp_path / "10x.bam")
+        meta.platform = Platform.ILLUMINA_10X
+        pipeline.run_pipeline(tmp_path / "10x.bam", MagicMock(), meta, threads=1, contigs=["chr1"])
+        assert seen == ["clip"]
+
 
 # ---------------------------------------------------------------------------
 # Per-read priming label and the count criterion, on the Appendix A vectors

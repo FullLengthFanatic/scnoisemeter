@@ -53,7 +53,8 @@ the same libraries gave the same pattern.
   its 3' soft clip, counts 20 or more adenines (in the clip also 90% of its
   bases). `a_run` (long reads) is where the terminal A run starts, aligned
   adenines included: 10 or more, one non-adenine allowed. `auto`, the
-  default, picks by platform. The label reads the 20 nt of reference
+  default, picks by platform, and `run_pipeline` called without a rule
+  resolves it the same way. The label reads the 20 nt of reference
   downstream of the site: 8 or more adenines templated, 4 or fewer
   non-templated, 5 to 7 ambiguous. Every criterion computes it.
   - `read_metrics.tsv` and `per_well_metrics.tsv` gain

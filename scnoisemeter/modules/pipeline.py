@@ -59,6 +59,7 @@ from scnoisemeter.constants import (
 )
 from scnoisemeter.modules.annotation import AnnotationIndex
 from scnoisemeter.modules.classifier import ReadClassifier
+from scnoisemeter.modules.priming_site import site_rule_for
 from scnoisemeter.utils.bam_inspector import BamMetadata
 
 # ---------------------------------------------------------------------------
@@ -567,7 +568,7 @@ def run_pipeline(
     tso_min_match: int = TSO_MIN_MATCH_LENGTH,
     tso_check_polyg: bool = True,
     priming_criterion: str = PRIMING_CRITERION_DEFAULT,
-    priming_site_rule: str = "a_run",
+    priming_site_rule: Optional[str] = None,
     store_read_assignments: bool = False,
 ) -> SampleResult:
     """
@@ -599,6 +600,8 @@ def run_pipeline(
         If provided, reads whose CB tag (also -1-stripped) is not in this set
         are skipped and counted in n_reads_skipped_not_called_cell.
     """
+    if priming_site_rule is None:
+        priming_site_rule = site_rule_for(meta.platform)
     bam_path = str(bam_path)
 
     mapped_index = 0
