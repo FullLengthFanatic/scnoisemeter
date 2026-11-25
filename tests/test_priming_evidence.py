@@ -316,6 +316,16 @@ def test_count_flag_is_the_templated_label(classifier_for):
     assert res.is_polya_priming and res.priming_site_observed and res.priming_label == "templated"
 
 
+@pytest.mark.parametrize("minus", [False, True])
+@pytest.mark.parametrize("name,rule,label", [
+    ("L1", "a_run", "nontemplated"), ("L4_6", "a_run", "ambiguous"), ("S1", "clip", "nontemplated"),
+])
+def test_count_flag_leaves_other_labels_unflagged(name, rule, label, minus, classifier_for):
+    clf, read = classifier_for(name, minus, "count", rule)
+    res = clf._decorate_independent_flags(read, blank_result(clf, read))
+    assert (res.priming_site_observed, res.priming_label, res.is_polya_priming) == (True, label, False)
+
+
 def test_old_criteria_are_untouched(classifier_for):
     clf, read = classifier_for("L2", False, "a_run", "a_run")
     res = clf._decorate_independent_flags(read, blank_result(clf, read))
@@ -423,6 +433,8 @@ def test_label_counts_are_over_reads_with_an_observed_site(tiny_gtf, tmp_path):
     assert [metrics[k] for k in LABEL_FRACS] == ["0.333333"] * 3
     assert multiqc["n_priming_site_observed"] == 3
     assert [multiqc[k] for k in LABEL_FRACS] == [0.33333333] * 3
+    assert metrics["n_polya_priming"] == metrics["n_priming_templated"] == "1"
+    assert multiqc["polya_priming_frac"] == 0.25
 
 
 def test_label_counts_are_not_observable_without_reference(tiny_gtf, tmp_path):   # Review Focus 5
