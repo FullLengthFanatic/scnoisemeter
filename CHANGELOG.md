@@ -5,7 +5,7 @@ detected can move a reported value by orders of magnitude, so `cohort` refuses
 to pool result sets silently across versions. Any release that alters a
 reported number says so here.
 
-## 0.11.0 - <date set by Simone>
+## 0.11.0 - 2026-11-25
 
 ### Reported values that change
 
