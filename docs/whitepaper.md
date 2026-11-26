@@ -413,7 +413,7 @@ read. Both are reported, and the veto is off by default because it lowers the he
 
 The numbers below are from the example PacBio Kinnex run whose report is shown in the README
 screenshots: 37.4 M reads, 2,047 cells, aligned with `pbmm2`, annotated with GENCODE v45, with
-PolyASite 3.0 and FANTOM5 CAGE auto-downloaded, run with version 0.10.0. They are one sample on one protocol, not
+PolyASite 3.0 and FANTOM5 CAGE auto-downloaded, run with version 0.11.0. They are one sample on one protocol, not
 reference values — but they show what the fields look like together, which no field description
 does on its own.
 
@@ -427,7 +427,8 @@ does on its own.
 | `three_prime_anchored_frac` | 95.68% | Nearly every read's 3′ end sits within 50 bp of an atlas polyA site that passes the default support filter, the signature of an oligo(dT)-primed protocol working as designed. Version 0.8.0 loaded the atlas whole and reported 99.62% for this sample. |
 | `five_prime_anchored_frac` | 84.30% | Lower than the 3′ figure, which is the normal asymmetry: 5′ completeness depends on reverse transcription reaching the cap. |
 | `both_ends_anchored_frac` | 81.36% | Candidate complete molecules. Not a transcript-compatibility claim. |
-| `polya_priming_frac` (`multiqc.json`) | 2.31% | The internal-priming flag under `--priming-criterion a_run`, the default of 0.10.0. Under the 0.11.0 default, `count`, the flag marks the reads labelled templated (§3.3.1), which on Kinnex long reads is a much larger share (see the changelog). Sits alongside an `intergenic_hotspot` of 0.006%, i.e. flagged reads are not forming enriched intergenic loci here. |
+| `polya_priming_frac` (`multiqc.json`) | 55.34% | The reads labelled templated (§3.3.1) over all classified reads, under the default `--priming-criterion count`. 84.9% of the reads here have an observed priming site, so this sits close to the templated share; on short reads, where few reads reach the polyA, the same key is far smaller. Under `a_run`, the default of 0.10.0, this sample reads 2.31%. |
+| `priming_templated_frac` (`multiqc.json`) | 65.18% | The templated share of the 30.4 M reads with an observed priming site; 15.11% are ambiguous and 19.71% non-templated. This is the rate to compare between libraries and platforms. |
 | `tso_invasion_frac` (`multiqc.json`) | 0.0045% | Low. This metric is highly sensitive to detection settings — see §7. |
 | `mitochondrial` | 3.77% | Interpret against the tissue, not a universal threshold. |
 

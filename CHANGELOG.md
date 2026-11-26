@@ -5,6 +5,18 @@ detected can move a reported value by orders of magnitude, so `cohort` refuses
 to pool result sets silently across versions. Any release that alters a
 reported number says so here.
 
+## Unreleased
+
+### Docs
+
+- The README screenshots and the white paper's example table come from a
+  0.11.0 run of the same Kinnex sample, with the same arguments. They were
+  from 0.10.0. Only the internal-priming values differ: `polya_priming_frac`
+  reads 55.34% instead of 2.31%, because the default `--priming-criterion
+  count` flags the reads labelled templated, and the table gains
+  `priming_templated_frac` (65.18%). Every other value is unchanged. Two
+  previews also show the 0.11.0 report wording for intergenic hotspots.
+
 ## 0.11.0 - 2026-11-25
 
 ### Reported values that change
